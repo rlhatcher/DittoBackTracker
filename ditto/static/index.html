@@ -177,7 +177,8 @@ h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
 <script>
 const $ = s => document.querySelector(s);
 const SLOT_MIME = "application/x-ditto-slot";
-let state = null, selected = null, dragSrc = null, binMode = false, updating = false;
+let state = null, selected = null, dragSrc = null, binMode = false;
+let updating = false, updatingFromRev = null, updateTimer = null;
 
 function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
 
@@ -194,6 +195,13 @@ function render(s){
 
   if (s.version){
     $("#ver").textContent = "v" + s.version + (s.revision ? " · " + s.revision : "");
+  }
+  // The update completes when a snapshot shows the deployed revision has changed
+  // (the restart brought up the new build). Gate on that, not on the SSE
+  // reconnect — reconnects also happen on the routine stream rotation, well
+  // before any update, and clearing early could admit a second update.
+  if (updating && s.revision && s.revision !== updatingFromRev){
+    endUpdating();
   }
   updateBtnState(s);
 
@@ -519,12 +527,26 @@ $("#done").onclick = async () => {
   await fetch("/api/session/end", {method:"POST"});
 };
 
+function endUpdating(){ updating = false; clearTimeout(updateTimer); updateTimer = null; }
+
 $("#update").onclick = async () => {
   const btn = $("#update");
   if (btn.disabled) return;
   if (!confirm("Update to the latest version and restart? The device will briefly disconnect.")) return;
   updating = true;
+  // Remember the revision we're leaving; render() clears `updating` once a
+  // snapshot reports a different one (the new build is up).
+  updatingFromRev = state ? state.revision : null;
   btn.disabled = true; btn.textContent = "Updating…"; btn.className = "link";
+  // Safety net: if no new revision ever arrives (restart failed to come back),
+  // don't leave the button stuck forever.
+  clearTimeout(updateTimer);
+  updateTimer = setTimeout(() => {
+    if (!updating) return;
+    endUpdating();
+    if (state) render(state);
+    fail("Update didn't confirm — reload the page to check");
+  }, 180000);
   let j;
   try {
     const r = await fetch("/api/update", {method:"POST"});
@@ -532,16 +554,17 @@ $("#update").onclick = async () => {
     if (!r.ok){
       // 409 = busy, 502 = update failed. Restore the button so they can retry.
       fail(j.error || "Update failed");
-      updating = false; updateBtnState(state);
+      endUpdating(); updateBtnState(state);
       return;
     }
   } catch {
     fail("Update failed — check the connection");
-    updating = false; updateBtnState(state);
+    endUpdating(); updateBtnState(state);
     return;
   }
-  // Success: the service is restarting. SSE will drop and EventSource
-  // reconnects on its own; the next snapshot shows the new revision.
+  // Success: the service is restarting. `updating` stays set until a snapshot
+  // shows the new revision (see render), keeping the button locked so a second
+  // update can't start while the restart is pending.
   $("#msg").textContent = "Updating… the page will reconnect"; $("#msg").className = "msg";
 };
 
@@ -549,11 +572,6 @@ const es = new EventSource("/api/events");
 let reconnectTimer = null;
 es.onopen = () => {
   if (reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
-  // A reconnect while "updating" means the post-update restart has come back:
-  // clear the in-progress lock so the button reflects the fresh snapshot. The
-  // page isn't reloaded across an update (EventSource just reconnects), so
-  // nothing else would reset it and the button would stay stuck on "Updating…".
-  if (updating){ updating = false; if (state) render(state); }
 };
 es.onmessage = e => render(JSON.parse(e.data));
 es.onerror = () => {
