@@ -31,9 +31,14 @@ if [ "$HERE" != "$SRC" ]; then
   echo "  git clone <url> $SRC && cd $SRC && ./install.sh" >&2
   exit 1
 fi
-if [ ! -d "$SRC/.git" ]; then
-  echo "error: $SRC is not a git checkout, so over-the-air updates can't pull." >&2
-  echo "Clone the repo to $SRC rather than copying it." >&2
+if ! git -C "$SRC" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "error: $SRC is not a valid git checkout, so over-the-air updates" >&2
+  echo "can't pull. Clone the repo to $SRC rather than copying it." >&2
+  exit 1
+fi
+if ! git -C "$SRC" remote get-url origin >/dev/null 2>&1; then
+  echo "error: $SRC has no 'origin' remote, so over-the-air updates can't" >&2
+  echo "fetch. Clone it from your GitHub remote to $SRC." >&2
   exit 1
 fi
 
