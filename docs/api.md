@@ -36,6 +36,7 @@ Full snapshot. The same object is pushed over `/api/events`.
     "can_write": true
   },
   "panel": { "led": false, "button": false, "oled": false },
+  "slot_count": 99,
   "slots": [
     {
       "slot": 5,
@@ -60,6 +61,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `battery.available` | `false` when no gauge is fitted; the other battery fields are then `null` |
 | `battery.can_write` | `false` blocks writes. True when charging or when no gauge is present |
 | `panel` | Empty object when running `--headless` |
+| `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
 
 Slot `state` is one of `converting`, `staged`, `synced`, `error`. Slots with no
 entry are absent from the array. `synced` is derived from
@@ -115,6 +117,13 @@ is there, moving the previous entry to the trash.
 Clear slot `n`. The entry moves to the trash and `BT.WAV` is removed from the
 pedal on the next pass. A recorded `LOOP.WAV` in the same slot is left alone.
 
+```json
+{ "ok": true, "trash_id": 7 }
+```
+
+`trash_id` names the entry this call created, for a subsequent restore. It is
+`null` if the slot was already empty.
+
 ---
 
 ## POST /api/slots/&lt;n&gt;/move
@@ -168,6 +177,11 @@ Server-sent events. One `data:` frame containing a full state snapshot on
 connect, then another on every change. A comment line is sent every 15 s to keep
 the connection open.
 
+The stream is closed after five minutes and the browser's `EventSource`
+reconnects on its own. Each stream holds a server thread, so they are retired
+rather than left open indefinitely — a client that reconnects needs no special
+handling, but a hand-rolled consumer should expect the stream to end.
+
 ```bash
 curl -N http://dittobacktracker.local/api/events
 ```
@@ -176,6 +190,16 @@ curl -N http://dittobacktracker.local/api/events
 
 ## Errors
 
-`400` with `{"error": "..."}` for bad input — unknown slot number, a
-non-audio file, or a file ffprobe can't read. `404` for a missing trash entry.
+| Status | Where | Meaning |
+|---|---|---|
+| `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `DELETE /api/slots/<n>`, `POST /api/upload` | Bad input: slot out of range, non-audio file, or a file ffprobe can't read. Body is `{"error": "..."}` |
+| `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
+| `404` | `POST /api/trash/<id>/restore` | No such trash entry |
+
+`POST /api/upload` is the exception to the rule. It is a batch, so it returns
+`201` even when some files were rejected, and reports those per file in
+`errors` — a `400` from it means the whole request was unusable (no `file`
+part at all, or a `start` outside 1–99). Check `errors` on a `201`; don't
+treat `201` as "everything landed".
+
 Anything else is a bug.

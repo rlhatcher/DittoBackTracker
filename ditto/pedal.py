@@ -10,14 +10,29 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 from . import config, media
+
+# A wedged or half-unplugged USB device makes mount(8) block indefinitely.
+# The monitor thread calls mount() and the shutdown path calls umount(), so an
+# untimed call there would freeze pedal detection or stop the device powering
+# off — better to surface it as an error the panel can show.
+_MOUNT_TIMEOUT = 30.0
 
 
 class PedalError(Exception):
     pass
+
+
+def _run(cmd, what: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=_MOUNT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise PedalError(f"{what} timed out after {int(_MOUNT_TIMEOUT)}s") from None
 
 
 def present() -> bool:
@@ -35,8 +50,7 @@ def mount() -> None:
     if not present():
         raise PedalError("pedal not connected")
     config.MOUNT.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(["mount", str(config.MOUNT)],
-                       capture_output=True, text=True)
+    r = _run(["mount", str(config.MOUNT)], "mount")
     if r.returncode != 0:
         raise PedalError(f"mount failed: {r.stderr.strip()}")
 
@@ -46,15 +60,12 @@ def unmount() -> None:
     if not mounted():
         return
     os.sync()
-    r = subprocess.run(["umount", str(config.MOUNT)],
-                       capture_output=True, text=True)
+    r = _run(["umount", str(config.MOUNT)], "unmount")
     if r.returncode != 0:
         # Retry once after a beat; a lingering handle is the usual cause.
-        import time
         time.sleep(1.0)
         os.sync()
-        r = subprocess.run(["umount", str(config.MOUNT)],
-                           capture_output=True, text=True)
+        r = _run(["umount", str(config.MOUNT)], "unmount")
         if r.returncode != 0:
             raise PedalError(f"unmount failed: {r.stderr.strip()}")
 

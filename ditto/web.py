@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from flask import (Flask, Response, jsonify, request,
@@ -16,6 +19,12 @@ from .core import Service
 
 STATIC = Path(__file__).parent / "static"
 LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
+
+# Each open stream holds a server thread for its whole life, and there are only
+# a handful. Retiring a stream periodically lets EventSource reconnect (it does
+# so on its own) and reclaims threads left behind by a sleeping phone, so a
+# handful of stale tabs can't lock everyone out of the control API.
+SSE_MAX_SECONDS = 300.0
 
 
 def slot_from_name(name: str) -> int | None:
@@ -28,6 +37,21 @@ def slot_from_name(name: str) -> int | None:
 
 def create_app(service: Service) -> Flask:
     app = Flask(__name__, static_folder=None)
+
+    @app.before_request
+    def block_cross_site():
+        """There is no auth, so any page the phone happens to visit could
+        otherwise POST to the pedal. Same-origin and header-less clients
+        (curl, the test suite) are unaffected."""
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return None
+        site = request.headers.get("Sec-Fetch-Site")
+        if site is not None and site not in ("same-origin", "same-site", "none"):
+            return jsonify(error="cross-site request rejected"), 403
+        origin = request.headers.get("Origin")
+        if origin and origin != request.host_url.rstrip("/"):
+            return jsonify(error="cross-site request rejected"), 403
+        return None
 
     @app.get("/")
     def index():
@@ -52,14 +76,19 @@ def create_app(service: Service) -> Flask:
 
         fd, tmp = tempfile.mkstemp(dir=str(config.DATA),
                                    suffix=Path(name).suffix.lower())
-        import os
         os.close(fd)
         tmp_path = Path(tmp)
-        f.save(str(tmp_path))
         try:
+            f.save(str(tmp_path))
+            # On success service.upload owns tmp_path — it is moved into
+            # sources/ or unlinked there, so we must not touch it again.
             row = service.upload(slot, tmp_path, Path(name).stem)
         except ValueError as e:
+            tmp_path.unlink(missing_ok=True)
             return jsonify(error=str(e)), 400
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
         return jsonify(row), 201
 
     @app.post("/api/upload")
@@ -104,7 +133,7 @@ def create_app(service: Service) -> Flask:
             for f in files:
                 name = f.filename or "track"
                 n = slot_from_name(name)
-                if n is not None and n not in taken:
+                if n is not None and n not in reserved:
                     taken.add(n)
                     reserved.add(n)
                     planned.append((n, f, name))
@@ -118,45 +147,56 @@ def create_app(service: Service) -> Flask:
                     return i
             return None
 
-        import os
         for n, f, name in planned:
+            # Rejected before slot resolution: a file we won't accept must not
+            # consume a free slot on its way out.
+            if Path(name).suffix.lower() not in config.AUDIO_SUFFIXES:
+                errors.append({"name": name, "error": "not an audio file"})
+                continue
             if n is None:
                 n = next_free()
             if n is None:
                 errors.append({"name": name, "error": "no free slots"})
                 continue
-            if Path(name).suffix.lower() not in config.AUDIO_SUFFIXES:
-                errors.append({"name": name, "error": "not an audio file"})
-                continue
             fd, tmp = tempfile.mkstemp(dir=str(config.DATA),
                                        suffix=Path(name).suffix.lower())
             os.close(fd)
             tmp_path = Path(tmp)
-            f.save(str(tmp_path))
             try:
+                f.save(str(tmp_path))
                 results.append(service.upload(n, tmp_path, Path(name).stem))
             except ValueError as e:
+                tmp_path.unlink(missing_ok=True)
                 errors.append({"name": name, "error": str(e)})
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
         return jsonify(added=results, errors=errors), 201
 
     @app.delete("/api/slots/<int:slot>")
     def clear(slot: int):
-        service.clear(slot)
-        return jsonify(ok=True)
+        try:
+            trash_id = service.clear(slot)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        return jsonify(ok=True, trash_id=trash_id)
 
     @app.post("/api/slots/<int:slot>/move")
     def move(slot: int):
         body = request.get_json(silent=True) or {}
         try:
             service.move(slot, int(body.get("to", 0)))
-        except ValueError as e:
+        except (TypeError, ValueError) as e:
             return jsonify(error=str(e)), 400
         return jsonify(ok=True)
 
     @app.post("/api/slots/<int:slot>/retry")
     def retry(slot: int):
-        service.retry(slot)
+        try:
+            service.retry(slot)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
         return jsonify(ok=True)
 
     @app.post("/api/trash/<int:trash_id>/restore")
@@ -174,22 +214,34 @@ def create_app(service: Service) -> Flask:
     @app.get("/api/events")
     def events():
         q = service.subscribe()
+        released = threading.Event()
+
+        def release():
+            # Idempotent: the generator's finally and the response close hook
+            # both fire, and a client that disconnects before the generator
+            # starts only gets the latter.
+            if not released.is_set():
+                released.set()
+                service.unsubscribe(q)
 
         @stream_with_context
         def gen():
+            deadline = time.monotonic() + SSE_MAX_SECONDS
             try:
                 yield f"data: {json.dumps(service.snapshot())}\n\n"
-                while True:
+                while time.monotonic() < deadline:
                     try:
                         snap = q.get(timeout=15)
                         yield f"data: {json.dumps(snap)}\n\n"
                     except queue.Empty:
                         yield ": keepalive\n\n"
             finally:
-                service.unsubscribe(q)
+                release()
 
-        return Response(gen(), mimetype="text/event-stream",
+        resp = Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache",
                                  "X-Accel-Buffering": "no"})
+        resp.call_on_close(release)
+        return resp
 
     return app

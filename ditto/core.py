@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import shutil
@@ -14,6 +15,8 @@ from typing import Dict, List, Optional
 from . import config, db, media, pedal
 from .panel import Panel, local_ip
 from .power import Battery
+
+log = logging.getLogger(__name__)
 
 
 def mmss(seconds: float) -> str:
@@ -44,8 +47,12 @@ class Service:
         self.ending = False
 
         self._stop = threading.Event()
-        threading.Thread(target=self._worker, daemon=True, name="worker").start()
-        threading.Thread(target=self._monitor, daemon=True, name="monitor").start()
+        self._threads = [
+            threading.Thread(target=self._worker, daemon=True, name="worker"),
+            threading.Thread(target=self._monitor, daemon=True, name="monitor"),
+        ]
+        for t in self._threads:
+            t.start()
 
     # ---------------------------------------------------------------- events
 
@@ -75,7 +82,7 @@ class Service:
         free, total = pedal.capacity()
         rate = media.bytes_per_second(self.fmt)
         used_secs = sum(s["duration"] for s in db.all_slots())
-        if total:
+        if total and rate:
             total_secs = total / rate
         else:
             total_secs = 0
@@ -98,6 +105,7 @@ class Service:
             "format": self.fmt,
             "format_source": self.fmt_source,
             "slots": db.all_slots(),
+            "slot_count": config.SLOTS,
             "capacity": self.capacity(),
             "battery": {
                 "available": self.battery.available,
@@ -111,9 +119,13 @@ class Service:
 
     # ------------------------------------------------------------ operations
 
-    def upload(self, slot: int, tmp_path: Path, display_name: str) -> Dict:
+    @staticmethod
+    def _check_slot(slot: int) -> None:
         if not (1 <= slot <= config.SLOTS):
             raise ValueError(f"slot must be 1-{config.SLOTS}")
+
+    def upload(self, slot: int, tmp_path: Path, display_name: str) -> Dict:
+        self._check_slot(slot)
 
         info = media.probe(tmp_path)
         if info is None or info.duration <= 0:
@@ -121,7 +133,9 @@ class Service:
             raise ValueError("not a readable audio file")
 
         h = media.file_hash(tmp_path)
-        stored = config.SOURCES / f"{h}{tmp_path.suffix.lower()}"
+        # _source_for globs for "{hash}.*", so an extensionless upload would be
+        # stored under a name it can never find again.
+        stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
         if not stored.exists():
             shutil.move(str(tmp_path), str(stored))
         else:
@@ -136,10 +150,12 @@ class Service:
         self._emit()
         return db.get_slot(slot)
 
-    def clear(self, slot: int) -> None:
-        db.delete_slot(slot, to_trash=True)
+    def clear(self, slot: int) -> Optional[int]:
+        self._check_slot(slot)
+        trash_id = db.delete_slot(slot, to_trash=True)
         self._work.put(("erase", slot))
         self._emit()
+        return trash_id
 
     def move(self, src: int, dst: int) -> None:
         """Move to an empty slot, or swap with an occupied one.
@@ -147,8 +163,8 @@ class Service:
         Swapping rather than overwriting means reordering a setlist never
         destroys anything, so no trash entry and no undo needed.
         """
-        if not (1 <= dst <= config.SLOTS):
-            raise ValueError("bad destination slot")
+        self._check_slot(src)
+        self._check_slot(dst)
         if src == dst or not db.get_slot(src):
             return
         if db.get_slot(dst):
@@ -162,6 +178,7 @@ class Service:
         self._emit()
 
     def retry(self, slot: int) -> None:
+        self._check_slot(slot)
         row = db.get_slot(slot)
         if not row:
             return
@@ -201,9 +218,33 @@ class Service:
 
     def force_halt(self) -> None:
         """Long press. Emergency only — does not wait for the queue."""
+        if self.ending:
+            return
         self.ending = True
         self._emit()
         threading.Thread(target=self._halt, args=(False,), daemon=True).start()
+
+    def shutdown(self, timeout: float = 30.0) -> None:
+        """SIGTERM path — a service stop or restart, not a session ending.
+
+        Unlike _halt this never powers off, but it must still leave the pedal
+        unmounted: systemd will SIGKILL us if we dawdle, so the drain is
+        bounded and anything still queued is abandoned rather than waited on.
+        """
+        if self._stop.is_set():
+            return
+        self._drain(timeout=timeout)
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=5.0)
+        try:
+            os.sync()
+            pedal.unmount()
+        except Exception:
+            log.exception("unmount during shutdown failed")
+        if self.panel:
+            self.panel.close()
+        self.battery.close()
 
     # -------------------------------------------------------------- internals
 
@@ -219,6 +260,7 @@ class Service:
                 self._tick_pedal()
                 self._render()
             except Exception as e:      # never let the monitor die
+                log.exception("monitor tick failed")
                 self.last_error = str(e)
             time.sleep(config.POLL_SECS)
 
@@ -277,7 +319,8 @@ class Service:
             lines = [f"{self.busy}"[:21]]
             slots = db.all_slots()
             done = sum(1 for s in slots if s["state"] == "synced")
-            lines.append(f"Slot {done + 1} of {len(slots)}   {bat_s}")
+            pos = min(done + 1, len(slots)) if slots else 0
+            lines.append(f"Slot {pos} of {len(slots)}   {bat_s}")
             lines.append("WRITING - DONT PULL")
             self.panel.render("writing", lines, self.progress)
         elif self.pedal_state == "mounted":
@@ -307,6 +350,7 @@ class Service:
             try:
                 self._run_job(job)
             except Exception as e:
+                log.exception("job %r failed", job[0])
                 self.last_error = str(e)
             finally:
                 self.busy = None
@@ -323,6 +367,13 @@ class Service:
         elif kind == "erase":
             self._do_erase(job[1])
         elif kind == "end":
+            # A convert queues its write *after* the end marker, so the marker
+            # can surface with real work still behind it. This worker is the
+            # only thing draining the queue, so halting here would leave those
+            # writes unwritten — requeue and keep going instead.
+            if not self._work.empty():
+                self._work.put(("end",))
+                return
             self._halt(True)
 
     def _do_convert(self, slot: int, h: str, src: Path) -> None:
@@ -416,13 +467,16 @@ class Service:
         if graceful:
             self.busy = "Finishing writes"
             self._emit()
-            self._drain()
+            # The end marker only reaches _halt once the queue is empty, so
+            # this is a short safety bound rather than the actual wait.
+            self._drain(timeout=5.0)
         self.busy = "Unmounting"
         self._emit()
         try:
             os.sync()
             pedal.unmount()
         except Exception as e:
+            log.exception("unmount failed")
             self.last_error = str(e)
         self.busy = None
         self._emit()
@@ -439,12 +493,16 @@ class Service:
         """Prune expired trash and any staged file nothing references."""
         try:
             db.prune_trash(config.TRASH_KEEP_DAYS)
+            # .part files are transcodes interrupted by a crash or a pulled
+            # plug — nothing ever references them.
+            for f in config.STAGED.glob("*.wav.part"):
+                f.unlink(missing_ok=True)
             for f in config.STAGED.glob("*.wav"):
                 h = f.name.split("-", 1)[0]
                 if not db.hash_in_use(h):
                     f.unlink(missing_ok=True)
             for f in config.SOURCES.iterdir():
-                if not db.hash_in_use(f.stem):
+                if f.is_file() and not db.hash_in_use(f.stem):
                     f.unlink(missing_ok=True)
         except Exception:
-            pass
+            log.exception("garbage collection failed")

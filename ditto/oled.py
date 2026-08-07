@@ -77,7 +77,7 @@ class Oled:
         self.available = False
         self._bus = None
         self._buf: bytearray = bytearray()
-        self._last: List[str] = []
+        self._last: Optional[tuple] = None
         self._open()
 
     def _open(self) -> None:
@@ -139,9 +139,12 @@ class Oled:
         if not self.available:
             return
         rendered = list(lines)[: self._pages]
-        if rendered == self._last and bar is None:
+        # The bar is part of the frame: same lines with a different bar (or
+        # none at all) still has to redraw, or a stale bar stays on screen.
+        frame = (tuple(rendered), bar)
+        if frame == self._last:
             return
-        self._last = rendered
+        self._last = frame
         self._buf = bytearray(self.width * self._pages)
         for i, line in enumerate(rendered):
             self._draw_text(i, line)

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -104,26 +106,38 @@ def convert(src: Path, source_hash: str, spec: Dict,
     if info:
         total = info.duration
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True)
-    try:
-        for line in proc.stdout:
-            if progress and total > 0 and line.startswith("out_time_us="):
-                try:
-                    secs = int(line.split("=", 1)[1]) / 1_000_000
-                    progress(min(secs / total, 1.0))
-                except ValueError:
-                    pass
-        proc.wait(timeout=600)
-    except Exception:
-        proc.kill()
-        tmp.unlink(missing_ok=True)
-        raise
+    # stderr goes to a file, not a pipe: we only read stdout, and a chatty
+    # ffmpeg filling the stderr pipe buffer would deadlock the progress loop.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8",
+                                errors="replace") as errf:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=errf, text=True)
+        try:
+            for line in proc.stdout:
+                if progress and total > 0 and line.startswith("out_time_us="):
+                    try:
+                        secs = int(line.split("=", 1)[1]) / 1_000_000
+                        progress(min(secs / total, 1.0))
+                    except ValueError:
+                        pass
+            proc.wait(timeout=600)
+        except Exception:
+            proc.kill()
+            proc.wait()
+            tmp.unlink(missing_ok=True)
+            raise
 
-    if proc.returncode != 0:
-        err = (proc.stderr.read() or "").strip().splitlines()
-        tmp.unlink(missing_ok=True)
-        raise ConvertError(err[-1] if err else f"ffmpeg exited {proc.returncode}")
+        if proc.returncode != 0:
+            errf.seek(0)
+            err = errf.read().strip().splitlines()
+            tmp.unlink(missing_ok=True)
+            raise ConvertError(
+                err[-1] if err else f"ffmpeg exited {proc.returncode}")
 
+    # The staged WAV is the cache: it must be durable before it can be treated
+    # as valid, or a power cut mid-write leaves a truncated file that looks good.
+    with open(tmp, "rb+") as f:
+        f.flush()
+        os.fsync(f.fileno())
     tmp.replace(dest)
     return dest

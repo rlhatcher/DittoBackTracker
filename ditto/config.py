@@ -3,7 +3,20 @@
 import os
 from pathlib import Path
 
-DATA = Path(os.environ.get("DITTO_DATA", "/var/lib/ditto"))
+
+def _abs_path(var: str, default: str) -> Path:
+    """These are resolved by a systemd unit with no meaningful cwd, so a
+    relative override would silently land somewhere unexpected."""
+    raw = os.environ.get(var, default).strip()
+    if not raw:
+        raise ValueError(f"{var} must not be empty")
+    p = Path(raw)
+    if not p.is_absolute():
+        raise ValueError(f"{var} must be an absolute path, got {raw!r}")
+    return p
+
+
+DATA = _abs_path("DITTO_DATA", "/var/lib/ditto")
 SOURCES = DATA / "sources"
 STAGED = DATA / "staged"
 TRASH = DATA / "trash"
@@ -12,7 +25,7 @@ DB_PATH = DATA / "state.db"
 # Pedal
 PEDAL_LABEL = os.environ.get("DITTO_PEDAL_LABEL", "DITTOPLUS")
 PEDAL_DEV = Path(f"/dev/disk/by-label/{PEDAL_LABEL}")
-MOUNT = Path(os.environ.get("DITTO_MOUNT", "/media/ditto"))
+MOUNT = _abs_path("DITTO_MOUNT", "/media/ditto")
 
 # The pedal keeps two files per slot. We only ever touch BT.WAV.
 TRACK_FILENAME = "BT.WAV"
@@ -36,7 +49,11 @@ I2C_BUS = 1
 BUTTON_GPIO = int(os.environ.get("DITTO_BUTTON_GPIO", "17"))
 LED_GPIO = int(os.environ.get("DITTO_LED_GPIO", "27"))
 OLED_ADDR = 0x3C
-OLED_HEIGHT = int(os.environ.get("DITTO_OLED_HEIGHT", "32"))   # 32 or 64
+OLED_HEIGHT = int(os.environ.get("DITTO_OLED_HEIGHT", "32"))
+if OLED_HEIGHT not in (32, 64):
+    # Anything else gives a page count the SSD1306 addressing doesn't match,
+    # so the display renders garbage rather than failing.
+    raise ValueError("DITTO_OLED_HEIGHT must be 32 or 64")
 LONG_PRESS_SECS = 3.0
 
 # Web

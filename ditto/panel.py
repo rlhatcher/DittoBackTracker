@@ -48,7 +48,9 @@ class Led:
             pass
         self._state = "boot"
         self._stop = threading.Event()
-        threading.Thread(target=self._run, daemon=True, name="led").start()
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="led")
+        self._thread.start()
 
     def set(self, state: str) -> None:
         self._state = state
@@ -68,16 +70,21 @@ class Led:
                 time.sleep(0.2)
             else:
                 for i, dur in enumerate(pattern):
-                    if self._state != current:  # abandon a stale pattern
+                    # Stale pattern, or the device is going away underneath us.
+                    if self._state != current or self._stop.is_set():
                         break
                     if i % 2 == 0:
                         self._dev.on()
                     else:
                         self._dev.off()
-                    time.sleep(dur)
+                    if self._stop.wait(dur):
+                        break
 
     def close(self) -> None:
         self._stop.set()
+        # Join before closing the device, or the worker can call on()/off()
+        # on a closed GPIO pin.
+        self._thread.join(timeout=2.0)
         if self.available:
             try:
                 self._dev.off()

@@ -1,7 +1,9 @@
 """Entry point: python3 -m ditto"""
 
 import argparse
+import signal
 import sys
+import threading
 
 from . import config
 from .core import Service
@@ -18,14 +20,38 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     service = Service(headless=args.headless)
-    app = create_app(service)
 
-    if args.debug:
-        app.run(host=args.host, port=args.port, threaded=True)
-    else:
-        from waitress import serve
-        serve(app, host=args.host, port=args.port, threads=8,
-              channel_timeout=3600)
+    # systemd stops us with SIGTERM. Without this the pedal stays mounted and
+    # the GPIO/I2C handles leak, so the next start finds a dirty filesystem.
+    done = threading.Event()
+
+    def on_term(_signum, _frame):
+        if done.is_set():
+            return
+        done.set()
+        service.shutdown()
+        sys.exit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, on_term)
+
+    try:
+        # Inside the try: Service() has already started its threads, so a
+        # failure building the app must still run the finally cleanup.
+        app = create_app(service)
+        if args.debug:
+            app.run(host=args.host, port=args.port, threaded=True)
+        else:
+            from waitress import serve
+            # Every open SSE stream occupies a thread for its whole life, so
+            # the pool needs room for a few stale tabs on top of real
+            # requests. web.SSE_MAX_SECONDS is what actually bounds them.
+            serve(app, host=args.host, port=args.port, threads=16,
+                  channel_timeout=3600)
+    finally:
+        if not done.is_set():
+            done.set()
+            service.shutdown()
     return 0
 
 

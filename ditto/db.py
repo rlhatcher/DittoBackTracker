@@ -79,6 +79,7 @@ def put_slot(slot: int, source_hash: str, display_name: str,
                display_name=excluded.display_name,
                duration=excluded.duration,
                state=excluded.state,
+               synced_hash=NULL,
                error=NULL,
                updated=excluded.updated""",
         (slot, source_hash, display_name, duration, state, time.time()),
@@ -114,10 +115,10 @@ def move_slot(src: int, dst: int) -> None:
     if not row:
         return
     c = conn()
-    c.execute("DELETE FROM slots WHERE slot=?", (dst,))
-    c.execute("UPDATE slots SET slot=?, synced_hash=NULL, state='staged' "
-              "WHERE slot=?", (dst, src))
-    c.commit()
+    with c:
+        c.execute("DELETE FROM slots WHERE slot=?", (dst,))
+        c.execute("UPDATE slots SET slot=?, synced_hash=NULL, state='staged', "
+                  "updated=? WHERE slot=?", (dst, time.time(), src))
 
 
 def swap_slots(a: int, b: int) -> None:
@@ -127,28 +128,33 @@ def swap_slots(a: int, b: int) -> None:
     if a == b:
         return
     c = conn()
-    # -1 is a scratch key; the slot column is the primary key so the two
-    # updates would otherwise collide.
-    c.execute("UPDATE slots SET slot=-1 WHERE slot=?", (a,))
-    c.execute("UPDATE slots SET slot=? WHERE slot=?", (a, b))
-    c.execute("UPDATE slots SET slot=? WHERE slot=-1", (b,))
-    c.execute("UPDATE slots SET synced_hash=NULL, state='staged', updated=? "
-              "WHERE slot IN (?,?)", (time.time(), a, b))
-    c.commit()
+    with c:
+        # -1 is a scratch key; the slot column is the primary key so the two
+        # updates would otherwise collide.
+        c.execute("UPDATE slots SET slot=-1 WHERE slot=?", (a,))
+        c.execute("UPDATE slots SET slot=? WHERE slot=?", (a, b))
+        c.execute("UPDATE slots SET slot=? WHERE slot=-1", (b,))
+        c.execute("UPDATE slots SET synced_hash=NULL, state='staged', updated=? "
+                  "WHERE slot IN (?,?)", (time.time(), a, b))
 
 
-def delete_slot(slot: int, to_trash: bool = True) -> None:
+def delete_slot(slot: int, to_trash: bool = True) -> Optional[int]:
+    """Returns the new trash id, so an undo can name the exact entry."""
     row = get_slot(slot)
+    trash_id = None
     c = conn()
-    if row and to_trash:
-        c.execute(
-            """INSERT INTO trash (slot, source_hash, display_name, duration, deleted)
-               VALUES (?,?,?,?,?)""",
-            (slot, row["source_hash"], row["display_name"],
-             row["duration"], time.time()),
-        )
-    c.execute("DELETE FROM slots WHERE slot=?", (slot,))
-    c.commit()
+    with c:
+        if row and to_trash:
+            cur = c.execute(
+                """INSERT INTO trash (slot, source_hash, display_name,
+                                      duration, deleted)
+                   VALUES (?,?,?,?,?)""",
+                (slot, row["source_hash"], row["display_name"],
+                 row["duration"], time.time()),
+            )
+            trash_id = cur.lastrowid
+        c.execute("DELETE FROM slots WHERE slot=?", (slot,))
+    return trash_id
 
 
 def trash_items() -> List[Dict]:
@@ -167,10 +173,11 @@ def trash_pop(trash_id: int) -> Optional[Dict]:
 
 def prune_trash(max_age_days: int) -> List[Dict]:
     cutoff = time.time() - max_age_days * 86400
-    rows = [dict(r) for r in
-            conn().execute("SELECT * FROM trash WHERE deleted < ?", (cutoff,))]
-    conn().execute("DELETE FROM trash WHERE deleted < ?", (cutoff,))
-    conn().commit()
+    c = conn()
+    with c:
+        rows = [dict(r) for r in
+                c.execute("SELECT * FROM trash WHERE deleted < ?", (cutoff,))]
+        c.execute("DELETE FROM trash WHERE deleted < ?", (cutoff,))
     return rows
 
 

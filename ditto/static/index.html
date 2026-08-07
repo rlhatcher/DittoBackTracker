@@ -31,7 +31,8 @@ h1{font-size:16px;font-weight:600;margin:0}
 .capfill.warn{background:var(--warn)} .capfill.err{background:var(--err)}
 .row{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--tx2)}
 #grid{display:grid;grid-template-columns:repeat(20,1fr);gap:3px;margin-top:4px}
-.cell{aspect-ratio:1;border-radius:2px;background:transparent;
+.cell{aspect-ratio:1;border-radius:2px;background:transparent;padding:0;
+  font:inherit;-webkit-appearance:none;appearance:none;
   border:1px solid var(--line);cursor:pointer}
 .cell.synced{background:var(--ok);border-color:transparent}
 .cell.staged,.cell.converting{background:var(--warn);border-color:transparent}
@@ -53,9 +54,13 @@ h1{font-size:16px;font-weight:600;margin:0}
 .x{border:0;background:none;color:var(--tx2);cursor:pointer;font-size:17px;
   line-height:1;padding:2px 4px;flex:none}
 .x:hover{color:var(--err)}
-#drop{border:1.5px dashed var(--line);border-radius:12px;padding:26px 16px;
+#drop{display:block;border:1.5px dashed var(--line);border-radius:12px;
+  padding:26px 16px;
   text-align:center;color:var(--tx2);font-size:14px;cursor:pointer;
   background:var(--card);transition:border-color .15s,background .15s,color .15s}
+/* The input itself is off screen, so its focus ring has to land on the label. */
+.wrap:has(#file:focus-visible) #drop{outline:2px solid var(--accent);
+  outline-offset:2px}
 #drop.over{border-color:var(--accent);background:rgba(24,95,165,.06)}
 #drop.bin{border-color:var(--err);color:var(--err)}
 #drop.bin.over{background:rgba(192,57,43,.09);border-style:solid}
@@ -76,6 +81,11 @@ button.act:disabled{opacity:.4;cursor:default}
   text-overflow:ellipsis;white-space:nowrap}
 .err{color:var(--err)}
 .hide{display:none}
+/* Kept in the accessibility tree and focusable — display:none would take the
+   file input out of the tab order and off screen readers. */
+.vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);
+  white-space:nowrap;border:0}
 h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
   text-transform:uppercase;letter-spacing:.04em}
 </style>
@@ -107,15 +117,15 @@ h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
     <div id="list"></div>
   </div>
 
-  <div id="drop">
-    <div style="font-size:22px;margin-bottom:4px">↓</div>
+  <label id="drop" for="file">
+    <div style="font-size:22px;margin-bottom:4px" aria-hidden="true">↓</div>
     <span id="drophead">Drop audio here, or tap to choose</span>
     <div style="font-size:12px;margin-top:6px" id="dropnote">
       Drop straight onto a slot to target it, or use a leading number —
       “07 Blue Bossa.mp3”
     </div>
-  </div>
-  <input type="file" id="file" multiple accept="audio/*" class="hide">
+  </label>
+  <input type="file" id="file" multiple accept="audio/*" class="vh">
 
 </div>
 
@@ -157,12 +167,15 @@ function render(s){
   const byslot = {};
   s.slots.forEach(x => byslot[x.slot] = x);
 
+  const total = s.slot_count || 99;
   const g = $("#grid");
-  if (g.children.length !== 99){
+  if (g.children.length !== total){
     g.innerHTML = "";
-    for (let i=1;i<=99;i++){
-      const d = document.createElement("div");
+    for (let i=1;i<=total;i++){
+      const d = document.createElement("button");
+      d.type = "button";
       d.className = "cell"; d.title = "Slot "+i; d.dataset.slot = i;
+      d.setAttribute("aria-pressed", "false");
       d.onclick = () => { selected = selected===i?null:i; render(state); };
       d.addEventListener("dragstart", e => {
         dragSrc = i;
@@ -188,7 +201,10 @@ function render(s){
           const src = parseInt(from, 10);
           if (src !== i) fetch(`/api/slots/${src}/move`, {
             method:"POST", headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({to: i})});
+            body: JSON.stringify({to: i})})
+            .then(r => r.ok ? null : r.json().catch(()=>({})))
+            .then(j => { if (j) fail(j.error || "Move failed"); })
+            .catch(() => fail("Move failed — check the connection"));
         } else {
           send(e.dataTransfer.files, i);
         }
@@ -199,6 +215,7 @@ function render(s){
   [...g.children].forEach((d,i) => {
     const n = i+1, row = byslot[n];
     d.className = "cell" + (row?" "+row.state:"") + (selected===n?" sel":"");
+    d.setAttribute("aria-pressed", selected===n ? "true" : "false");
     d.draggable = !!row;
     d.title = row
       ? `Slot ${n}: ${row.display_name} — drag to another slot to move or swap`
@@ -238,9 +255,13 @@ function render(s){
     const pad = String(selected).padStart(2,"0");
     const occ = byslot[selected];
     $("#drophead").innerHTML = `Drop here to fill slot <b>${pad}</b>`;
+    const nxt = [selected+1, selected+2].filter(n => n <= total)
+      .map(n => String(n).padStart(2,"0"));
     $("#dropnote").textContent = occ
       ? `Slot ${pad} holds “${occ.display_name}” — it will be replaced. Tap the slot again to deselect.`
-      : `Extra files continue into ${String(selected+1).padStart(2,"0")}, ${String(selected+2).padStart(2,"0")}… Tap the slot again to deselect.`;
+      : nxt.length
+        ? `Extra files continue into ${nxt.join(", ")}… Tap the slot again to deselect.`
+        : `Slot ${pad} is the last slot. Tap the slot again to deselect.`;
   } else {
     $("#drophead").textContent = "Drop audio here, or tap to choose";
     $("#dropnote").textContent =
@@ -263,6 +284,8 @@ function render(s){
 
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 
+function fail(text){ $("#msg").textContent = text; $("#msg").className = "msg err"; }
+
 async function send(files, start){
   if (!files || !files.length) return;
   const fd = new FormData();
@@ -270,12 +293,24 @@ async function send(files, start){
   if (start != null) fd.append("start", start);
   $("#msg").textContent = start != null
     ? `Uploading to slot ${String(start).padStart(2,"0")}…` : "Uploading…";
-  const r = await fetch("/api/upload", {method:"POST", body:fd});
+  let r;
+  try {
+    r = await fetch("/api/upload", {method:"POST", body:fd});
+  } catch {
+    selected = null;
+    fail("Upload failed — check the connection");
+    return;
+  }
   const j = await r.json().catch(()=>({}));
   selected = null;
+  // A 413 or a 500 carries no `errors` list, so an ok check has to come first
+  // or the message stays on "Uploading…" forever.
+  if (!r.ok && !(j.errors && j.errors.length)){
+    fail(j.error || `Upload failed (${r.status})`);
+    return;
+  }
   if (j.errors && j.errors.length){
-    $("#msg").textContent = j.errors.map(e=>`${e.name}: ${e.error}`).join("; ");
-    $("#msg").className = "msg err";
+    fail(j.errors.map(e=>`${e.name}: ${e.error}`).join("; "));
   }
 }
 
@@ -293,24 +328,35 @@ function setBinMode(on){
 }
 
 async function removeSlot(slot, name){
-  await fetch(`/api/slots/${slot}`, {method:"DELETE"});
-  const t = await fetch("/api/trash").then(r=>r.json()).catch(()=>[]);
+  let j;
+  try {
+    const r = await fetch(`/api/slots/${slot}`, {method:"DELETE"});
+    j = await r.json().catch(()=>({}));
+    if (!r.ok){ fail(j.error || "Could not clear the slot"); return; }
+  } catch {
+    fail("Could not clear the slot — check the connection");
+    return;
+  }
   const host = $("#undoslot");
   host.innerHTML = "";
-  if (!t.length) return;
+  // The delete names its own trash entry. Reading back the newest item
+  // instead would offer to restore whatever was deleted last, not this.
+  if (j.trash_id == null) return;
   const label = name || "slot " + String(slot).padStart(2,"0");
   const b = document.createElement("button");
   b.className = "undo";
   b.textContent = `Undo “${label.length > 16 ? label.slice(0,15)+"…" : label}”`;
   b.onclick = async () => {
-    await fetch(`/api/trash/${t[0].id}/restore`, {method:"POST"});
+    await fetch(`/api/trash/${j.trash_id}/restore`, {method:"POST"})
+      .catch(() => fail("Undo failed"));
     host.innerHTML = "";
   };
   host.appendChild(b);
   setTimeout(() => { if (host.firstChild === b) host.innerHTML = ""; }, 12000);
 }
 
-drop.onclick = () => $("#file").click();
+/* No click handler here: #drop is the input's <label>, so the browser opens
+   the picker. Calling .click() as well would open it twice. */
 $("#file").onchange = e => { send(e.target.files, selected); e.target.value=""; };
 ["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
   e.preventDefault(); drop.classList.add("over"); }));

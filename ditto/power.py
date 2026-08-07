@@ -9,7 +9,6 @@ charge checks pass — a missing gauge must not brick the device.
 from __future__ import annotations
 
 import threading
-import time
 from collections import deque
 from typing import Optional
 
@@ -18,6 +17,7 @@ from . import config
 _SHUNT_OHMS = 0.1
 _FULL_V = 4.2
 _EMPTY_V = 3.1
+_CHARGE_DEADBAND_MA = 20.0   # below this, treat the cell as not charging
 
 
 class Battery:
@@ -25,10 +25,13 @@ class Battery:
         self._bus = None
         self._samples: deque = deque(maxlen=8)
         self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
         self.available = False
         self._try_open()
 
     def _try_open(self) -> None:
+        bus = None
         try:
             import smbus                              # type: ignore
             bus = smbus.SMBus(config.I2C_BUS)
@@ -36,6 +39,13 @@ class Battery:
             self._bus = bus
             self.available = True
         except Exception:
+            # The probe can fail after the bus opened. This is retried on a
+            # backoff forever, so dropping the handle would leak an fd a time.
+            if bus is not None:
+                try:
+                    bus.close()
+                except Exception:
+                    pass
             self._bus = None
             self.available = False
 
@@ -73,8 +83,11 @@ class Battery:
 
     @property
     def charging(self) -> Optional[bool]:
+        # Deadband, not a bare `> 0`: the shunt reads a few mA of noise at
+        # rest, and a false "charging" is the dangerous direction — it lets
+        # can_write() through and stops critical() ever firing.
         c = self.current_ma
-        return None if c is None else c > 0
+        return None if c is None else c > _CHARGE_DEADBAND_MA
 
     @property
     def percent(self) -> Optional[int]:
@@ -105,15 +118,30 @@ class Battery:
         attempts to 60 s so a build without the HAT doesn't burn CPU."""
         def loop():
             retry_in = 2.0
-            while True:
+            while not self._stop.is_set():
                 if self.available:
                     self.sample()
                     retry_in = 2.0
-                    time.sleep(2.0)
+                    self._stop.wait(2.0)
                 else:
                     self._try_open()
                     if self.available:
                         continue
-                    time.sleep(retry_in)
+                    self._stop.wait(retry_in)
                     retry_in = min(retry_in * 2, 60.0)
-        threading.Thread(target=loop, daemon=True, name="battery").start()
+        self._thread = threading.Thread(target=loop, daemon=True,
+                                        name="battery")
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop sampling and release the I2C bus."""
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=3.0)
+        bus, self._bus = self._bus, None
+        self.available = False
+        if bus is not None:
+            try:
+                bus.close()
+            except Exception:
+                pass

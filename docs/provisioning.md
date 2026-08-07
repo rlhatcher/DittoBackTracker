@@ -37,8 +37,7 @@ the `bootfs` partition before the first boot. On macOS that's
 `/Volumes/bootfs/cmdline.txt`; on Linux, mount the partition first.
 
 Look at the file before editing — the token varies by image version. Recent
-cloud-init images use a bare `resize`; older ones use
-`init=/usr/lib/raspberrypi-sys-mods/firstboot`. Delete whichever is present:
+cloud-init images use a bare `resize`. Delete that token and nothing else:
 
 ```
 console=serial0,115200 console=tty1 root=PARTUUID=... rootfstype=ext4
@@ -47,6 +46,13 @@ fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=GB ds=nocloud;i=rpi-im
 ```
 
 Keep it as one line.
+
+**Leave `init=/usr/lib/raspberrypi-sys-mods/firstboot` alone if you see it.**
+That entry is what applies the Imager `custom.toml` settings — hostname, user,
+WiFi, SSH — on first boot, so removing it costs you the whole configuration.
+On an image that uses it rather than a bare `resize`, don't edit `cmdline.txt`
+at all: either create the third partition on the card before first boot, or
+let the root expand and use the `growpart` override below.
 
 Check after first boot:
 
@@ -57,14 +63,20 @@ df -h /        # expect ~2.5G, not the full card
 If it reports the full card size, the resize ran. You cannot shrink a mounted ext4 root, so
 reflash rather than trying to recover.
 
-If it expands despite the edit, cloud-init's `growpart` did it. Add to
-`user-data` on the boot partition:
+If it expands despite the edit, cloud-init's `growpart` did it. Merge the
+following into the `user-data` file on the boot partition — it's a fragment, so
+add it to the existing cloud-config rather than replacing the file, and keep
+`#cloud-config` as the first line or cloud-init ignores the whole file:
 
 ```yaml
+#cloud-config
 growpart:
   mode: off
 resize_rootfs: false
 ```
+
+Validate the result with `cloud-init schema --config-file user-data` before you
+boot.
 
 ---
 
@@ -72,6 +84,13 @@ resize_rootfs: false
 
 ```bash
 ssh ditto@dittobacktracker.local
+```
+
+`parted` and `usbutils` (for `lsusb`, below) aren't guaranteed on a Lite image,
+so install them before you need them:
+
+```bash
+sudo apt update && sudo apt install -y parted usbutils
 ```
 
 The root filesystem is around 2.5 GB and the rest of the card is unallocated.
@@ -128,7 +147,7 @@ only writable storage once the overlay is on.
 ```bash
 sudo apt update && sudo apt full-upgrade -y
 sudo apt install -y \
-  ffmpeg \
+  git ffmpeg \
   python3-flask python3-waitress python3-smbus python3-gpiozero \
   i2c-tools avahi-daemon \
   overlayroot
@@ -199,8 +218,11 @@ An fstab entry with `noauto,user` lets the service mount the pedal without
 root:
 
 ```
-LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,umask=000,uid=ditto,gid=ditto  0  0
+LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto,gid=ditto  0  0
 ```
+
+`fmask=077,dmask=077` keeps the mounted files owner-only (the `ditto` user the
+service runs as) rather than the world-writable `umask=000`.
 
 ```bash
 sudo mkdir -p /media/ditto

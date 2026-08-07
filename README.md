@@ -10,7 +10,7 @@ DittoBackTracker is a battery-powered dongle that sits between them. Plug it
 into the pedal, open a web page, drag MP3s in. It converts them to the pedal's
 format and writes them to the right slots.
 
-```
+```text
   Phone / laptop                    ┌──────────────────────┐
   ┌──────────────┐    your WiFi     │  DittoBackTracker    │
   │  drag & drop │ ───────────────▶ │   Pi Zero 2 W        │      mini-USB
@@ -33,7 +33,10 @@ small file goes over the air; the Pi does the expansion locally.
 - Drag to the bin to remove, with undo
 - Capacity shown in minutes, because the pedal holds about 63 minutes in total
 - Never writes `LOOP.WAV`, so recorded loops are safe
-- Read-only root filesystem, so cutting the Pi's power doesn't corrupt its card
+- Read-only root filesystem, so cutting the Pi's power is unlikely to corrupt
+  the system partition. `state.db`, `sources/`, `staged/` and `trash/` live on
+  a separate writable partition and still need a clean unmount — end the
+  session with the button or the web page rather than pulling the power
 
 ---
 
@@ -84,17 +87,20 @@ Open `http://dittobacktracker.local/` and plug the pedal in.
 
 The web UI runs anywhere. With no pedal attached, uploads convert and wait.
 
+`ffmpeg` and `ffprobe` must be on your `PATH` first — without `ffprobe` every
+upload is rejected as "not a readable audio file". On macOS `brew install
+ffmpeg`; on Debian or Ubuntu `sudo apt install ffmpeg`.
+
 ```bash
 python3 -m venv .venv && .venv/bin/pip install flask
 DITTO_DATA=/tmp/ditto-data DITTO_MOUNT=/tmp/ditto-mount \
-  .venv/bin/python -m ditto --headless --port 8080 --debug
+  .venv/bin/python -m ditto --headless --host 127.0.0.1 --port 8080 --debug
 ```
 
 `--headless` skips the button, LED and display. `--debug` uses Flask's built-in
-server, so `waitress` isn't needed here.
-
-Needs `ffmpeg` and `ffprobe` on your `PATH`. Without `ffprobe`, uploads are
-rejected as "not a readable audio file".
+server, so `waitress` isn't needed here. `--host 127.0.0.1` keeps the
+unauthenticated dev server off your network — the default is `0.0.0.0`, which
+is what the device itself wants but not what you want on a laptop.
 
 ---
 
@@ -104,7 +110,7 @@ The pedal is mounted for the length of a session and released when you press
 Done. Uploads are stored by content hash, converted in the background, and
 written as they become ready.
 
-```
+```text
   POST /api/upload
         ▼
   sources/<hash>.<ext>              the upload, unmodified
@@ -151,10 +157,10 @@ something else for this pedal, start there.
 Issues and pull requests welcome. [docs/roadmap.md](docs/roadmap.md) lists what
 isn't built yet.
 
-If you change how files are written: only `BT.WAV` is ever created or removed,
-writes go to a temporary file and are renamed into place, and `os.sync()` runs
-before unmounting. Breaking any of those risks the pedal's filesystem or
-someone's recording.
+If you change how files are written: no persistent pedal file other than
+`BT.WAV` is created or removed — a temporary file is used during the atomic
+replacement and renamed into place — and `os.sync()` runs before unmounting.
+Breaking any of those risks the pedal's filesystem or someone's recording.
 
 ---
 
