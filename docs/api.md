@@ -248,7 +248,8 @@ restart sudoers rule) — see the README.
 |---|---|
 | `200` | Update deployed; the service is restarting |
 | `409` | Busy (a job is in flight, or an update is already running) — retry when idle |
-| `502` | The update failed: no network, no git checkout, or the restart was not permitted. Body is `{"error": "..."}` |
+| `502` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
+| `503` | The device is shutting down — try again after it comes back up |
 
 ---
 
@@ -279,8 +280,8 @@ curl -N http://dittobacktracker.local/api/events
 | `409` | `POST /api/update` | Busy: a job is in flight, or an update is already running. Retry when idle |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
 | `500` | `GET /api/loops/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error). Body is `{"error": "..."}` |
-| `502` | `POST /api/update` | The update failed: no network, no git checkout, or the restart was not permitted. Body is `{"error": "..."}` |
-| `503` | `GET /api/loops/<n>` | No pedal mounted, or staging the loop exceeded its time limit. Body is `{"error": "..."}` |
+| `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
+| `503` | `GET /api/loops/<n>`, `POST /api/update` | No pedal mounted / loop staging timed out; or, for update, the device is shutting down. Body is `{"error": "..."}` |
 
 `POST /api/upload` is the exception to the rule. It is a batch, so it returns
 `201` even when some files were rejected, and reports those per file in

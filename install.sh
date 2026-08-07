@@ -30,6 +30,11 @@ echo "==> code -> $APP"
 mkdir -p "$APP"
 rm -rf "$APP/ditto"
 cp -r "$HERE/ditto" "$APP/"
+# Record the deployed commit so the app reports its revision and the update
+# check has a baseline. Harmless if this checkout isn't a git repo.
+if git -C "$HERE" rev-parse HEAD >/dev/null 2>&1; then
+  git -C "$HERE" rev-parse HEAD > "$APP/REVISION"
+fi
 sudo chown -R ditto:ditto /var/lib/ditto
 
 echo "==> allow unprivileged poweroff (for the Done button)"

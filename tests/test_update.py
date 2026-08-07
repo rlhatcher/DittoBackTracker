@@ -49,6 +49,11 @@ def test_update_failed_502():
     assert rv.status_code == 502
 
 
+def test_update_shutting_down_503():
+    rv = _client((False, "the device is shutting down")).post("/api/update")
+    assert rv.status_code == 503
+
+
 def test_update_cross_site_403():
     rv = _client((True, "x")).post("/api/update",
                                    headers={"Origin": "http://evil.example"})
@@ -139,3 +144,24 @@ def test_no_update_when_current(service, repos, monkeypatch):
     service._current_sha = _head(src)
     service._check_for_update()
     assert service._update_available is False
+
+
+def test_update_rolls_back_when_new_code_wont_load(service, repos, tmp_path,
+                                                   monkeypatch):
+    # The repo fixture's ditto/ is a stub with no web module, so the deployed
+    # tree fails `import ditto.web` — the reset succeeds but the deploy must roll
+    # back to the previous code and must NOT record a new revision.
+    src = repos["src"]
+    app = tmp_path / "app"
+    (app / "ditto").mkdir(parents=True)
+    (app / "ditto" / "__init__.py").write_text("# OLD deployed\n")
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "APP", app)
+    monkeypatch.setattr(config, "REVISION_FILE", app / "REVISION")
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+
+    ok, msg = service.update()
+
+    assert ok is False and "rolled back" in msg
+    assert (app / "ditto" / "__init__.py").read_text() == "# OLD deployed\n"
+    assert not (app / "REVISION").exists()      # no revision recorded on failure

@@ -31,6 +31,10 @@ DB_PATH = DATA / "state.db"
 # writable data partition, provisioned once — not created by ensure_dirs.
 SRC = DATA / "src"
 APP = DATA / "app"
+# Full commit SHA of the code actually deployed to APP, written only after a
+# successful swap so it never reports code that failed to land. The UI shows a
+# short form and the update check compares against it.
+REVISION_FILE = APP / "REVISION"
 # Branch the device follows. A device is an appliance that tracks one branch.
 UPDATE_BRANCH = os.environ.get("DITTO_UPDATE_BRANCH", "main")
 # A oneshot unit that restarts ditto-web from outside the web process, so the

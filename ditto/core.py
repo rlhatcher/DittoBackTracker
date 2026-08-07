@@ -7,6 +7,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -108,10 +109,11 @@ class Service:
         self._update_lock = threading.Lock()
 
         # Deployed code identity + whether the remote has something newer.
-        # `revision`/`_current_sha` come from the local checkout (cheap, no
-        # network) once at startup; `update_available`/`remote_revision` are
-        # filled by a background check that fetches from the remote.
-        self._revision, self._current_sha = self._local_head()
+        # `revision`/`_current_sha` are the SHA actually deployed (recorded at
+        # the last successful deploy, else the checkout HEAD) — cheap, no network
+        # — read once at startup; `update_available`/`remote_revision` are filled
+        # by a background check that fetches from the remote.
+        self._revision, self._current_sha = self._deployed_head()
         self._update_available = False
         self._remote_revision: Optional[str] = None
 
@@ -383,8 +385,12 @@ class Service:
         except (subprocess.SubprocessError, OSError) as e:
             return (False, f"git update failed: {self._proc_err(e)}")
 
+        target = self._rev_parse(src, "HEAD")        # what we're deploying to
+
         # Atomic-ish redeploy: build the new tree beside the live one and swap by
         # rename, so a failed copy never leaves the app without a ditto/ package.
+        # The previous deployment is kept as ditto.bak — a one-rename rollback if
+        # the new code won't load, and the last-known-good between updates.
         new, live, bak = app / "ditto.new", app / "ditto", app / "ditto.bak"
         try:
             if new.exists():
@@ -395,14 +401,36 @@ class Service:
             if live.exists():
                 live.rename(bak)
             new.rename(live)
-            shutil.rmtree(bak, ignore_errors=True)
         except OSError as e:
             if not live.exists() and bak.exists():
                 bak.rename(live)                # put the old code back
             shutil.rmtree(new, ignore_errors=True)
             return (False, f"deploy failed: {e}")
 
-        rev = self._rev_parse(src, "HEAD", short=True)
+        # Smoke-check the deployed code before committing to a restart: import it
+        # from the app dir (cwd is first on sys.path). This catches a syntax or
+        # import error — the common "broke on deploy" — without waiting on the
+        # restart, which cannot be observed from the process being restarted. On
+        # failure, roll back to the previous deployment and do not restart.
+        check = self._import_check(app)
+        if check is not None:
+            if live.exists():
+                shutil.rmtree(live, ignore_errors=True)
+            if bak.exists():
+                bak.rename(live)
+            return (False, f"new code failed to load; rolled back: {check}")
+
+        # Record the SHA that is now actually deployed — only after the swap and
+        # smoke-check succeed — so the reported revision and the update check
+        # reflect the running tree even if a later deploy fails after the reset.
+        if target:
+            try:
+                config.REVISION_FILE.write_text(target + "\n")
+            except OSError:
+                pass
+        self._current_sha = target
+        self._revision = target[:7] if target else None
+        self._update_available = False
 
         # Restart from outside this process. sudo -n so a missing NOPASSWD rule
         # fails fast rather than hanging on a password prompt.
@@ -414,9 +442,24 @@ class Service:
                  config.RESTART_SERVICE],
                 check=True, capture_output=True, text=True, timeout=15)
         except (subprocess.SubprocessError, OSError) as e:
-            return (False, f"deployed {rev or 'update'} but the restart was "
-                           f"refused — is OTA set up? {self._proc_err(e)}")
-        return (True, rev or "updated")
+            return (False, f"deployed {self._revision or 'update'} but the "
+                           f"restart was refused — is OTA set up? "
+                           f"{self._proc_err(e)}")
+        return (True, self._revision or "updated")
+
+    @staticmethod
+    def _import_check(app: Path) -> Optional[str]:
+        """Import the deployed package from `app`. Returns None if it loads, or a
+        short error string if it doesn't."""
+        try:
+            r = subprocess.run([sys.executable, "-c", "import ditto.web"],
+                               cwd=str(app), capture_output=True, text=True,
+                               timeout=30)
+        except (subprocess.SubprocessError, OSError) as e:
+            return str(e)[:200]
+        if r.returncode != 0:
+            return (r.stderr.strip() or "import failed").splitlines()[-1][:200]
+        return None
 
     def _check_for_update(self) -> None:
         """Background: fetch the remote and flag whether it has something newer
@@ -436,13 +479,17 @@ class Service:
         self._update_available = remote_full != self._current_sha
         self._emit()
 
-    def _local_head(self) -> "tuple[Optional[str], Optional[str]]":
-        """(short, full) commit of the local checkout, or (None, None)."""
-        src = config.SRC
-        if not (src / ".git").is_dir():
-            return (None, None)
-        return (self._rev_parse(src, "HEAD", short=True),
-                self._rev_parse(src, "HEAD"))
+    def _deployed_head(self) -> "tuple[Optional[str], Optional[str]]":
+        """(short, full) SHA of the deployed code. Prefer the SHA recorded at the
+        last successful deploy; fall back to the checkout HEAD (a fresh install
+        has app == src but no REVISION yet). (None, None) if neither is known."""
+        try:
+            full = config.REVISION_FILE.read_text().strip() or None
+        except OSError:
+            full = None
+        if not full and (config.SRC / ".git").is_dir():
+            full = self._rev_parse(config.SRC, "HEAD")
+        return (full[:7] if full else None, full)
 
     @staticmethod
     def _git(cwd: Path, *args: str) -> None:
