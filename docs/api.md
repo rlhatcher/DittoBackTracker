@@ -247,7 +247,7 @@ restart sudoers rule) — see the README.
 | Status | Meaning |
 |---|---|
 | `200` | Update deployed; the service is restarting |
-| `409` | Busy (a job is in flight, or an update is already running) — retry when idle |
+| `409` | Busy (work is in flight or queued, or an update is already running) — retry when idle |
 | `502` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
 | `503` | The device is shutting down — try again after it comes back up |
 
@@ -277,7 +277,7 @@ curl -N http://dittobacktracker.local/api/events
 | `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `DELETE /api/slots/<n>`, `POST /api/upload` | Bad input: slot out of range, non-audio file, or a file ffprobe can't read. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
 | `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>` | No such trash entry, or the slot has no loop |
-| `409` | `POST /api/update` | Busy: a job is in flight, or an update is already running. Retry when idle |
+| `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
 | `500` | `GET /api/loops/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error). Body is `{"error": "..."}` |
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |

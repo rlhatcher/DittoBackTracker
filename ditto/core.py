@@ -107,6 +107,10 @@ class Service:
         # Serializes self-update so two clicks can't redeploy on top of each
         # other. Held only for the brief git-pull + redeploy, never a job.
         self._update_lock = threading.Lock()
+        # Set while an update is admitted: gates the worker from starting any new
+        # job, so a redeploy/restart never overlaps pedal work. Stays set once a
+        # restart is pending; cleared if the update bails out.
+        self._updating = threading.Event()
 
         # Deployed code identity + whether the remote has something newer.
         # `revision`/`_current_sha` are the SHA actually deployed (recorded at
@@ -357,22 +361,33 @@ class Service:
         """Pull the tracked branch, redeploy the app, and restart out-of-process.
 
         Returns (ok, message): on success `message` is the deployed short commit,
-        otherwise a human-readable reason. Refused while a job is in flight so a
-        restart never interrupts a write, and serialized so two clicks can't
-        redeploy on top of each other. The restart itself is done by a separate
-        oneshot unit (RESTART_SERVICE) so it isn't killing this process; a fresh
-        ditto-web then comes up on the new code.
+        otherwise a human-readable reason. Serialized so two clicks can't redeploy
+        on top of each other. Admission is atomic with job execution: `_updating`
+        is set first, which gates the worker from starting any job, and the update
+        is only admitted when nothing is in flight and the queue is empty — so a
+        restart never runs concurrently with (or interrupts) a write. On success
+        `_updating` stays set (a restart is pending); it's cleared on every path
+        that does not initiate one. The restart itself is done by a separate
+        oneshot unit (RESTART_SERVICE), so it isn't killing this process.
         """
         if self.ending:
             return (False, "the device is shutting down")
-        if self.busy or self._in_flight.is_set():
-            return (False, "busy — try again when the current work finishes")
         if not self._update_lock.acquire(blocking=False):
             return (False, "an update is already running")
+        # Gate the worker before inspecting idleness, so a job can't slip from
+        # the queue into flight between the check and the deploy.
+        self._updating.set()
+        result = (False, "update failed")
         try:
-            return self._do_update()
+            if self.busy or self._in_flight.is_set() or not self._work.empty():
+                result = (False, "busy — try again when the current work finishes")
+            else:
+                result = self._do_update()
         finally:
             self._update_lock.release()
+            if not result[0]:
+                self._updating.clear()      # no restart pending — resume work
+        return result
 
     def _do_update(self) -> "tuple[bool, str]":
         src, app = config.SRC, config.APP
@@ -697,6 +712,12 @@ class Service:
 
     def _worker(self) -> None:
         while not self._stop.is_set():
+            # Don't start a job while an update is admitted: a redeploy/restart
+            # must not overlap pedal work. Anything queued waits here and is
+            # drained on the pending restart (or resumes if the update bails).
+            if self._updating.is_set():
+                self._stop.wait(0.1)
+                continue
             try:
                 job = self._work.get(timeout=0.5)
             except queue.Empty:

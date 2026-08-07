@@ -75,6 +75,18 @@ def test_update_refused_while_busy(service):
     assert ok is False and "busy" in msg
 
 
+def test_update_refused_while_job_in_flight(service):
+    # A job dequeued but not yet flagged busy still blocks admission, and the
+    # updating gate is cleared again on the refusal.
+    service._in_flight.set()
+    try:
+        ok, msg = service.update()
+    finally:
+        service._in_flight.clear()
+    assert ok is False and "busy" in msg
+    assert not service._updating.is_set()
+
+
 def test_update_no_git_checkout(service, tmp_path, monkeypatch):
     # Idle, but SRC has no .git — the update must fail cleanly, not restart.
     monkeypatch.setattr(config, "SRC", tmp_path / "src")

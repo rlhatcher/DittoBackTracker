@@ -11,6 +11,7 @@
 set -euo pipefail
 
 APP=/var/lib/ditto/app
+SRC=/var/lib/ditto/src        # must match config.SRC — the checkout OTA pulls
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if ! mountpoint -q /var/lib/ditto || [ ! -w /var/lib/ditto ]; then
@@ -18,6 +19,21 @@ if ! mountpoint -q /var/lib/ditto || [ ! -w /var/lib/ditto ]; then
   echo "Work through docs/provisioning.md first — the data partition is" >&2
   echo "created there. A bare directory on the root/overlay would lose the" >&2
   echo "app and state.db on the next reboot." >&2
+  exit 1
+fi
+
+# Over-the-air updates pull the git checkout at $SRC, so installing from anywhere
+# else would leave a device whose Update button always fails "no git checkout at
+# /var/lib/ditto/src". Require the documented location (provisioning.md step 7).
+if [ "$HERE" != "$SRC" ]; then
+  echo "error: run install.sh from the checkout at $SRC (not $HERE), so" >&2
+  echo "over-the-air updates work. See docs/provisioning.md step 7:" >&2
+  echo "  git clone <url> $SRC && cd $SRC && ./install.sh" >&2
+  exit 1
+fi
+if [ ! -d "$SRC/.git" ]; then
+  echo "error: $SRC is not a git checkout, so over-the-air updates can't pull." >&2
+  echo "Clone the repo to $SRC rather than copying it." >&2
   exit 1
 fi
 
