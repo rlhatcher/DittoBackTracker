@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111">
+<title>DittoBackTracker</title>
+<style>
+:root{
+  --bg:#f6f5f2; --card:#fff; --line:#e2e0da; --tx:#1b1b19; --tx2:#6b6a65;
+  --ok:#1d9e75; --warn:#ba7517; --err:#c0392b; --accent:#185fa5;
+}
+@media (prefers-color-scheme:dark){
+  /* Lighten the semantic colours too: the light-mode --err and --accent fall
+     below WCAG contrast against the dark --card, so error text and the focus
+     ring would be hard to read. */
+  :root{--bg:#161614;--card:#1f1f1d;--line:#33322e;--tx:#eceae4;--tx2:#9b9a94;
+    --ok:#3fc79b;--warn:#e0a34a;--err:#f0736a;--accent:#6ba7e8;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;padding-bottom:80px}
+.wrap{max-width:640px;margin:0 auto;padding:16px}
+header{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 16px;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;margin-bottom:12px}
+h1{font-size:16px;font-weight:600;margin:0}
+.meta{font-size:13px;color:var(--tx2);display:flex;gap:14px;align-items:center}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:14px 16px;margin-bottom:12px}
+.capbar{height:10px;border-radius:5px;background:var(--line);overflow:hidden;margin:8px 0 6px}
+.capfill{height:100%;background:var(--ok);transition:width .3s}
+.capfill.warn{background:var(--warn)} .capfill.err{background:var(--err)}
+.row{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--tx2)}
+#grid{display:grid;grid-template-columns:repeat(20,1fr);gap:3px;margin-top:4px}
+.cell{aspect-ratio:1;border-radius:2px;background:transparent;padding:0;
+  font:inherit;-webkit-appearance:none;appearance:none;
+  border:1px solid var(--line);cursor:pointer}
+.cell.synced{background:var(--ok);border-color:transparent}
+.cell.staged,.cell.converting{background:var(--warn);border-color:transparent}
+.cell.error{background:var(--err);border-color:transparent}
+.cell.sel{outline:2px solid var(--accent);outline-offset:1px}
+.cell.over{outline:2px solid var(--accent);outline-offset:2px;transform:scale(1.35)}
+.cell.dragging{opacity:.35}
+.cell{transition:transform .1s}
+.cell[draggable=true]{cursor:grab}
+.track{display:flex;align-items:center;gap:10px;padding:10px 0;
+  border-bottom:1px solid var(--line)}
+.track:last-child{border-bottom:0}
+.num{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--tx2);width:22px;flex:none}
+.nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dur{font-size:12px;color:var(--tx2);flex:none}
+.st{font-size:12px;flex:none;min-width:74px;text-align:right}
+.st.synced{color:var(--ok)} .st.staged,.st.converting{color:var(--warn)}
+.st.error{color:var(--err)}
+.x{border:0;background:none;color:var(--tx2);cursor:pointer;font-size:17px;
+  line-height:1;padding:2px 4px;flex:none}
+.x:hover{color:var(--err)}
+#drop{display:block;border:1.5px dashed var(--line);border-radius:12px;
+  padding:26px 16px;
+  text-align:center;color:var(--tx2);font-size:14px;cursor:pointer;
+  background:var(--card);transition:border-color .15s,background .15s,color .15s}
+/* The input itself is off screen, so its focus ring has to land on the label. */
+.wrap:has(#file:focus-visible) #drop{outline:2px solid var(--accent);
+  outline-offset:2px}
+#drop.over{border-color:var(--accent);background:rgba(24,95,165,.06)}
+#drop.bin{border-color:var(--err);color:var(--err)}
+#drop.bin.over{background:rgba(192,57,43,.09);border-style:solid}
+button.undo{background:none;border:1px solid var(--line);color:var(--tx);
+  border-radius:6px;padding:5px 10px;font-size:13px;cursor:pointer;
+  white-space:nowrap;flex:none}
+#undoslot{flex:none}
+.bar{position:fixed;left:0;right:0;bottom:0;background:var(--card);
+  border-top:1px solid var(--line);padding:12px 16px;
+  padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  display:flex;gap:12px;align-items:center;justify-content:space-between}
+button.act{background:var(--tx);color:var(--bg);border:0;border-radius:8px;
+  padding:10px 16px;font-size:14px;font-weight:500;cursor:pointer}
+button.act:disabled{opacity:.4;cursor:default}
+.prog{flex:1;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.progfill{height:100%;background:var(--accent);width:0;transition:width .2s}
+.msg{font-size:13px;color:var(--tx2);flex:1;min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.err{color:var(--err)}
+.hide{display:none}
+/* Kept in the accessibility tree and focusable — display:none would take the
+   file input out of the tab order and off screen readers. */
+.vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);
+  white-space:nowrap;border:0}
+h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
+  text-transform:uppercase;letter-spacing:.04em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>DittoBackTracker</h1>
+    <div class="meta">
+      <span id="pedal"><span class="dot" style="background:var(--tx2)"></span>—</span>
+      <span id="batt">—</span>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="row"><span>Capacity</span><span id="captxt">—</span></div>
+    <div class="capbar"><div class="capfill" id="capfill" style="width:0"></div></div>
+    <div class="row"><span id="capnote"></span></div>
+  </div>
+
+  <div class="card">
+    <h2>Slots</h2>
+    <div id="grid"></div>
+  </div>
+
+  <div class="card" id="listcard">
+    <h2>Tracks</h2>
+    <div id="list"></div>
+  </div>
+
+  <label id="drop" for="file">
+    <div style="font-size:22px;margin-bottom:4px" aria-hidden="true">↓</div>
+    <span id="drophead">Drop audio here, or tap to choose</span>
+    <div style="font-size:12px;margin-top:6px" id="dropnote">
+      Drop straight onto a slot to target it, or use a leading number —
+      “07 Blue Bossa.mp3”
+    </div>
+  </label>
+  <input type="file" id="file" multiple accept="audio/*" class="vh">
+
+</div>
+
+<div class="bar">
+  <div class="prog hide" id="progwrap"><div class="progfill" id="progfill"></div></div>
+  <div class="msg" id="msg" role="status" aria-live="polite">Connecting…</div>
+  <span id="undoslot"></span>
+  <button class="act" id="done" disabled>Done</button>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const SLOT_MIME = "application/x-ditto-slot";
+let state = null, selected = null, dragSrc = null, binMode = false;
+
+function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
+
+function render(s){
+  state = s;
+
+  const pd = $("#pedal");
+  const map = {mounted:["var(--ok)","connected"],absent:["var(--tx2)","no pedal"],error:["var(--err)","error"]};
+  const [c,t] = map[s.pedal] || map.absent;
+  pd.innerHTML = `<span class="dot" style="background:${c}"></span>${t}`;
+
+  $("#batt").textContent = s.battery.available && s.battery.percent!=null
+    ? (s.battery.charging ? "⚡ " : "") + s.battery.percent + "%" : "";
+
+  const cap = s.capacity;
+  const frac = cap.total_seconds ? cap.used_seconds/cap.total_seconds : 0;
+  $("#captxt").textContent = cap.used_label + " of " + cap.total_label;
+  const fill = $("#capfill");
+  fill.style.width = Math.min(100, frac*100) + "%";
+  fill.className = "capfill" + (frac>0.95?" err":frac>0.8?" warn":"");
+  $("#capnote").textContent = cap.total_seconds
+    ? mmss(Math.max(0,cap.total_seconds-cap.used_seconds)) + " remaining"
+    : "connect the pedal to see capacity";
+
+  const byslot = {};
+  s.slots.forEach(x => byslot[x.slot] = x);
+
+  const total = s.slot_count || 99;
+  const g = $("#grid");
+  if (g.children.length !== total){
+    g.innerHTML = "";
+    for (let i=1;i<=total;i++){
+      const d = document.createElement("button");
+      d.type = "button";
+      d.className = "cell"; d.title = "Slot "+i; d.dataset.slot = i;
+      d.setAttribute("aria-pressed", "false");
+      d.onclick = () => {
+        // Pick-up-then-place reorder — the keyboard equivalent of the mouse
+        // drag: with an occupied slot already selected, activating a different
+        // slot moves or swaps into it. (state, not the once-built byslot
+        // closure, so occupancy is read from the latest snapshot.)
+        if (selected !== null && selected !== i &&
+            state.slots.some(x => x.slot === selected)){
+          const src = selected;
+          selected = null;
+          moveTo(src, i);
+          render(state);
+          return;
+        }
+        selected = selected===i?null:i;
+        render(state);
+      };
+      d.addEventListener("dragstart", e => {
+        dragSrc = i;
+        e.dataTransfer.setData(SLOT_MIME, String(i));
+        e.dataTransfer.effectAllowed = "move";
+        d.classList.add("dragging");
+        setBinMode(true);
+      });
+      d.addEventListener("dragend", () => {
+        dragSrc = null;
+        d.classList.remove("dragging");
+        setBinMode(false);
+      });
+      ["dragenter","dragover"].forEach(ev => d.addEventListener(ev, e => {
+        e.preventDefault(); e.stopPropagation();
+        if (dragSrc !== i) d.classList.add("over"); }));
+      ["dragleave","drop"].forEach(ev => d.addEventListener(ev, e => {
+        e.preventDefault(); d.classList.remove("over"); }));
+      d.addEventListener("drop", e => {
+        e.stopPropagation();
+        const from = e.dataTransfer.getData(SLOT_MIME);
+        if (from){
+          const src = parseInt(from, 10);
+          if (src !== i) moveTo(src, i);
+        } else {
+          send(e.dataTransfer.files, i);
+        }
+      });
+      g.appendChild(d);
+    }
+  }
+  [...g.children].forEach((d,i) => {
+    const n = i+1, row = byslot[n];
+    d.className = "cell" + (row?" "+row.state:"") + (selected===n?" sel":"");
+    d.setAttribute("aria-pressed", selected===n ? "true" : "false");
+    d.draggable = !!row;
+    d.title = row
+      ? `Slot ${n}: ${row.display_name} — drag to another slot to move or swap`
+      : `Slot ${n} (empty)`;
+  });
+
+  const list = $("#list");
+  list.innerHTML = "";
+  if (!s.slots.length){
+    list.innerHTML = '<div style="color:var(--tx2);font-size:14px">Nothing loaded yet.</div>';
+  }
+  s.slots.forEach(r => {
+    const el = document.createElement("div");
+    el.className = "track";
+    const label = {converting:"converting",staged:"staged",synced:"on pedal",error:"error"}[r.state]||r.state;
+    el.innerHTML = `
+      <span class="num">${String(r.slot).padStart(2,"0")}</span>
+      <span class="nm">${escapeHtml(r.display_name)}</span>
+      <span class="dur">${mmss(r.duration)}</span>
+      <span class="st ${r.state}">${label}</span>`;
+    const x = document.createElement("button");
+    x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
+    x.onclick = () => removeSlot(r.slot, r.display_name);
+    el.appendChild(x);
+    if (r.state === "error" && r.error){
+      const e = document.createElement("div");
+      e.className = "err"; e.style.cssText = "font-size:12px;padding:0 0 8px 32px";
+      e.textContent = r.error;
+      list.appendChild(el); list.appendChild(e); return;
+    }
+    list.appendChild(el);
+  });
+
+  if (binMode){
+    /* leave the bin prompt in place while a slot is being dragged */
+  } else if (selected != null){
+    const pad = String(selected).padStart(2,"0");
+    const occ = byslot[selected];
+    $("#drophead").innerHTML = `Drop here to fill slot <b>${pad}</b>`;
+    const nxt = [selected+1, selected+2].filter(n => n <= total)
+      .map(n => String(n).padStart(2,"0"));
+    $("#dropnote").textContent = occ
+      ? `Slot ${pad} holds “${occ.display_name}” — tap another slot to move it there, drop a file to replace it, or tap ${pad} again to deselect.`
+      : nxt.length
+        ? `Extra files continue into ${nxt.join(", ")}… Tap the slot again to deselect.`
+        : `Slot ${pad} is the last slot. Tap the slot again to deselect.`;
+  } else {
+    $("#drophead").textContent = "Drop audio here, or tap to choose";
+    $("#dropnote").textContent =
+      "Drop straight onto a slot to target it, or use a leading number — “07 Blue Bossa.mp3”";
+  }
+
+  const busy = !!s.busy;
+  $("#progwrap").classList.toggle("hide", !busy || s.progress==null);
+  if (s.progress!=null) $("#progfill").style.width = (s.progress*100)+"%";
+  const m = $("#msg");
+  if (s.ending)            { m.textContent = "Finishing up — wait for the light"; m.className="msg"; }
+  else if (s.busy)         { m.textContent = s.busy; m.className="msg"; }
+  else if (s.error)        { m.textContent = s.error; m.className="msg err"; }
+  else if (!s.battery.can_write) { m.textContent = "Battery too low to write"; m.className="msg err"; }
+  else if (s.pedal==="mounted") { m.textContent = "Ready"; m.className="msg"; }
+  else                     { m.textContent = "Plug in the pedal"; m.className="msg"; }
+
+  $("#done").disabled = s.ending;
+}
+
+function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
+
+function fail(text){ $("#msg").textContent = text; $("#msg").className = "msg err"; }
+
+function moveTo(src, dst){
+  fetch(`/api/slots/${src}/move`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({to: dst})})
+    .then(r => r.ok ? null : r.json().catch(()=>({})))
+    .then(j => { if (j) fail(j.error || "Move failed"); })
+    .catch(() => fail("Move failed — check the connection"));
+}
+
+async function send(files, start){
+  if (!files || !files.length) return;
+  const fd = new FormData();
+  [...files].forEach(f => fd.append("file", f));
+  if (start != null) fd.append("start", start);
+  $("#msg").textContent = start != null
+    ? `Uploading to slot ${String(start).padStart(2,"0")}…` : "Uploading…";
+  let r;
+  try {
+    r = await fetch("/api/upload", {method:"POST", body:fd});
+  } catch {
+    selected = null;
+    fail("Upload failed — check the connection");
+    return;
+  }
+  const j = await r.json().catch(()=>({}));
+  selected = null;
+  // A 413 or a 500 carries no `errors` list, so an ok check has to come first
+  // or the message stays on "Uploading…" forever.
+  if (!r.ok && !(j.errors && j.errors.length)){
+    fail(j.error || `Upload failed (${r.status})`);
+    return;
+  }
+  if (j.errors && j.errors.length){
+    fail(j.errors.map(e=>`${e.name}: ${e.error}`).join("; "));
+  }
+}
+
+const drop = $("#drop");
+
+function setBinMode(on){
+  binMode = on;
+  drop.classList.toggle("bin", on);
+  if (on){
+    $("#drophead").innerHTML = "🗑 Drop here to remove from the pedal";
+    $("#dropnote").textContent = "You can undo straight afterwards.";
+  } else {
+    render(state);
+  }
+}
+
+async function removeSlot(slot, name){
+  let j;
+  try {
+    const r = await fetch(`/api/slots/${slot}`, {method:"DELETE"});
+    j = await r.json().catch(()=>({}));
+    if (!r.ok){ fail(j.error || "Could not clear the slot"); return; }
+  } catch {
+    fail("Could not clear the slot — check the connection");
+    return;
+  }
+  const host = $("#undoslot");
+  host.innerHTML = "";
+  // The delete names its own trash entry. Reading back the newest item
+  // instead would offer to restore whatever was deleted last, not this.
+  if (j.trash_id == null) return;
+  const label = name || "slot " + String(slot).padStart(2,"0");
+  const b = document.createElement("button");
+  b.className = "undo";
+  b.textContent = `Undo “${label.length > 16 ? label.slice(0,15)+"…" : label}”`;
+  b.onclick = async () => {
+    // fetch only rejects on a network error, so a 404 (the entry has since
+    // been pruned) would otherwise look like success. Check r.ok explicitly.
+    try {
+      const r = await fetch(`/api/trash/${j.trash_id}/restore`, {method:"POST"});
+      if (!r.ok) fail("Undo failed — the trash entry has gone");
+    } catch {
+      fail("Undo failed — check the connection");
+    }
+    host.innerHTML = "";
+  };
+  host.appendChild(b);
+  setTimeout(() => { if (host.firstChild === b) host.innerHTML = ""; }, 12000);
+}
+
+/* No click handler here: #drop is the input's <label>, so the browser opens
+   the picker. Calling .click() as well would open it twice. */
+$("#file").onchange = e => { send(e.target.files, selected); e.target.value=""; };
+["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => {
+  const from = e.dataTransfer.getData(SLOT_MIME);
+  if (from){
+    const slot = parseInt(from, 10);
+    const row = (state?.slots || []).find(s => s.slot === slot);
+    removeSlot(slot, row && row.display_name);
+  } else {
+    send(e.dataTransfer.files, selected);
+  }
+});
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => e.preventDefault());
+
+$("#done").onclick = async () => {
+  if (!confirm("End the session? The pedal will be unmounted and the device will shut down.")) return;
+  await fetch("/api/session/end", {method:"POST"});
+};
+
+const es = new EventSource("/api/events");
+let reconnectTimer = null;
+es.onopen = () => {
+  if (reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+};
+es.onmessage = e => render(JSON.parse(e.data));
+es.onerror = () => {
+  // The server retires each stream after five minutes and EventSource
+  // reconnects on its own (readyState CONNECTING), which completes in well
+  // under a second — so a planned rotation must stay silent. Only surface a
+  // real outage: CLOSED immediately, or CONNECTING that hasn't recovered
+  // within the grace window (onopen clears the timer, the next snapshot
+  // overwrites the message).
+  if (es.readyState === EventSource.CLOSED){
+    $("#msg").textContent = "Disconnected"; $("#msg").className = "msg err";
+  } else if (es.readyState === EventSource.CONNECTING && reconnectTimer === null){
+    reconnectTimer = setTimeout(() => {
+      if (es.readyState !== EventSource.OPEN){
+        $("#msg").textContent = "Reconnecting…"; $("#msg").className = "msg err";
+      }
+    }, 8000);
+  }
+};
+</script>
+</body>
+</html>
