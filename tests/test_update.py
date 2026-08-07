@@ -165,3 +165,27 @@ def test_update_rolls_back_when_new_code_wont_load(service, repos, tmp_path,
     assert ok is False and "rolled back" in msg
     assert (app / "ditto" / "__init__.py").read_text() == "# OLD deployed\n"
     assert not (app / "REVISION").exists()      # no revision recorded on failure
+
+
+def test_update_rolls_back_when_revision_unwritable(service, repos, tmp_path,
+                                                    monkeypatch):
+    # The swap and smoke-check succeed, but recording the revision fails; the
+    # deploy must roll back rather than run code it can't record.
+    src = repos["src"]
+    app = tmp_path / "app"
+    (app / "ditto").mkdir(parents=True)
+    (app / "ditto" / "__init__.py").write_text("# OLD deployed\n")
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "APP", app)
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    # A directory at the REVISION path makes the atomic replace fail.
+    (app / "REVISION").mkdir()
+    monkeypatch.setattr(config, "REVISION_FILE", app / "REVISION")
+    # Pretend the deployed code imports cleanly.
+    monkeypatch.setattr(core.Service, "_import_check",
+                        staticmethod(lambda app: None))
+
+    ok, msg = service.update()
+
+    assert ok is False and "could not record the revision" in msg
+    assert (app / "ditto" / "__init__.py").read_text() == "# OLD deployed\n"

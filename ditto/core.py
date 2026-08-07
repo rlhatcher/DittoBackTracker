@@ -414,20 +414,32 @@ class Service:
         # failure, roll back to the previous deployment and do not restart.
         check = self._import_check(app)
         if check is not None:
-            if live.exists():
-                shutil.rmtree(live, ignore_errors=True)
-            if bak.exists():
-                bak.rename(live)
+            err = self._rollback(live, bak)
+            if err:
+                return (False, f"new code failed to load and rollback failed "
+                               f"({err}); manual recovery may be needed")
             return (False, f"new code failed to load; rolled back: {check}")
 
         # Record the SHA that is now actually deployed — only after the swap and
         # smoke-check succeed — so the reported revision and the update check
         # reflect the running tree even if a later deploy fails after the reset.
+        # Write atomically (temp + replace) so a failed write leaves the previous
+        # REVISION intact; if it fails, roll back so the recorded revision and the
+        # live tree can never disagree on the next boot.
         if target:
+            tmp = config.REVISION_FILE.with_name(config.REVISION_FILE.name + ".tmp")
             try:
-                config.REVISION_FILE.write_text(target + "\n")
-            except OSError:
-                pass
+                tmp.write_text(target + "\n")
+                os.replace(str(tmp), str(config.REVISION_FILE))
+            except OSError as e:
+                tmp.unlink(missing_ok=True)
+                err = self._rollback(live, bak)
+                if err:
+                    return (False, f"deployed but could not record the revision "
+                                   f"({e}) and rollback failed ({err}); manual "
+                                   f"recovery may be needed")
+                return (False, f"deployed but could not record the revision "
+                               f"({e}); rolled back")
         self._current_sha = target
         self._revision = target[:7] if target else None
         self._update_available = False
@@ -446,6 +458,21 @@ class Service:
                            f"restart was refused — is OTA set up? "
                            f"{self._proc_err(e)}")
         return (True, self._revision or "updated")
+
+    @staticmethod
+    def _rollback(live: Path, bak: Path) -> Optional[str]:
+        """Restore the previous deployment (bak -> live) as a checked operation.
+        Returns None on success, or a short error if the live tree could not be
+        removed or the backup could not be restored — in which case the caller
+        must surface it rather than leaving broken code in place."""
+        try:
+            if live.exists():
+                shutil.rmtree(live)
+            if bak.exists():
+                bak.rename(live)
+        except OSError as e:
+            return str(e)[:200]
+        return None
 
     @staticmethod
     def _import_check(app: Path) -> Optional[str]:
