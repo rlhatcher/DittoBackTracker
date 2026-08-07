@@ -46,6 +46,14 @@ class Service:
         self.last_error: Optional[str] = None
         self.ending = False
 
+        # Set while the worker holds a job whose busy flag isn't up yet, so a
+        # drain can't mistake the gap between dequeue and write for "idle".
+        self._in_flight = threading.Event()
+        # Tracks the last can_write() reading so a low-battery write can be
+        # requeued the moment a charger brings the cell back up.
+        self._could_write = True
+        self._last_prog_emit = 0.0
+
         self._stop = threading.Event()
         self._threads = [
             threading.Thread(target=self._worker, daemon=True, name="worker"),
@@ -262,10 +270,12 @@ class Service:
             except Exception as e:      # never let the monitor die
                 log.exception("monitor tick failed")
                 self.last_error = str(e)
-            time.sleep(config.POLL_SECS)
+            # Interruptible: shutdown must be able to stop the monitor before
+            # it joins and unmounts, or a late tick could remount the pedal.
+            self._stop.wait(config.POLL_SECS)
 
     def _tick_pedal(self) -> None:
-        if self.ending:
+        if self.ending or self._stop.is_set():
             return
 
         if not pedal.present():
@@ -293,6 +303,14 @@ class Service:
             self.fmt, self.fmt_source = pedal.detect_format()
             self._requeue_unsynced()
             self._emit()
+
+        # A write blocked by low battery leaves the slot staged with the pedal
+        # still mounted, so nothing else requeues it. Catch the moment a
+        # charger brings can_write() back and flush the backlog.
+        can_write = self.battery.can_write()
+        if can_write and not self._could_write:
+            self._requeue_unsynced()
+        self._could_write = can_write
 
         if self.battery.critical() and not self.ending:
             self.last_error = "battery critical — ending session"
@@ -347,12 +365,14 @@ class Service:
                 job = self._work.get(timeout=0.5)
             except queue.Empty:
                 continue
+            self._in_flight.set()
             try:
                 self._run_job(job)
             except Exception as e:
                 log.exception("job %r failed", job[0])
                 self.last_error = str(e)
             finally:
+                self._in_flight.clear()
                 self.busy = None
                 self.progress = None
                 self._emit()
@@ -386,7 +406,13 @@ class Service:
 
         def prog(f):
             self.progress = f
-            self._emit()
+            # ffmpeg emits a progress line several times a second and each
+            # _emit rebuilds a full snapshot (two SQLite queries + a stat on a
+            # Pi Zero), so cap it to ~5 Hz. The final state is emitted below.
+            now = time.monotonic()
+            if now - self._last_prog_emit >= 0.2:
+                self._last_prog_emit = now
+                self._emit()
 
         try:
             media.convert(src, h, self.fmt, progress=prog)
@@ -425,9 +451,12 @@ class Service:
         if existing.is_file():
             free += existing.stat().st_size
         if need > free:
-            over = (need - free) / media.bytes_per_second(self.fmt)
-            db.set_state(slot, "error",
-                         f"won't fit — over capacity by {mmss(over)}")
+            rate = media.bytes_per_second(self.fmt)
+            if rate:
+                msg = f"won't fit — over capacity by {mmss((need - free) / rate)}"
+            else:
+                msg = "won't fit — not enough space on the pedal"
+            db.set_state(slot, "error", msg)
             self._emit()
             return
 
@@ -459,7 +488,10 @@ class Service:
     def _drain(self, timeout: float = 300.0) -> None:
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if self._work.empty() and self.busy is None:
+            # busy alone is racy: the worker dequeues a job before it sets
+            # busy, so check the in-flight flag too or a drain can return with
+            # a write still running and unmount underneath it.
+            if self._work.empty() and not self._in_flight.is_set():
                 return
             time.sleep(0.2)
 

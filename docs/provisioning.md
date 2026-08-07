@@ -39,7 +39,7 @@ the `bootfs` partition before the first boot. On macOS that's
 Look at the file before editing — the token varies by image version. Recent
 cloud-init images use a bare `resize`. Delete that token and nothing else:
 
-```
+```text
 console=serial0,115200 console=tty1 root=PARTUUID=... rootfstype=ext4
 fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=GB ds=nocloud;i=rpi-imager-...
                          ^^^^^^ delete this
@@ -127,7 +127,7 @@ Expect `p3` to fill the rest of the card, ext4, labelled `dittodata`. Around
 
 Add to `/etc/fstab`:
 
-```
+```text
 LABEL=dittodata  /var/lib/ditto  ext4  defaults,noatime  0  2
 ```
 
@@ -197,7 +197,7 @@ relying on pin pressure.
 The Zero's data port defaults to host mode. Set it explicitly in
 `/boot/firmware/config.txt`:
 
-```
+```ini
 dtoverlay=dwc2,dr_mode=host
 ```
 
@@ -217,7 +217,7 @@ Udev creates the `by-label` symlink. No custom rule needed.
 An fstab entry with `noauto,user` lets the service mount the pedal without
 root:
 
-```
+```text
 LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto,gid=ditto  0  0
 ```
 
@@ -287,7 +287,7 @@ sense.
 
 In `/boot/firmware/config.txt`:
 
-```
+```ini
 disable_splash=1
 dtoverlay=disable-bt
 boot_delay=0
@@ -313,7 +313,7 @@ printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\n' \
 
 Then set `/etc/overlayroot.conf`:
 
-```
+```text
 overlayroot="tmpfs:recurse=0"
 ```
 

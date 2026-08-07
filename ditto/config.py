@@ -1,6 +1,7 @@
 """Configuration. Everything overridable by environment for testing."""
 
 import os
+import re
 from pathlib import Path
 
 
@@ -24,6 +25,11 @@ DB_PATH = DATA / "state.db"
 
 # Pedal
 PEDAL_LABEL = os.environ.get("DITTO_PEDAL_LABEL", "DITTOPLUS")
+# The label is interpolated into a device path and later handed to privileged
+# mount calls, so restrict it to what a FAT label can actually hold — a `/` or
+# `..` would resolve to a different device node.
+if not re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", PEDAL_LABEL) or PEDAL_LABEL in (".", ".."):
+    raise ValueError("DITTO_PEDAL_LABEL must be 1-32 chars of [A-Za-z0-9_.-]")
 PEDAL_DEV = Path(f"/dev/disk/by-label/{PEDAL_LABEL}")
 MOUNT = _abs_path("DITTO_MOUNT", "/media/ditto")
 
@@ -60,6 +66,10 @@ LONG_PRESS_SECS = 3.0
 PORT = int(os.environ.get("DITTO_PORT", "80"))
 POLL_SECS = 2.0              # pedal detection interval
 TRASH_KEEP_DAYS = 30
+# Whole-request cap for the two upload endpoints. A single lossless source is a
+# few tens of MB; this leaves headroom for a batch while refusing a runaway
+# body that would fill the small data partition. Flask answers 413 past it.
+MAX_UPLOAD_BYTES = int(os.environ.get("DITTO_MAX_UPLOAD_MB", "512")) * 1024 * 1024
 
 
 def ensure_dirs() -> None:

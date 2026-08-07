@@ -26,11 +26,10 @@ def main(argv=None) -> int:
     done = threading.Event()
 
     def on_term(_signum, _frame):
-        if done.is_set():
-            return
-        done.set()
-        service.shutdown()
-        sys.exit(0)
+        # Keep the handler minimal: just unblock the server. The real, blocking
+        # shutdown runs in the finally below, off the signal handler, so a long
+        # drain never executes at an arbitrary point with a lock held.
+        raise SystemExit(0)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, on_term)

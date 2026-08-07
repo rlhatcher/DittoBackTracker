@@ -27,11 +27,11 @@ PATTERNS = {
 def local_ip() -> str:
     """Best-effort local address, for the display. No traffic is sent."""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("10.255.255.255", 1))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        # Context-managed so the socket closes even if connect/getsockname
+        # raises; local_ip runs on every snapshot, so a leak would accumulate.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
     except Exception:
         return "no network"
 

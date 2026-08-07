@@ -105,20 +105,31 @@ def mark_synced(slot: int, source_hash: str) -> None:
 
 
 def set_duration(slot: int, duration: float) -> None:
-    conn().execute("UPDATE slots SET duration=? WHERE slot=?", (duration, slot))
+    conn().execute("UPDATE slots SET duration=?, updated=? WHERE slot=?",
+                   (duration, time.time(), slot))
     conn().commit()
 
 
 def move_slot(src: int, dst: int) -> None:
-    """Move into an empty destination."""
-    row = get_slot(src)
-    if not row:
-        return
+    """Move into an empty destination.
+
+    BEGIN IMMEDIATE so the existence check and the two writes share one write
+    lock; otherwise a concurrent op on src could empty it between the read and
+    the DELETE, wiping dst for nothing.
+    """
     c = conn()
-    with c:
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        if not get_slot(src):
+            c.commit()
+            return
         c.execute("DELETE FROM slots WHERE slot=?", (dst,))
         c.execute("UPDATE slots SET slot=?, synced_hash=NULL, state='staged', "
                   "updated=? WHERE slot=?", (dst, time.time(), src))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
 
 
 def swap_slots(a: int, b: int) -> None:
@@ -139,11 +150,16 @@ def swap_slots(a: int, b: int) -> None:
 
 
 def delete_slot(slot: int, to_trash: bool = True) -> Optional[int]:
-    """Returns the new trash id, so an undo can name the exact entry."""
-    row = get_slot(slot)
+    """Returns the new trash id, so an undo can name the exact entry.
+
+    BEGIN IMMEDIATE keeps the read and the delete atomic, so the trash entry
+    always records the row that was actually removed.
+    """
     trash_id = None
     c = conn()
-    with c:
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        row = get_slot(slot)
         if row and to_trash:
             cur = c.execute(
                 """INSERT INTO trash (slot, source_hash, display_name,
@@ -154,6 +170,10 @@ def delete_slot(slot: int, to_trash: bool = True) -> Optional[int]:
             )
             trash_id = cur.lastrowid
         c.execute("DELETE FROM slots WHERE slot=?", (slot,))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
     return trash_id
 
 
@@ -163,12 +183,22 @@ def trash_items() -> List[Dict]:
 
 
 def trash_pop(trash_id: int) -> Optional[Dict]:
-    r = conn().execute("SELECT * FROM trash WHERE id=?", (trash_id,)).fetchone()
-    if not r:
-        return None
-    conn().execute("DELETE FROM trash WHERE id=?", (trash_id,))
-    conn().commit()
-    return dict(r)
+    # BEGIN IMMEDIATE so the SELECT and DELETE are one atomic step: two
+    # concurrent undos of the same id can't both claim the row and restore
+    # the track twice.
+    c = conn()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        r = c.execute("SELECT * FROM trash WHERE id=?", (trash_id,)).fetchone()
+        if not r:
+            c.commit()
+            return None
+        c.execute("DELETE FROM trash WHERE id=?", (trash_id,))
+        c.commit()
+        return dict(r)
+    except Exception:
+        c.rollback()
+        raise
 
 
 def prune_trash(max_age_days: int) -> List[Dict]:

@@ -149,7 +149,9 @@ def write_track(slot: int, wav: Path) -> None:
                                     prefix="~bt", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with open(wav, "rb") as fsrc, os.fdopen(fd, "wb") as fdst:
+        # os.fdopen first so it owns and closes fd even if opening the source
+        # WAV raises (a staged file can vanish between check and copy).
+        with os.fdopen(fd, "wb") as fdst, open(wav, "rb") as fsrc:
             shutil.copyfileobj(fsrc, fdst, length=1 << 19)
             fdst.flush()
             os.fsync(fdst.fileno())

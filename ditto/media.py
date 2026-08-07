@@ -110,22 +110,25 @@ def convert(src: Path, source_hash: str, spec: Dict,
     # ffmpeg filling the stderr pipe buffer would deadlock the progress loop.
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8",
                                 errors="replace") as errf:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=errf, text=True)
-        try:
-            for line in proc.stdout:
-                if progress and total > 0 and line.startswith("out_time_us="):
-                    try:
-                        secs = int(line.split("=", 1)[1]) / 1_000_000
-                        progress(min(secs / total, 1.0))
-                    except ValueError:
-                        pass
-            proc.wait(timeout=600)
-        except Exception:
-            proc.kill()
-            proc.wait()
-            tmp.unlink(missing_ok=True)
-            raise
+        # Popen as a context manager closes stdout and reaps the process on
+        # every exit path; otherwise each conversion leaks the read pipe fd
+        # until GC, which bites on a long-lived service on a Pi Zero.
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                              stderr=errf, text=True) as proc:
+            try:
+                for line in proc.stdout:
+                    if progress and total > 0 and line.startswith("out_time_us="):
+                        try:
+                            secs = int(line.split("=", 1)[1]) / 1_000_000
+                            progress(min(secs / total, 1.0))
+                        except ValueError:
+                            pass
+                proc.wait(timeout=600)
+            except Exception:
+                proc.kill()
+                proc.wait()
+                tmp.unlink(missing_ok=True)
+                raise
 
         if proc.returncode != 0:
             errf.seek(0)
@@ -135,9 +138,14 @@ def convert(src: Path, source_hash: str, spec: Dict,
                 err[-1] if err else f"ffmpeg exited {proc.returncode}")
 
     # The staged WAV is the cache: it must be durable before it can be treated
-    # as valid, or a power cut mid-write leaves a truncated file that looks good.
-    with open(tmp, "rb+") as f:
-        f.flush()
+    # as valid, or a power cut mid-write leaves a truncated file that looks
+    # good. Sync the file, then the directory so the rename itself survives.
+    with open(tmp, "rb") as f:
         os.fsync(f.fileno())
     tmp.replace(dest)
+    dfd = os.open(str(dest.parent), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
     return dest

@@ -11,7 +11,11 @@
   --ok:#1d9e75; --warn:#ba7517; --err:#c0392b; --accent:#185fa5;
 }
 @media (prefers-color-scheme:dark){
-  :root{--bg:#161614;--card:#1f1f1d;--line:#33322e;--tx:#eceae4;--tx2:#9b9a94;}
+  /* Lighten the semantic colours too: the light-mode --err and --accent fall
+     below WCAG contrast against the dark --card, so error text and the focus
+     ring would be hard to read. */
+  :root{--bg:#161614;--card:#1f1f1d;--line:#33322e;--tx:#eceae4;--tx2:#9b9a94;
+    --ok:#3fc79b;--warn:#e0a34a;--err:#f0736a;--accent:#6ba7e8;}
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--tx);
@@ -131,7 +135,7 @@ h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
 
 <div class="bar">
   <div class="prog hide" id="progwrap"><div class="progfill" id="progfill"></div></div>
-  <div class="msg" id="msg">Connecting…</div>
+  <div class="msg" id="msg" role="status" aria-live="polite">Connecting…</div>
   <span id="undoslot"></span>
   <button class="act" id="done" disabled>Done</button>
 </div>
@@ -176,7 +180,22 @@ function render(s){
       d.type = "button";
       d.className = "cell"; d.title = "Slot "+i; d.dataset.slot = i;
       d.setAttribute("aria-pressed", "false");
-      d.onclick = () => { selected = selected===i?null:i; render(state); };
+      d.onclick = () => {
+        // Pick-up-then-place reorder — the keyboard equivalent of the mouse
+        // drag: with an occupied slot already selected, activating a different
+        // slot moves or swaps into it. (state, not the once-built byslot
+        // closure, so occupancy is read from the latest snapshot.)
+        if (selected !== null && selected !== i &&
+            state.slots.some(x => x.slot === selected)){
+          const src = selected;
+          selected = null;
+          moveTo(src, i);
+          render(state);
+          return;
+        }
+        selected = selected===i?null:i;
+        render(state);
+      };
       d.addEventListener("dragstart", e => {
         dragSrc = i;
         e.dataTransfer.setData(SLOT_MIME, String(i));
@@ -199,12 +218,7 @@ function render(s){
         const from = e.dataTransfer.getData(SLOT_MIME);
         if (from){
           const src = parseInt(from, 10);
-          if (src !== i) fetch(`/api/slots/${src}/move`, {
-            method:"POST", headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({to: i})})
-            .then(r => r.ok ? null : r.json().catch(()=>({})))
-            .then(j => { if (j) fail(j.error || "Move failed"); })
-            .catch(() => fail("Move failed — check the connection"));
+          if (src !== i) moveTo(src, i);
         } else {
           send(e.dataTransfer.files, i);
         }
@@ -258,7 +272,7 @@ function render(s){
     const nxt = [selected+1, selected+2].filter(n => n <= total)
       .map(n => String(n).padStart(2,"0"));
     $("#dropnote").textContent = occ
-      ? `Slot ${pad} holds “${occ.display_name}” — it will be replaced. Tap the slot again to deselect.`
+      ? `Slot ${pad} holds “${occ.display_name}” — tap another slot to move it there, drop a file to replace it, or tap ${pad} again to deselect.`
       : nxt.length
         ? `Extra files continue into ${nxt.join(", ")}… Tap the slot again to deselect.`
         : `Slot ${pad} is the last slot. Tap the slot again to deselect.`;
@@ -285,6 +299,15 @@ function render(s){
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 
 function fail(text){ $("#msg").textContent = text; $("#msg").className = "msg err"; }
+
+function moveTo(src, dst){
+  fetch(`/api/slots/${src}/move`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({to: dst})})
+    .then(r => r.ok ? null : r.json().catch(()=>({})))
+    .then(j => { if (j) fail(j.error || "Move failed"); })
+    .catch(() => fail("Move failed — check the connection"));
+}
 
 async function send(files, start){
   if (!files || !files.length) return;
@@ -347,8 +370,14 @@ async function removeSlot(slot, name){
   b.className = "undo";
   b.textContent = `Undo “${label.length > 16 ? label.slice(0,15)+"…" : label}”`;
   b.onclick = async () => {
-    await fetch(`/api/trash/${j.trash_id}/restore`, {method:"POST"})
-      .catch(() => fail("Undo failed"));
+    // fetch only rejects on a network error, so a 404 (the entry has since
+    // been pruned) would otherwise look like success. Check r.ok explicitly.
+    try {
+      const r = await fetch(`/api/trash/${j.trash_id}/restore`, {method:"POST"});
+      if (!r.ok) fail("Undo failed — the trash entry has gone");
+    } catch {
+      fail("Undo failed — check the connection");
+    }
     host.innerHTML = "";
   };
   host.appendChild(b);
@@ -382,7 +411,14 @@ $("#done").onclick = async () => {
 
 const es = new EventSource("/api/events");
 es.onmessage = e => render(JSON.parse(e.data));
-es.onerror = () => { $("#msg").textContent = "Disconnected"; $("#msg").className="msg err"; };
+es.onerror = () => {
+  // The server retires each stream after five minutes and EventSource
+  // reconnects on its own (readyState CONNECTING). Only flag a real outage —
+  // CLOSED — or "Disconnected" would flash every five minutes in normal use.
+  if (es.readyState === EventSource.CLOSED){
+    $("#msg").textContent = "Disconnected"; $("#msg").className = "msg err";
+  }
+};
 </script>
 </body>
 </html>

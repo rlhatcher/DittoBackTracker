@@ -28,9 +28,9 @@ bottleneck.
 
 ## Audio format
 
-```
+```text
 44100 Hz, 24-bit, mono   (pcm_s24le)
-132,300 bytes/second  =  7.6 MB per minute
+132,300 bytes/second  =  7.57 MiB per minute
 ```
 
 Mono, not stereo: the Ditto+ has one input and one output. Published sources say
@@ -59,7 +59,7 @@ the container from the extension. Writing directly to `.wav` doesn't need it.
 The pedal writes a classic PCM `fmt ` chunk (tag `0x0001`) padded to 740 bytes
 with a vendor block containing the string `tc electronic`:
 
-```
+```text
 00000000: 5249 4646 f860 0b00 5741 5645 666d 7420  RIFF.`..WAVEfmt
 00000010: e402 0000 0100 0100 44ac 0000 cc04 0200  ................
           ^^^^^^^^^ 740
@@ -83,7 +83,7 @@ so only the RIFF and data sizes vary.
 
 All 99 slot directories exist on a factory pedal:
 
-```
+```text
 /01track/
 /02track/
    ...
@@ -104,8 +104,8 @@ track with the recorded loop over it, which is the point of the feature.
 
 ## Capacity
 
-```
-~477 MB total  ≈  63 minutes of audio  ≈  twelve five-minute tracks
+```text
+~477 MiB total  ≈  63 minutes of audio  ≈  twelve five-minute tracks
 ```
 
 Capacity is the real limit, not the 99 slots. Any tool for this pedal should

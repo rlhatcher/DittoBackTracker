@@ -37,6 +37,9 @@ def slot_from_name(name: str) -> int | None:
 
 def create_app(service: Service) -> Flask:
     app = Flask(__name__, static_folder=None)
+    # Shared request-size cap for both upload endpoints; Flask returns 413 when
+    # a body exceeds it, before it can fill the data partition.
+    app.config["MAX_CONTENT_LENGTH"] = config.MAX_UPLOAD_BYTES
 
     @app.before_request
     def block_cross_site():
@@ -112,8 +115,7 @@ def create_app(service: Service) -> Flask:
         # of auto-assignment. An explicitly targeted slot may still be used —
         # the two files coexist — but we don't put a backing track under
         # someone's performance by accident.
-        taken = {s["slot"] for s in db.all_slots()}
-        reserved = set(taken)
+        reserved = {s["slot"] for s in db.all_slots()}
         if pedal.mounted():
             reserved |= {n for n in range(1, config.SLOTS + 1) if pedal.has_loop(n)}
         results, errors = [], []
@@ -132,9 +134,14 @@ def create_app(service: Service) -> Flask:
         else:
             for f in files:
                 name = f.filename or "track"
+                # Reject the suffix here, before a numbered non-audio file
+                # (e.g. "07 notes.txt") can reserve slot 7 and block it for
+                # the rest of the batch. It still gets its per-file error below.
+                if Path(name).suffix.lower() not in config.AUDIO_SUFFIXES:
+                    planned.append((None, f, name))
+                    continue
                 n = slot_from_name(name)
                 if n is not None and n not in reserved:
-                    taken.add(n)
                     reserved.add(n)
                     planned.append((n, f, name))
                 else:

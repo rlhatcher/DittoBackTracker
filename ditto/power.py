@@ -64,8 +64,15 @@ class Battery:
             with self._lock:
                 self._samples.append((bus_v, current_ma))
         except Exception:
+            # Close before dropping the handle — the loop reopens on a backoff
+            # forever, so leaking the fd each failure would exhaust them.
+            bus, self._bus = self._bus, None
             self.available = False
-            self._bus = None
+            if bus is not None:
+                try:
+                    bus.close()
+                except Exception:
+                    pass
 
     @property
     def volts(self) -> Optional[float]:

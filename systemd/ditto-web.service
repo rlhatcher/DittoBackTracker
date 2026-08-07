@@ -13,6 +13,10 @@ ExecStart=/usr/bin/python3 -m ditto
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=3
+# Shutdown drains the work queue (up to 30 s) and can retry a 30 s umount, so
+# give it more than the 90 s default before systemd escalates to SIGKILL —
+# a kill mid-write is exactly what leaves the pedal's filesystem dirty.
+TimeoutStopSec=120
 
 [Install]
 WantedBy=multi-user.target

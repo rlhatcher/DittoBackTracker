@@ -13,10 +13,11 @@ set -euo pipefail
 APP=/var/lib/ditto/app
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ ! -d /var/lib/ditto ]; then
-  echo "error: /var/lib/ditto does not exist." >&2
+if ! mountpoint -q /var/lib/ditto || [ ! -w /var/lib/ditto ]; then
+  echo "error: /var/lib/ditto is not a mounted, writable data partition." >&2
   echo "Work through docs/provisioning.md first — the data partition is" >&2
-  echo "created there, and without it nothing persists." >&2
+  echo "created there. A bare directory on the root/overlay would lose the" >&2
+  echo "app and state.db on the next reboot." >&2
   exit 1
 fi
 
@@ -35,9 +36,14 @@ echo "==> allow unprivileged poweroff (for the Done button)"
 sudo install -m 0440 "$HERE/etc/99-ditto-poweroff" /etc/sudoers.d/99-ditto-poweroff
 
 echo "==> pedal mount entry"
-if ! grep -q DITTOPLUS /etc/fstab; then
-  echo 'LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,umask=000,uid=ditto,gid=ditto  0  0' \
-    | sudo tee -a /etc/fstab >/dev/null
+# Owner-only masks: the pedal's files shouldn't be world-readable/writable.
+FSTAB_LINE='LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto,gid=ditto  0  0'
+if grep -q DITTOPLUS /etc/fstab && ! grep -qF "$FSTAB_LINE" /etc/fstab; then
+  echo "   replacing an outdated DITTOPLUS fstab entry with the secure one"
+  sudo sed -i.ditto-bak '\|LABEL=DITTOPLUS|d' /etc/fstab
+fi
+if ! grep -qF "$FSTAB_LINE" /etc/fstab; then
+  echo "$FSTAB_LINE" | sudo tee -a /etc/fstab >/dev/null
 fi
 sudo mkdir -p /media/ditto
 

@@ -89,7 +89,8 @@ The web UI runs anywhere. With no pedal attached, uploads convert and wait.
 
 `ffmpeg` and `ffprobe` must be on your `PATH` first — without `ffprobe` every
 upload is rejected as "not a readable audio file". On macOS `brew install
-ffmpeg`; on Debian or Ubuntu `sudo apt install ffmpeg`.
+ffmpeg`; on Debian or Ubuntu `sudo apt install ffmpeg python3-venv` (the venv
+package isn't present on a minimal install).
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install flask
