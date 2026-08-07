@@ -83,6 +83,43 @@ cd /var/lib/ditto/src
 
 Open `http://dittobacktracker.local/` and plug the pedal in.
 
+### Updating the device (OTA)
+
+The app is pure Python on the writable data partition, so pushing a new version
+is just replacing the code and restarting the service — no build, and no
+read-only-root chroot, because nothing under `/etc` changes.
+
+From a checkout on your laptop, push the working tree straight to the device:
+
+```bash
+./deploy.sh                        # -> ditto@dittobacktracker.local
+./deploy.sh -h pi.local -u ditto   # override host / user
+./deploy.sh --no-restart           # copy only
+```
+
+It tars the `ditto/` package over SSH, replaces the deployed copy (removing
+modules deleted upstream), and restarts `ditto-web`. The restart is graceful —
+it drains the work queue and unmounts the pedal cleanly. Only app code moves;
+it never touches `state.db`, `sources/`, `staged/`, `loops/`, or the pedal.
+
+`systemctl restart` needs root, so the script uses `ssh -t` for its one sudo
+prompt. To make deploys fully hands-off, add a sudoers rule once — this is an
+`/etc` change, so it goes in through the overlay chroot:
+
+```bash
+sudo overlayroot-chroot
+echo 'ditto ALL=(root) NOPASSWD: /usr/bin/systemctl restart ditto-web' \
+  | sudo tee /etc/sudoers.d/99-ditto-restart
+chmod 0440 /etc/sudoers.d/99-ditto-restart
+exit
+```
+
+To deploy on the device instead (e.g. after a merge to `main`), pull and
+reinstall as in [docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards).
+
+A change to the systemd unit or anything else under `/etc` is a provisioning
+change, not an OTA one — `deploy.sh` deliberately syncs only `ditto/`.
+
 ### Running it without hardware
 
 The web UI runs anywhere. With no pedal attached, uploads convert and wait.
