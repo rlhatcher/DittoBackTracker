@@ -31,6 +31,14 @@ if [ "$HERE" != "$SRC" ]; then
   echo "  git clone <url> $SRC && cd $SRC && ./install.sh" >&2
   exit 1
 fi
+echo "==> packages"
+sudo apt-get update -qq
+sudo apt-get install -y git ffmpeg python3-flask python3-waitress \
+                        python3-smbus python3-gpiozero i2c-tools avahi-daemon
+
+# Validate the checkout OTA will pull from. This runs after the package step so a
+# device that doesn't have git yet still gets a clear result rather than a bare
+# "git: command not found".
 if ! git -C "$SRC" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: $SRC is not a valid git checkout, so over-the-air updates" >&2
   echo "can't pull. Clone the repo to $SRC rather than copying it." >&2
@@ -41,11 +49,6 @@ if ! git -C "$SRC" remote get-url origin >/dev/null 2>&1; then
   echo "fetch. Clone it from your GitHub remote to $SRC." >&2
   exit 1
 fi
-
-echo "==> packages"
-sudo apt-get update -qq
-sudo apt-get install -y ffmpeg python3-flask python3-waitress \
-                        python3-smbus python3-gpiozero i2c-tools avahi-daemon
 
 echo "==> code -> $APP"
 mkdir -p "$APP"
@@ -82,7 +85,11 @@ sudo cp "$HERE/systemd/ditto-web.service" /etc/systemd/system/
 sudo cp "$HERE/systemd/ditto-restart.service" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl reset-failed ditto-web 2>/dev/null || true
-sudo systemctl enable --now ditto-web
+# enable (create the boot symlink) then restart, so re-installing over a running
+# service actually loads the new code. `enable --now` no-ops on an already-active
+# unit and would leave the old process running.
+sudo systemctl enable ditto-web
+sudo systemctl restart ditto-web
 
 sleep 2
 echo
