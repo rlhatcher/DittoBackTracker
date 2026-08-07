@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# runtime data — never commit
+state.db
+state.db-*
+sources/
+staged/
+trash/
+*.wav
+*.mp3
+
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
