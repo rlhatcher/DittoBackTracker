@@ -37,6 +37,7 @@ Full snapshot. The same object is pushed over `/api/events`.
   },
   "panel": { "led": false, "button": false, "oled": false },
   "slot_count": 99,
+  "loops": [ 5, 12 ],
   "slots": [
     {
       "slot": 5,
@@ -62,6 +63,12 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `battery.can_write` | `false` blocks writes. True when charging or when no gauge is present |
 | `panel` | Empty object when running `--headless` |
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
+| `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
+
+`capacity.used_seconds` is derived from the real bytes on the volume
+(`(bytes_total − bytes_free) / rate`) while the pedal is mounted, so it already
+counts `LOOP.WAV` and anything else physically present. Unmounted, it falls back
+to summed backing-track durations.
 
 Slot `state` is one of `converting`, `staged`, `synced`, `error`. Slots with no
 entry are absent from the array. The database does record a `state` (and
@@ -126,6 +133,45 @@ pedal on the next pass. A recorded `LOOP.WAV` in the same slot is left alone.
 
 `trash_id` names the entry this call created, for a subsequent restore. It is
 `null` if the slot was already empty.
+
+---
+
+## GET /api/loops/&lt;n&gt;
+
+Download the pedal-recorded loop in slot `n`. The worker copies `LOOP.WAV` off
+the pedal to a transient staging file on the Pi, the response streams that file
+as an attachment, and the staged copy is purged once the response completes.
+**Download never deletes** — the pedal keeps the original, so a failed or partial
+download costs nothing; just retry.
+
+```bash
+curl -OJ http://dittobacktracker.local/api/loops/5    # -> loop-05.wav
+```
+
+The request blocks briefly while staging (the copy is seconds to a minute over
+the ~1 MB/s USB link). A `GET` is used deliberately: reading a loop changes
+nothing on the pedal, so it needs no cross-site guard.
+
+| Status | Meaning |
+|---|---|
+| `200` | `Content-Disposition: attachment; filename="loop-NN.wav"`, `audio/wav` body |
+| `404` | The slot has no loop |
+| `503` | No pedal is mounted, or staging exceeded its time limit |
+
+---
+
+## DELETE /api/loops/&lt;n&gt;
+
+Delete the loop in slot `n` from the pedal. State-changing, so it is covered by
+the same cross-site guard as the other write methods. This is irreversible —
+a loop is a live take with no source and no undo — so the UI confirms first.
+`BT.WAV` and the slot directory are never touched.
+
+```json
+{ "ok": true }
+```
+
+`404` if the slot has no loop.
 
 ---
 
@@ -197,8 +243,9 @@ curl -N http://dittobacktracker.local/api/events
 |---|---|---|
 | `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `DELETE /api/slots/<n>`, `POST /api/upload` | Bad input: slot out of range, non-audio file, or a file ffprobe can't read. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
-| `404` | `POST /api/trash/<id>/restore` | No such trash entry |
+| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>` | No such trash entry, or the slot has no loop |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
+| `503` | `GET /api/loops/<n>` | No pedal mounted, or staging the loop exceeded its time limit. Body is `{"error": "..."}` |
 
 `POST /api/upload` is the exception to the rule. It is a batch, so it returns
 `201` even when some files were rejected, and reports those per file in

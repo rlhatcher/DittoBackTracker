@@ -9,13 +9,16 @@
 :root{
   --bg:#f6f5f2; --card:#fff; --line:#e2e0da; --tx:#1b1b19; --tx2:#6b6a65;
   --ok:#1d9e75; --warn:#ba7517; --err:#c0392b; --accent:#185fa5;
+  /* Loops are the user's own recordings: a distinct hue from the backing-track
+     states (green/amber/red) so a loop reads as "yours", not a BT status. */
+  --loop:#7a4fc0;
 }
 @media (prefers-color-scheme:dark){
   /* Lighten the semantic colours too: the light-mode --err and --accent fall
      below WCAG contrast against the dark --card, so error text and the focus
      ring would be hard to read. */
   :root{--bg:#161614;--card:#1f1f1d;--line:#33322e;--tx:#eceae4;--tx2:#9b9a94;
-    --ok:#3fc79b;--warn:#e0a34a;--err:#f0736a;--accent:#6ba7e8;}
+    --ok:#3fc79b;--warn:#e0a34a;--err:#f0736a;--accent:#6ba7e8;--loop:#b18cf0;}
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--tx);
@@ -35,12 +38,17 @@ h1{font-size:16px;font-weight:600;margin:0}
 .capfill.warn{background:var(--warn)} .capfill.err{background:var(--err)}
 .row{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--tx2)}
 #grid{display:grid;grid-template-columns:repeat(20,1fr);gap:3px;margin-top:4px}
-.cell{aspect-ratio:1;border-radius:2px;background:transparent;padding:0;
-  font:inherit;-webkit-appearance:none;appearance:none;
+.cell{position:relative;aspect-ratio:1;border-radius:2px;background:transparent;
+  padding:0;font:inherit;-webkit-appearance:none;appearance:none;
   border:1px solid var(--line);cursor:pointer}
 .cell.synced{background:var(--ok);border-color:transparent}
 .cell.staged,.cell.converting{background:var(--warn);border-color:transparent}
 .cell.error{background:var(--err);border-color:transparent}
+/* A loop lives on the slot independently of the backing-track state, so it is
+   an overlay dot in the loop hue, not another background colour. */
+.cell.has-loop::after{content:"";position:absolute;top:1px;right:1px;
+  width:4px;height:4px;border-radius:50%;background:var(--loop);
+  box-shadow:0 0 0 1px var(--card)}
 .cell.sel{outline:2px solid var(--accent);outline-offset:1px}
 .cell.over{outline:2px solid var(--accent);outline-offset:2px;transform:scale(1.35)}
 .cell.dragging{opacity:.35}
@@ -58,6 +66,16 @@ h1{font-size:16px;font-weight:600;margin:0}
 .x{border:0;background:none;color:var(--tx2);cursor:pointer;font-size:17px;
   line-height:1;padding:2px 4px;flex:none}
 .x:hover{color:var(--err)}
+/* Loop controls sit on their own indented line under the track row, so a
+   narrow phone never has to squeeze them next to the name and state. */
+.looprow{display:flex;flex-wrap:wrap;gap:8px;padding:0 0 10px 32px;margin-top:-2px}
+.loopbtn{background:none;border:1px solid var(--line);color:var(--tx);
+  border-radius:6px;padding:4px 9px;font-size:12px;line-height:1.4;cursor:pointer;
+  text-decoration:none;display:inline-block}
+.loopbtn:hover{border-color:var(--accent)}
+.loopbtn.danger:hover{border-color:var(--err);color:var(--err)}
+.nm.loop-only{color:var(--tx2);font-style:italic}
+.st.loop{color:var(--loop)}
 #drop{display:block;border:1.5px dashed var(--line);border-radius:12px;
   padding:26px 16px;
   text-align:center;color:var(--tx2);font-size:14px;cursor:pointer;
@@ -170,6 +188,7 @@ function render(s){
 
   const byslot = {};
   s.slots.forEach(x => byslot[x.slot] = x);
+  const loops = new Set(s.loops || []);
 
   const total = s.slot_count || 99;
   const g = $("#grid");
@@ -227,40 +246,72 @@ function render(s){
     }
   }
   [...g.children].forEach((d,i) => {
-    const n = i+1, row = byslot[n];
-    d.className = "cell" + (row?" "+row.state:"") + (selected===n?" sel":"");
+    const n = i+1, row = byslot[n], hasLoop = loops.has(n);
+    d.className = "cell" + (row?" "+row.state:"") + (hasLoop?" has-loop":"")
+      + (selected===n?" sel":"");
     d.setAttribute("aria-pressed", selected===n ? "true" : "false");
     d.draggable = !!row;
+    const loopNote = hasLoop ? " · holds a recorded loop" : "";
     d.title = row
-      ? `Slot ${n}: ${row.display_name} — drag to another slot to move or swap`
-      : `Slot ${n} (empty)`;
+      ? `Slot ${n}: ${row.display_name} — drag to another slot to move or swap${loopNote}`
+      : hasLoop ? `Slot ${n}: recorded loop only` : `Slot ${n} (empty)`;
   });
 
   const list = $("#list");
   list.innerHTML = "";
-  if (!s.slots.length){
+  // Union of backing-track slots and loop-bearing slots, in slot order: a slot
+  // that holds only a pedal-recorded loop (no backing track) still gets a row,
+  // so its download/remove controls are reachable.
+  const slotNums = [...new Set([...s.slots.map(x=>x.slot), ...loops])]
+    .sort((a,b)=>a-b);
+  if (!slotNums.length){
     list.innerHTML = '<div style="color:var(--tx2);font-size:14px">Nothing loaded yet.</div>';
   }
-  s.slots.forEach(r => {
+  slotNums.forEach(n => {
+    const r = byslot[n], pad = String(n).padStart(2,"0");
     const el = document.createElement("div");
     el.className = "track";
-    const label = {converting:"converting",staged:"staged",synced:"on pedal",error:"error"}[r.state]||r.state;
-    el.innerHTML = `
-      <span class="num">${String(r.slot).padStart(2,"0")}</span>
-      <span class="nm">${escapeHtml(r.display_name)}</span>
-      <span class="dur">${mmss(r.duration)}</span>
-      <span class="st ${r.state}">${label}</span>`;
-    const x = document.createElement("button");
-    x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
-    x.onclick = () => removeSlot(r.slot, r.display_name);
-    el.appendChild(x);
-    if (r.state === "error" && r.error){
+    if (r){
+      const label = {converting:"converting",staged:"staged",synced:"on pedal",error:"error"}[r.state]||r.state;
+      el.innerHTML = `
+        <span class="num">${pad}</span>
+        <span class="nm">${escapeHtml(r.display_name)}</span>
+        <span class="dur">${mmss(r.duration)}</span>
+        <span class="st ${r.state}">${label}</span>`;
+      const x = document.createElement("button");
+      x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
+      x.onclick = () => removeSlot(r.slot, r.display_name);
+      el.appendChild(x);
+    } else {
+      // Loop-only slot: no backing track, so no name/duration/clear control.
+      el.innerHTML = `
+        <span class="num">${pad}</span>
+        <span class="nm loop-only">Loop only</span>
+        <span class="st loop">loop</span>`;
+    }
+    list.appendChild(el);
+    if (loops.has(n)){
+      const lr = document.createElement("div");
+      lr.className = "looprow";
+      const dl = document.createElement("a");
+      dl.className = "loopbtn"; dl.href = `/api/loops/${n}`;
+      dl.setAttribute("download", `loop-${pad}.wav`);
+      dl.textContent = "Download loop";
+      dl.title = `Download the loop from slot ${pad} (leaves it on the pedal)`;
+      lr.appendChild(dl);
+      const rm = document.createElement("button");
+      rm.className = "loopbtn danger"; rm.textContent = "Remove loop";
+      rm.title = `Delete the loop in slot ${pad} from the pedal`;
+      rm.onclick = () => removeLoop(n);
+      lr.appendChild(rm);
+      list.appendChild(lr);
+    }
+    if (r && r.state === "error" && r.error){
       const e = document.createElement("div");
       e.className = "err"; e.style.cssText = "font-size:12px;padding:0 0 8px 32px";
       e.textContent = r.error;
-      list.appendChild(el); list.appendChild(e); return;
+      list.appendChild(e);
     }
-    list.appendChild(el);
   });
 
   if (binMode){
@@ -382,6 +433,22 @@ async function removeSlot(slot, name){
   };
   host.appendChild(b);
   setTimeout(() => { if (host.firstChild === b) host.innerHTML = ""; }, 12000);
+}
+
+async function removeLoop(slot){
+  // A loop is a live take with no source — deleting it is irreversible, so
+  // guard the accidental click. No undo: there is nothing to restore from.
+  const pad = String(slot).padStart(2,"0");
+  if (!confirm(`Delete the loop in slot ${pad} from the pedal? You can't undo this.`)) return;
+  try {
+    const r = await fetch(`/api/loops/${slot}`, {method:"DELETE"});
+    if (!r.ok){
+      const j = await r.json().catch(()=>({}));
+      fail(j.error || "Could not remove the loop");
+    }
+  } catch {
+    fail("Could not remove the loop — check the connection");
+  }
 }
 
 /* No click handler here: #drop is the input's <label>, so the browser opens

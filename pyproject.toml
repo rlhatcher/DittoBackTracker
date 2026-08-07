@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# The ditto package lives at the repo root; put it on sys.path so tests can
+# import it without an install step.
+pythonpath = ["."]
+testpaths = ["tests"]

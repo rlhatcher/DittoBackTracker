@@ -19,6 +19,7 @@ PATTERNS = {
     "boot":    (0.5, 0.5),
     "idle":    None,          # steady on
     "writing": (0.1, 0.1),    # fast — do not unplug
+    "reading": (0.5, 0.5),    # slow — activity, but a read is safe to unplug
     "error":   (0.1, 0.1, 0.1, 0.6),
     "off":     (),
 }

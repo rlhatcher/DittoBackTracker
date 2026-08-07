@@ -1,7 +1,10 @@
 """Detect, mount, write to, and release the Ditto+.
 
-Only BT.WAV is ever written or removed. LOOP.WAV is the user's own recording
-and must never be touched.
+BT.WAV is the only file this tool writes, and it is written and removed freely
+because it is re-derivable from sources/. LOOP.WAV is the user's own recording,
+with no source and no way to reconstruct it: it is only ever read (to stage a
+download) or removed on an explicit, deliberate user action — never as a side
+effect of anything else.
 """
 
 from __future__ import annotations
@@ -78,9 +81,14 @@ def track_path(slot: int) -> Path:
     return slot_dir(slot) / config.TRACK_FILENAME
 
 
+def loop_path(slot: int) -> Path:
+    return slot_dir(slot) / config.LOOP_FILENAME
+
+
 def has_loop(slot: int) -> bool:
-    """Did the user record a loop in this slot? Never touch it."""
-    return (slot_dir(slot) / config.LOOP_FILENAME).exists()
+    """Did the user record a loop in this slot? Only ever read or, on an
+    explicit user action, removed — never overwritten."""
+    return loop_path(slot).is_file()
 
 
 def occupied_slots() -> Dict[int, int]:
@@ -170,9 +178,56 @@ def write_track(slot: int, wav: Path) -> None:
         raise
 
 
+def copy_loop(slot: int, dest: Path) -> None:
+    """Copy a slot's LOOP.WAV off the pedal into a local `dest`.
+
+    The reverse direction of write_track: the pedal is the source, `dest` is a
+    local staging file. Same temp + fsync + rename discipline so a truncated
+    copy never appears under `dest`, which matters because the web thread streams
+    `dest` straight to the browser. Raises FileNotFoundError if the loop is gone
+    (e.g. deleted on the pedal between has_loop() and here).
+    """
+    src = loop_path(slot)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent),
+                                    prefix="~loop", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        # os.fdopen first so it owns and closes fd even if opening the source
+        # raises (the loop can vanish between check and copy).
+        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
+            shutil.copyfileobj(fsrc, fdst, length=1 << 19)
+            fdst.flush()
+            os.fsync(fdst.fileno())
+        os.chmod(tmp, 0o644)
+        tmp.replace(dest)
+        try:
+            dirfd = os.open(str(dest.parent), os.O_RDONLY)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
+        except OSError:
+            pass    # not supported on all filesystems; os.sync() covers it
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def remove_track(slot: int) -> None:
     """Remove only BT.WAV. A recorded LOOP.WAV in the same slot survives."""
     p = track_path(slot)
+    if p.is_file():
+        p.unlink()
+
+
+def remove_loop(slot: int) -> None:
+    """Remove a slot's LOOP.WAV by exact name, on explicit user action only.
+
+    Never touches BT.WAV, never removes the slot directory, never recurses.
+    """
+    p = loop_path(slot)
     if p.is_file():
         p.unlink()
 

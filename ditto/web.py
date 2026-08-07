@@ -189,6 +189,89 @@ def create_app(service: Service) -> Flask:
             return jsonify(error=str(e)), 400
         return jsonify(ok=True, trash_id=trash_id)
 
+    @app.get("/api/loops/<int:slot>")
+    def download_loop(slot: int):
+        """Stage the slot's LOOP.WAV off the pedal, stream it as a download,
+        then purge the staged copy. A GET is fine: reading a loop changes
+        nothing on the pedal (download never deletes), and the Pi copy is
+        transient. No cross-site guard because it is a safe method.
+        """
+        try:
+            service._check_slot(slot)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if not pedal.mounted():
+            return jsonify(error="no pedal connected"), 503
+        if not service.has_loop(slot):
+            return jsonify(error="no loop in that slot"), 404
+
+        event = threading.Event()
+        result: dict = {}
+        service.stage_loop(slot, event, result)
+        if not event.wait(config.LOOP_STAGE_TIMEOUT):
+            return jsonify(error="timed out staging loop"), 503
+
+        err = result.get("error")
+        if err:
+            code = 404 if err == "no loop" else (503 if err == "no pedal" else 500)
+            return jsonify(error=err), code
+
+        path = result["path"]
+        released = threading.Event()
+
+        def purge():
+            # Idempotent: the generator's finally and the response close hook
+            # both fire. The staged copy is disposable once streamed — the pedal
+            # still holds the original. (send_file's own response would only run
+            # call_on_close on an explicit Response.close(), which no WSGI server
+            # calls, so we stream the file ourselves and purge in a finally —
+            # the same belt-and-suspenders shape as the SSE endpoint below.)
+            if not released.is_set():
+                released.set()
+                Path(path).unlink(missing_ok=True)
+
+        @stream_with_context
+        def gen():
+            try:
+                # The staged file may be unlinked while this fd is open; on
+                # POSIX the bytes remain readable until the fd closes, so the
+                # download always completes.
+                with open(path, "rb") as f:
+                    while True:
+                        chunk = f.read(1 << 19)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                purge()
+
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            purge()
+            return jsonify(error="loop staging vanished"), 500
+
+        resp = Response(gen(), mimetype="audio/wav",
+                        headers={
+                            "Content-Length": str(size),
+                            "Content-Disposition":
+                                f'attachment; filename="loop-{slot:02d}.wav"',
+                        })
+        resp.call_on_close(purge)
+        return resp
+
+    @app.delete("/api/loops/<int:slot>")
+    def remove_loop(slot: int):
+        """Delete a slot's loop from the pedal. State-changing, so the
+        block_cross_site guard covers it automatically."""
+        try:
+            ok = service.delete_loop(slot)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if not ok:
+            return jsonify(error="no loop in that slot"), 404
+        return jsonify(ok=True)
+
     @app.post("/api/slots/<int:slot>/move")
     def move(slot: int):
         body = request.get_json(silent=True) or {}
