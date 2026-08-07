@@ -7,11 +7,14 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
 from . import config
+
+_CONVERT_TIMEOUT = 600.0
 
 BYTES_PER_SAMPLE = {"pcm_u8": 1, "pcm_s16le": 2, "pcm_s24le": 3,
                     "pcm_s32le": 4, "pcm_f32le": 4}
@@ -115,6 +118,12 @@ def convert(src: Path, source_hash: str, spec: Dict,
         # until GC, which bites on a long-lived service on a Pi Zero.
         with subprocess.Popen(cmd, stdout=subprocess.PIPE,
                               stderr=errf, text=True) as proc:
+            # `for line in proc.stdout` blocks until ffmpeg writes or closes
+            # stdout, so proc.wait's own timeout is never reached if ffmpeg
+            # stalls silently. A watchdog kills it at the deadline, which ends
+            # the read and surfaces as a non-zero exit below.
+            watchdog = threading.Timer(_CONVERT_TIMEOUT, proc.kill)
+            watchdog.start()
             try:
                 for line in proc.stdout:
                     if progress and total > 0 and line.startswith("out_time_us="):
@@ -123,12 +132,14 @@ def convert(src: Path, source_hash: str, spec: Dict,
                             progress(min(secs / total, 1.0))
                         except ValueError:
                             pass
-                proc.wait(timeout=600)
+                proc.wait(timeout=_CONVERT_TIMEOUT)
             except Exception:
                 proc.kill()
                 proc.wait()
                 tmp.unlink(missing_ok=True)
                 raise
+            finally:
+                watchdog.cancel()
 
         if proc.returncode != 0:
             errf.seek(0)

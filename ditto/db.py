@@ -110,43 +110,46 @@ def set_duration(slot: int, duration: float) -> None:
     conn().commit()
 
 
-def move_slot(src: int, dst: int) -> None:
-    """Move into an empty destination.
+def move_or_swap(src: int, dst: int) -> Optional[str]:
+    """Move src into an empty dst, or swap two occupied slots — the choice is
+    made *inside* one BEGIN IMMEDIATE transaction, after re-reading both slots.
 
-    BEGIN IMMEDIATE so the existence check and the two writes share one write
-    lock; otherwise a concurrent op on src could empty it between the read and
-    the DELETE, wiping dst for nothing.
+    Deciding move-vs-swap before the transaction is racy: a concurrent upload
+    could fill dst in the gap, and a plain move would then DELETE that upload.
+    Holding the write lock across the read and the writes closes that window.
+
+    Returns "move", "swap", or None (src empty, or src == dst). The caller uses
+    the result to queue the right pedal work — an empty dst is erased at src and
+    written at dst; a swap rewrites both.
     """
+    if src == dst:
+        return None
     c = conn()
     c.execute("BEGIN IMMEDIATE")
     try:
         if not get_slot(src):
             c.commit()
-            return
-        c.execute("DELETE FROM slots WHERE slot=?", (dst,))
-        c.execute("UPDATE slots SET slot=?, synced_hash=NULL, state='staged', "
-                  "updated=? WHERE slot=?", (dst, time.time(), src))
+            return None
+        now = time.time()
+        if get_slot(dst):
+            # Swap. -1 is a scratch key; slot is the primary key so the two
+            # updates would otherwise collide.
+            c.execute("UPDATE slots SET slot=-1 WHERE slot=?", (src,))
+            c.execute("UPDATE slots SET slot=? WHERE slot=?", (src, dst))
+            c.execute("UPDATE slots SET slot=? WHERE slot=-1", (dst,))
+            c.execute("UPDATE slots SET synced_hash=NULL, state='staged', "
+                      "updated=? WHERE slot IN (?,?)", (now, src, dst))
+            op = "swap"
+        else:
+            c.execute("DELETE FROM slots WHERE slot=?", (dst,))
+            c.execute("UPDATE slots SET slot=?, synced_hash=NULL, "
+                      "state='staged', updated=? WHERE slot=?", (dst, now, src))
+            op = "move"
         c.commit()
+        return op
     except Exception:
         c.rollback()
         raise
-
-
-def swap_slots(a: int, b: int) -> None:
-    """Exchange two occupied slots. Non-destructive, so reordering a setlist
-    never sends anything to the trash. Both are marked unsynced because both
-    files must be rewritten on the pedal."""
-    if a == b:
-        return
-    c = conn()
-    with c:
-        # -1 is a scratch key; the slot column is the primary key so the two
-        # updates would otherwise collide.
-        c.execute("UPDATE slots SET slot=-1 WHERE slot=?", (a,))
-        c.execute("UPDATE slots SET slot=? WHERE slot=?", (a, b))
-        c.execute("UPDATE slots SET slot=? WHERE slot=-1", (b,))
-        c.execute("UPDATE slots SET synced_hash=NULL, state='staged', updated=? "
-                  "WHERE slot IN (?,?)", (time.time(), a, b))
 
 
 def delete_slot(slot: int, to_trash: bool = True) -> Optional[int]:

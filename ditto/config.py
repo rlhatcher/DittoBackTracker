@@ -28,8 +28,10 @@ PEDAL_LABEL = os.environ.get("DITTO_PEDAL_LABEL", "DITTOPLUS")
 # The label is interpolated into a device path and later handed to privileged
 # mount calls, so restrict it to what a FAT label can actually hold — a `/` or
 # `..` would resolve to a different device node.
-if not re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", PEDAL_LABEL) or PEDAL_LABEL in (".", ".."):
-    raise ValueError("DITTO_PEDAL_LABEL must be 1-32 chars of [A-Za-z0-9_.-]")
+# FAT/FAT32 volume labels are at most 11 characters, so a longer one could pass
+# validation yet never match the pedal.
+if not re.fullmatch(r"[A-Za-z0-9_.-]{1,11}", PEDAL_LABEL) or PEDAL_LABEL in (".", ".."):
+    raise ValueError("DITTO_PEDAL_LABEL must be 1-11 chars of [A-Za-z0-9_.-]")
 PEDAL_DEV = Path(f"/dev/disk/by-label/{PEDAL_LABEL}")
 MOUNT = _abs_path("DITTO_MOUNT", "/media/ditto")
 
@@ -69,7 +71,11 @@ TRASH_KEEP_DAYS = 30
 # Whole-request cap for the two upload endpoints. A single lossless source is a
 # few tens of MB; this leaves headroom for a batch while refusing a runaway
 # body that would fill the small data partition. Flask answers 413 past it.
-MAX_UPLOAD_BYTES = int(os.environ.get("DITTO_MAX_UPLOAD_MB", "512")) * 1024 * 1024
+# Must be positive — a zero or negative limit would 413 every upload.
+_max_upload_mb = int(os.environ.get("DITTO_MAX_UPLOAD_MB", "512"))
+if _max_upload_mb <= 0:
+    raise ValueError("DITTO_MAX_UPLOAD_MB must be a positive integer")
+MAX_UPLOAD_BYTES = _max_upload_mb * 1024 * 1024
 
 
 def ensure_dirs() -> None:

@@ -410,13 +410,26 @@ $("#done").onclick = async () => {
 };
 
 const es = new EventSource("/api/events");
+let reconnectTimer = null;
+es.onopen = () => {
+  if (reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+};
 es.onmessage = e => render(JSON.parse(e.data));
 es.onerror = () => {
   // The server retires each stream after five minutes and EventSource
-  // reconnects on its own (readyState CONNECTING). Only flag a real outage —
-  // CLOSED — or "Disconnected" would flash every five minutes in normal use.
+  // reconnects on its own (readyState CONNECTING), which completes in well
+  // under a second — so a planned rotation must stay silent. Only surface a
+  // real outage: CLOSED immediately, or CONNECTING that hasn't recovered
+  // within the grace window (onopen clears the timer, the next snapshot
+  // overwrites the message).
   if (es.readyState === EventSource.CLOSED){
     $("#msg").textContent = "Disconnected"; $("#msg").className = "msg err";
+  } else if (es.readyState === EventSource.CONNECTING && reconnectTimer === null){
+    reconnectTimer = setTimeout(() => {
+      if (es.readyState !== EventSource.OPEN){
+        $("#msg").textContent = "Reconnecting…"; $("#msg").className = "msg err";
+      }
+    }, 8000);
   }
 };
 </script>

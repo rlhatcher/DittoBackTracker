@@ -173,16 +173,18 @@ class Service:
         """
         self._check_slot(src)
         self._check_slot(dst)
-        if src == dst or not db.get_slot(src):
-            return
-        if db.get_slot(dst):
-            db.swap_slots(src, dst)
+        # The move-or-swap decision is made atomically in db, so we queue pedal
+        # work from what actually happened rather than a pre-read that a
+        # concurrent upload could have invalidated.
+        op = db.move_or_swap(src, dst)
+        if op == "swap":
             self._work.put(("write", src))
             self._work.put(("write", dst))
-        else:
-            db.move_slot(src, dst)
+        elif op == "move":
             self._work.put(("erase", src))
             self._work.put(("write", dst))
+        else:
+            return
         self._emit()
 
     def retry(self, slot: int) -> None:
