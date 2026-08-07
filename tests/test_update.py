@@ -1,5 +1,8 @@
 """Self-update: the POST /api/update status mapping (via a fake service) and the
-core guard/redeploy branches that don't need a real git remote."""
+core guard/redeploy/update-check branches, using local git repos (no network)."""
+
+import shutil
+import subprocess
 
 import pytest
 
@@ -73,3 +76,66 @@ def test_update_no_git_checkout(service, tmp_path, monkeypatch):
     (tmp_path / "src").mkdir()
     ok, msg = service.update()
     assert ok is False and "no git checkout" in msg
+
+
+def test_snapshot_has_version_fields(service):
+    snap = service.snapshot()
+    assert {"version", "revision", "update_available",
+            "remote_revision"} <= snap.keys()
+    assert snap["update_available"] is False   # no checkout in the temp data dir
+
+
+# --- update availability check (local bare repo as "origin", no network) ----
+
+def _git(*args, cwd=None):
+    subprocess.run(["git", *args], cwd=cwd, check=True,
+                   capture_output=True, text=True)
+
+
+def _head(cwd):
+    return subprocess.run(["git", "-C", str(cwd), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def repos(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    origin, work, src = tmp_path / "origin", tmp_path / "work", tmp_path / "src"
+    _git("init", "--bare", "-b", "main", str(origin))
+    _git("clone", str(origin), str(work))
+    _git("-C", str(work), "config", "user.email", "t@example.com")
+    _git("-C", str(work), "config", "user.name", "Test")
+    (work / "ditto").mkdir()
+    (work / "ditto" / "__init__.py").write_text("# a\n")
+    _git("-C", str(work), "add", "-A")
+    _git("-C", str(work), "commit", "-m", "A")
+    _git("-C", str(work), "push", "origin", "main")
+    _git("clone", str(origin), str(src))
+    return {"origin": origin, "work": work, "src": src}
+
+
+def test_update_available_when_remote_ahead(service, repos, monkeypatch):
+    src, work = repos["src"], repos["work"]
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    service._current_sha = _head(src)
+    service._update_available, service._remote_revision = False, None
+
+    # Advance the remote past what the checkout has.
+    (work / "ditto" / "__init__.py").write_text("# b\n")
+    _git("-C", str(work), "commit", "-am", "B")
+    _git("-C", str(work), "push", "origin", "main")
+
+    service._check_for_update()
+    assert service._update_available is True
+    assert service._remote_revision
+
+
+def test_no_update_when_current(service, repos, monkeypatch):
+    src = repos["src"]
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    service._current_sha = _head(src)
+    service._check_for_update()
+    assert service._update_available is False

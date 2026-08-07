@@ -91,6 +91,11 @@ reboot, no SSH. The page reconnects on its own and the version line shows the ne
 commit. It's refused while a write is in flight, so an update never interrupts
 one.
 
+On startup the device checks its GitHub remote in the background; when the
+tracked branch is ahead of what's deployed, the control lights up as **Update
+available**. Otherwise it reads **Up to date**. The check is best-effort — if the
+device is offline it simply stays quiet.
+
 This works because the app is pure Python on the writable data partition, so an
 update is just replace-code-and-restart — the read-only root never comes into it.
 `install.sh` sets up the two pieces it needs: a `ditto-restart.service` helper

@@ -107,6 +107,14 @@ class Service:
         # other. Held only for the brief git-pull + redeploy, never a job.
         self._update_lock = threading.Lock()
 
+        # Deployed code identity + whether the remote has something newer.
+        # `revision`/`_current_sha` come from the local checkout (cheap, no
+        # network) once at startup; `update_available`/`remote_revision` are
+        # filled by a background check that fetches from the remote.
+        self._revision, self._current_sha = self._local_head()
+        self._update_available = False
+        self._remote_revision: Optional[str] = None
+
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
         self._in_flight = threading.Event()
@@ -122,6 +130,12 @@ class Service:
         ]
         for t in self._threads:
             t.start()
+
+        # Check the remote for a newer version once at startup, off the boot
+        # path so it never delays the app coming up (and no-ops without a
+        # checkout or network). A one-shot daemon; nothing joins it.
+        threading.Thread(target=self._check_for_update, daemon=True,
+                         name="updatecheck").start()
 
     # ---------------------------------------------------------------- events
 
@@ -192,16 +206,10 @@ class Service:
             "panel": self.panel.status() if self.panel else {},
             "ip": local_ip(),
             "version": __version__,
-            "revision": self._revision(),
+            "revision": self._revision,
+            "update_available": self._update_available,
+            "remote_revision": self._remote_revision,
         }
-
-    @staticmethod
-    def _revision() -> Optional[str]:
-        """The deployed short commit the updater last recorded, if any."""
-        try:
-            return config.REVISION_FILE.read_text().strip() or None
-        except OSError:
-            return None
 
     # ------------------------------------------------------------ operations
 
@@ -394,12 +402,7 @@ class Service:
             shutil.rmtree(new, ignore_errors=True)
             return (False, f"deploy failed: {e}")
 
-        rev = self._read_head(src)
-        if rev:
-            try:
-                config.REVISION_FILE.write_text(rev + "\n")
-            except OSError:
-                pass
+        rev = self._rev_parse(src, "HEAD", short=True)
 
         # Restart from outside this process. sudo -n so a missing NOPASSWD rule
         # fails fast rather than hanging on a password prompt.
@@ -415,17 +418,43 @@ class Service:
                            f"refused — is OTA set up? {self._proc_err(e)}")
         return (True, rev or "updated")
 
+    def _check_for_update(self) -> None:
+        """Background: fetch the remote and flag whether it has something newer
+        than the deployed checkout. No-op without a checkout or network."""
+        src = config.SRC
+        if self._current_sha is None or not (src / ".git").is_dir():
+            return
+        try:
+            self._git(src, "fetch", "--quiet", "origin", config.UPDATE_BRANCH)
+        except (subprocess.SubprocessError, OSError):
+            return          # offline or no remote — leave "no update" showing
+        ref = f"origin/{config.UPDATE_BRANCH}"
+        remote_full = self._rev_parse(src, ref)
+        if not remote_full:
+            return
+        self._remote_revision = self._rev_parse(src, ref, short=True)
+        self._update_available = remote_full != self._current_sha
+        self._emit()
+
+    def _local_head(self) -> "tuple[Optional[str], Optional[str]]":
+        """(short, full) commit of the local checkout, or (None, None)."""
+        src = config.SRC
+        if not (src / ".git").is_dir():
+            return (None, None)
+        return (self._rev_parse(src, "HEAD", short=True),
+                self._rev_parse(src, "HEAD"))
+
     @staticmethod
     def _git(cwd: Path, *args: str) -> None:
         subprocess.run(["git", "-C", str(cwd), *args], check=True,
                        capture_output=True, text=True, timeout=60)
 
     @staticmethod
-    def _read_head(src: Path) -> Optional[str]:
+    def _rev_parse(src: Path, ref: str, short: bool = False) -> Optional[str]:
+        args = ["rev-parse"] + (["--short"] if short else []) + [ref]
         try:
-            r = subprocess.run(["git", "-C", str(src), "rev-parse", "--short",
-                                "HEAD"], check=True, capture_output=True,
-                               text=True, timeout=10)
+            r = subprocess.run(["git", "-C", str(src), *args], check=True,
+                               capture_output=True, text=True, timeout=10)
             return r.stdout.strip() or None
         except (subprocess.SubprocessError, OSError):
             return None

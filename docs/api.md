@@ -20,6 +20,8 @@ Full snapshot. The same object is pushed over `/api/events`.
   "ip": "192.168.1.42",
   "version": "0.3.0",
   "revision": "a1b2c3d",
+  "update_available": false,
+  "remote_revision": null,
   "format": { "codec": "pcm_s24le", "sample_rate": 44100, "channels": 1 },
   "format_source": "probed from BT.WAV",
   "capacity": {
@@ -67,7 +69,9 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
 | `version` | Package version string |
-| `revision` | Short git commit of the deployed code, recorded by the last self-update, or `null` if never updated in place. Watch it change to confirm an update took |
+| `revision` | Short git commit of the deployed code, or `null` off a git checkout. Watch it change to confirm an update took |
+| `update_available` | `true` when a startup check found the tracked remote branch ahead of the deployed commit. `false` until the check completes, if it's up to date, or if the check couldn't run (offline, no checkout) |
+| `remote_revision` | Short git commit the remote is at, when `update_available`; else `null` |
 
 `capacity.used_seconds` is derived from the real bytes on the volume
 (`(bytes_total − bytes_free) / rate`) while the pedal is mounted, so it already
