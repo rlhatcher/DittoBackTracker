@@ -532,11 +532,19 @@ function endUpdating(){ updating = false; clearTimeout(updateTimer); updateTimer
 $("#update").onclick = async () => {
   const btn = $("#update");
   if (btn.disabled) return;
+  // A known deployed revision is required: completion is detected by the
+  // revision changing (see render). Without one — the first snapshot hasn't
+  // arrived, or this isn't a git deployment — a pre-restart snapshot would
+  // differ from a null baseline and clear `updating` before the update lands.
+  if (!state || !state.revision){
+    fail("Device state isn't ready yet — try again in a moment");
+    return;
+  }
   if (!confirm("Update to the latest version and restart? The device will briefly disconnect.")) return;
   updating = true;
   // Remember the revision we're leaving; render() clears `updating` once a
   // snapshot reports a different one (the new build is up).
-  updatingFromRev = state ? state.revision : null;
+  updatingFromRev = state.revision;
   btn.disabled = true; btn.textContent = "Updating…"; btn.className = "link";
   // Safety net: if no new revision ever arrives (restart failed to come back),
   // don't leave the button stuck forever.
