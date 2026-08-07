@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from . import config, db, media, pedal
+from . import __version__, config, db, media, pedal
 from .panel import Panel, local_ip
 from .power import Battery
 
@@ -103,6 +103,9 @@ class Service:
         # from a different pedal mounted after an unplug/replug. Only the monitor
         # thread writes it; the worker only reads (an atomic int compare).
         self._mount_gen = 0
+        # Serializes self-update so two clicks can't redeploy on top of each
+        # other. Held only for the brief git-pull + redeploy, never a job.
+        self._update_lock = threading.Lock()
 
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
@@ -188,7 +191,17 @@ class Service:
             },
             "panel": self.panel.status() if self.panel else {},
             "ip": local_ip(),
+            "version": __version__,
+            "revision": self._revision(),
         }
+
+    @staticmethod
+    def _revision() -> Optional[str]:
+        """The deployed short commit the updater last recorded, if any."""
+        try:
+            return config.REVISION_FILE.read_text().strip() or None
+        except OSError:
+            return None
 
     # ------------------------------------------------------------ operations
 
@@ -327,6 +340,100 @@ class Service:
         self.ending = True
         self._emit()
         threading.Thread(target=self._halt, args=(False,), daemon=True).start()
+
+    # -------------------------------------------------------------- self-update
+
+    def update(self) -> "tuple[bool, str]":
+        """Pull the tracked branch, redeploy the app, and restart out-of-process.
+
+        Returns (ok, message): on success `message` is the deployed short commit,
+        otherwise a human-readable reason. Refused while a job is in flight so a
+        restart never interrupts a write, and serialized so two clicks can't
+        redeploy on top of each other. The restart itself is done by a separate
+        oneshot unit (RESTART_SERVICE) so it isn't killing this process; a fresh
+        ditto-web then comes up on the new code.
+        """
+        if self.ending:
+            return (False, "the device is shutting down")
+        if self.busy or self._in_flight.is_set():
+            return (False, "busy — try again when the current work finishes")
+        if not self._update_lock.acquire(blocking=False):
+            return (False, "an update is already running")
+        try:
+            return self._do_update()
+        finally:
+            self._update_lock.release()
+
+    def _do_update(self) -> "tuple[bool, str]":
+        src, app = config.SRC, config.APP
+        if not (src / ".git").is_dir():
+            return (False, f"no git checkout at {src}")
+        try:
+            self._git(src, "fetch", "--quiet", "origin", config.UPDATE_BRANCH)
+            self._git(src, "reset", "--hard", "--quiet",
+                      f"origin/{config.UPDATE_BRANCH}")
+        except (subprocess.SubprocessError, OSError) as e:
+            return (False, f"git update failed: {self._proc_err(e)}")
+
+        # Atomic-ish redeploy: build the new tree beside the live one and swap by
+        # rename, so a failed copy never leaves the app without a ditto/ package.
+        new, live, bak = app / "ditto.new", app / "ditto", app / "ditto.bak"
+        try:
+            if new.exists():
+                shutil.rmtree(new)
+            shutil.copytree(src / "ditto", new)
+            if bak.exists():
+                shutil.rmtree(bak)
+            if live.exists():
+                live.rename(bak)
+            new.rename(live)
+            shutil.rmtree(bak, ignore_errors=True)
+        except OSError as e:
+            if not live.exists() and bak.exists():
+                bak.rename(live)                # put the old code back
+            shutil.rmtree(new, ignore_errors=True)
+            return (False, f"deploy failed: {e}")
+
+        rev = self._read_head(src)
+        if rev:
+            try:
+                config.REVISION_FILE.write_text(rev + "\n")
+            except OSError:
+                pass
+
+        # Restart from outside this process. sudo -n so a missing NOPASSWD rule
+        # fails fast rather than hanging on a password prompt.
+        try:
+            # Absolute systemctl path so it matches the scoped sudoers rule
+            # exactly (see etc/99-ditto-restart).
+            subprocess.run(
+                ["sudo", "-n", "/usr/bin/systemctl", "start", "--no-block",
+                 config.RESTART_SERVICE],
+                check=True, capture_output=True, text=True, timeout=15)
+        except (subprocess.SubprocessError, OSError) as e:
+            return (False, f"deployed {rev or 'update'} but the restart was "
+                           f"refused — is OTA set up? {self._proc_err(e)}")
+        return (True, rev or "updated")
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> None:
+        subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                       capture_output=True, text=True, timeout=60)
+
+    @staticmethod
+    def _read_head(src: Path) -> Optional[str]:
+        try:
+            r = subprocess.run(["git", "-C", str(src), "rev-parse", "--short",
+                                "HEAD"], check=True, capture_output=True,
+                               text=True, timeout=10)
+            return r.stdout.strip() or None
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+    @staticmethod
+    def _proc_err(e: Exception) -> str:
+        out = getattr(e, "stderr", "") or ""
+        return (out.strip() or str(e))[:200]
 
     def shutdown(self, timeout: float = 30.0) -> None:
         """SIGTERM path — a service stop or restart, not a session ending.

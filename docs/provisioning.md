@@ -348,6 +348,12 @@ sudo systemctl restart ditto-web
 The `rm` matters: without it, modules deleted upstream linger in the deployed
 copy.
 
+Or just press **Update** in the web UI, which does exactly this over the air —
+no SSH. It needs `install.sh` to have installed `ditto-restart.service` and the
+`/etc/sudoers.d/99-ditto-restart` rule (both are part of a normal install). If
+you provisioned before those existed, re-run `install.sh` once with the overlay
+disabled (below) to add them.
+
 For changes under `/etc`:
 
 ```bash

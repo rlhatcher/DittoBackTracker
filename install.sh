@@ -35,6 +35,9 @@ sudo chown -R ditto:ditto /var/lib/ditto
 echo "==> allow unprivileged poweroff (for the Done button)"
 sudo install -m 0440 "$HERE/etc/99-ditto-poweroff" /etc/sudoers.d/99-ditto-poweroff
 
+echo "==> allow unprivileged restart (for over-the-air self-update)"
+sudo install -m 0440 "$HERE/etc/99-ditto-restart" /etc/sudoers.d/99-ditto-restart
+
 echo "==> pedal mount entry"
 # Owner-only masks: the pedal's files shouldn't be world-readable/writable.
 FSTAB_LINE='LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto,gid=ditto  0  0'
@@ -49,6 +52,8 @@ sudo mkdir -p /media/ditto
 
 echo "==> service"
 sudo cp "$HERE/systemd/ditto-web.service" /etc/systemd/system/
+# OTA restart helper: started on demand after a self-update, not enabled at boot.
+sudo cp "$HERE/systemd/ditto-restart.service" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl reset-failed ditto-web 2>/dev/null || true
 sudo systemctl enable --now ditto-web

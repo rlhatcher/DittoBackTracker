@@ -83,6 +83,45 @@ cd /var/lib/ditto/src
 
 Open `http://dittobacktracker.local/` and plug the pedal in.
 
+### Updating over the air
+
+Once installed, the device updates itself: the **Update** control at the bottom
+of the web page pulls the latest code, redeploys, and restarts — no laptop, no
+reboot, no SSH. The page reconnects on its own and the version line shows the new
+commit. It's refused while a write is in flight, so an update never interrupts
+one.
+
+This works because the app is pure Python on the writable data partition, so an
+update is just replace-code-and-restart — the read-only root never comes into it.
+`install.sh` sets up the two pieces it needs: a `ditto-restart.service` helper
+(so the restart runs outside the web process) and a scoped sudoers rule that lets
+the service trigger it.
+
+Those two live under `/etc`, so a device that already has the read-only overlay
+enabled needs them installed once with the overlay off. It's the same dance as
+provisioning step 9, and it just re-runs `install.sh`:
+
+```bash
+# disable the overlay for one boot
+sudo overlayroot-chroot
+sed -i 's/^overlayroot=.*/overlayroot=""/' /etc/overlayroot.conf
+exit
+sudo reboot
+
+# root is writable now — reinstall picks up the OTA units
+cd /var/lib/ditto/src && git pull && ./install.sh
+
+# re-enable the overlay
+sudo overlayroot-chroot
+sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
+exit
+sudo reboot
+```
+
+That's a one-time step. After it, code updates go through the **Update** button
+and never touch `/etc` again — only a change to the systemd unit or the sudoers
+rule would need the chroot dance repeated.
+
 ### Running it without hardware
 
 The web UI runs anywhere. With no pedal attached, uploads convert and wait.
@@ -174,8 +213,11 @@ MIT. See [LICENSE](LICENSE).
 ## Security
 
 There is no authentication. The service binds `0.0.0.0:80`, so anyone on the
-same network can upload, clear slots, or shut the device down. It is built for a
-home LAN. Don't put it on a network you don't control.
+same network can upload, clear slots, trigger a self-update, or shut the device
+down. The update only ever pulls the branch this device already tracks from its
+own GitHub remote, so it fetches your code, not an attacker's — but it does let a
+LAN user force a restart. It is built for a home LAN. Don't put it on a network
+you don't control.
 
 ---
 
