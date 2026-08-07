@@ -162,7 +162,7 @@ h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
 
   <div class="foot">
     <span id="ver">—</span>
-    <button class="link" id="update" type="button">Update</button>
+    <button class="link" id="update" type="button" hidden>Update available</button>
   </div>
 
 </div>
@@ -382,20 +382,17 @@ function updateBtnState(s){
   if (updating) return;                 // don't clobber the in-progress label
   const b = $("#update");
   if (s.update_available){
+    b.hidden = false;
     b.textContent = "Update available";
     b.className = "link avail";
     b.disabled = false;
     b.title = s.remote_revision ? "New version " + s.remote_revision : "A newer version is available";
-  } else if (s.revision){
-    b.textContent = "Up to date";
+  } else {
+    // Up to date (or no deploy info yet) — nothing to do, so hide the control
+    // rather than show a dead "Up to date" button. The version line stays.
+    b.hidden = true;
     b.className = "link";
     b.disabled = true;
-    b.title = "";
-  } else {
-    // No checkout info (e.g. running off a laptop) — allow a manual update.
-    b.textContent = "Update";
-    b.className = "link";
-    b.disabled = false;
     b.title = "";
   }
 }
