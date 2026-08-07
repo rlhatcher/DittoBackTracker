@@ -158,6 +158,29 @@ def test_no_update_when_current(service, repos, monkeypatch):
     assert service._update_available is False
 
 
+def test_check_skipped_while_updating(service, repos, monkeypatch):
+    # A deploy in progress must not race the update check on git state.
+    src = repos["src"]
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    service._current_sha = _head(src)
+    service._update_available, service._remote_revision = False, None
+    service._updating.set()
+    try:
+        service._check_for_update()
+    finally:
+        service._updating.clear()
+    assert service._update_available is False
+    assert service._remote_revision is None      # skipped entirely
+
+
+def test_update_watch_startup_only_returns(service, monkeypatch):
+    # A non-positive interval means "startup check only" — the loop must return
+    # rather than spin. (SRC has no checkout here, so the check is a fast no-op.)
+    monkeypatch.setattr(config, "UPDATE_CHECK_SECS", 0)
+    service._update_watch()
+
+
 def test_update_rolls_back_when_new_code_wont_load(service, repos, tmp_path,
                                                    monkeypatch):
     # The repo fixture's ditto/ is a stub with no web module, so the deployed

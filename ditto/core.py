@@ -137,10 +137,10 @@ class Service:
         for t in self._threads:
             t.start()
 
-        # Check the remote for a newer version once at startup, off the boot
-        # path so it never delays the app coming up (and no-ops without a
-        # checkout or network). A one-shot daemon; nothing joins it.
-        threading.Thread(target=self._check_for_update, daemon=True,
+        # Check the remote for a newer version at startup and then periodically,
+        # off the boot path so it never delays the app coming up (and no-ops
+        # without a checkout or network). A daemon; nothing joins it.
+        threading.Thread(target=self._update_watch, daemon=True,
                          name="updatecheck").start()
 
     # ---------------------------------------------------------------- events
@@ -503,23 +503,40 @@ class Service:
             return (r.stderr.strip() or "import failed").splitlines()[-1][:200]
         return None
 
+    def _update_watch(self) -> None:
+        """Check for a newer version at startup, then every UPDATE_CHECK_SECS so a
+        release published while the device stays on is noticed without a reboot.
+        Interruptible by _stop; a non-positive interval means startup-only."""
+        self._check_for_update()
+        interval = config.UPDATE_CHECK_SECS
+        if interval <= 0:
+            return
+        while not self._stop.wait(interval):
+            self._check_for_update()
+
     def _check_for_update(self) -> None:
-        """Background: fetch the remote and flag whether it has something newer
-        than the deployed checkout. No-op without a checkout or network."""
+        """Fetch the remote and flag whether it has something newer than the
+        deployed checkout. No-op without a checkout or network, and skipped while
+        an update is mid-flight. Emits only when the result changes."""
         src = config.SRC
         if self._current_sha is None or not (src / ".git").is_dir():
             return
+        if self._updating.is_set():
+            return          # a deploy is in progress; don't race its git state
         try:
             self._git(src, "fetch", "--quiet", "origin", config.UPDATE_BRANCH)
         except (subprocess.SubprocessError, OSError):
-            return          # offline or no remote — leave "no update" showing
+            return          # offline or no remote — leave the current state
         ref = f"origin/{config.UPDATE_BRANCH}"
         remote_full = self._rev_parse(src, ref)
         if not remote_full:
             return
-        self._remote_revision = self._rev_parse(src, ref, short=True)
-        self._update_available = remote_full != self._current_sha
-        self._emit()
+        remote_short = self._rev_parse(src, ref, short=True)
+        available = remote_full != self._current_sha
+        if available != self._update_available or remote_short != self._remote_revision:
+            self._update_available = available
+            self._remote_revision = remote_short
+            self._emit()
 
     def _deployed_head(self) -> "tuple[Optional[str], Optional[str]]":
         """(short, full) SHA of the deployed code. Prefer the SHA recorded at the

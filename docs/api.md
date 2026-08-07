@@ -70,7 +70,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
 | `version` | Package version string |
 | `revision` | Short git commit of the deployed code, or `null` off a git checkout. Watch it change to confirm an update took |
-| `update_available` | `true` when a startup check found the tracked remote branch ahead of the deployed commit. `false` until the check completes, if it's up to date, or if the check couldn't run (offline, no checkout) |
+| `update_available` | `true` when the update check found the tracked remote branch ahead of the deployed commit. The check runs at startup and then every `DITTO_UPDATE_CHECK_SECS` (default 3600). `false` until the first check completes, if it's up to date, or if the check couldn't run (offline, no checkout) |
 | `remote_revision` | Short git commit the remote is at, when `update_available`; else `null` |
 
 `capacity.used_seconds` is derived from the real bytes on the volume
