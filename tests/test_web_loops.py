@@ -1,11 +1,9 @@
 """The two loop endpoints, driven through a Flask test client against a
 duck-typed fake Service — no worker threads, no hardware, no real pedal."""
 
-import threading
-
 import pytest
 
-from ditto import config, pedal, web
+from ditto import config, core, pedal, web
 
 
 class FakeService:
@@ -23,13 +21,14 @@ class FakeService:
     def has_loop(self, slot):
         return slot in self._loops
 
-    def stage_loop(self, slot, done: threading.Event,
-                   cancel: threading.Event, result: dict):
-        # Emulate the worker: write a staged file and signal completion.
+    def stage_loop(self, slot):
+        # Emulate the worker: write a staged file, publish it, signal done.
+        stage = core.LoopStage()
         p = self._tmp / f"slot-{slot:02d}.wav"
         p.write_bytes(b"LOOPBYTES")
-        result["path"] = str(p)
-        done.set()
+        stage.publish(str(p))
+        stage.done.set()
+        return stage
 
     def delete_loop(self, slot):
         if slot not in self._loops:
@@ -75,8 +74,8 @@ def test_get_timeout_503(env, monkeypatch):
     monkeypatch.setattr(config, "LOOP_STAGE_TIMEOUT", 0.05)
 
     # A stage that never signals completion: the handler must time out and 503.
-    def never_done(slot, done, cancel, result):
-        pass
+    def never_done(slot):
+        return core.LoopStage()             # done never set
 
     svc.stage_loop = never_done
     assert client.get("/api/loops/5").status_code == 503
@@ -99,3 +98,18 @@ def test_delete_cross_site_rejected(env):
     client, _, _ = env
     rv = client.delete("/api/loops/5", headers={"Origin": "http://evil.example"})
     assert rv.status_code == 403
+
+
+def test_loopstage_worker_wins():
+    # Worker publishes before the waiter gives up: the waiter reaps the path.
+    stage = core.LoopStage()
+    assert stage.publish("/tmp/x.wav") is True
+    assert stage.cancel_and_reap() == "/tmp/x.wav"   # waiter must purge it
+
+
+def test_loopstage_waiter_wins():
+    # Waiter gives up first: a later publish is refused, so the worker purges.
+    stage = core.LoopStage()
+    assert stage.cancel_and_reap() is None
+    assert stage.cancelled() is True
+    assert stage.publish("/tmp/x.wav") is False

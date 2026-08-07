@@ -25,6 +25,45 @@ def mmss(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
+class LoopStage:
+    """Coordination handle for the blocking loop-download bridge between a web
+    thread (the waiter) and the worker.
+
+    It closes the timeout/publish handoff: the waiter giving up and the worker
+    finishing the copy resolve under one lock, so exactly one side owns the
+    staged file and it is never orphaned. `done` is set by the worker when the
+    outcome is settled; the waiter blocks on it with a timeout.
+    """
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.path: Optional[str] = None      # set once, by whoever the worker
+        self.error: Optional[str] = None     # hands the outcome to
+        self._cancel = False
+        self._lock = threading.Lock()
+
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancel
+
+    def publish(self, path: str) -> bool:
+        """Worker: hand `path` to the waiter. Returns True if accepted; False if
+        the waiter already gave up, in which case the worker must purge `path`."""
+        with self._lock:
+            if self._cancel:
+                return False
+            self.path = path
+            return True
+
+    def cancel_and_reap(self) -> Optional[str]:
+        """Waiter: give up. Returns an already-published path for the waiter to
+        purge (else None); after this, publish() will refuse and the worker
+        purges its own file."""
+        with self._lock:
+            self._cancel = True
+            return self.path
+
+
 class Service:
     def __init__(self, headless: bool = False) -> None:
         config.ensure_dirs()
@@ -58,6 +97,12 @@ class Service:
         # frozenset reassigned on change, so snapshot() readers on other threads
         # always see a consistent set without a lock.
         self._loops: "frozenset[int]" = frozenset()
+        # Bumped on every transition into the mounted state. A loop job captures
+        # it at enqueue; the worker skips the job if it no longer matches, so a
+        # job queued in one plug-in session never reads or deletes a LOOP.WAV
+        # from a different pedal mounted after an unplug/replug. Only the monitor
+        # thread writes it; the worker only reads (an atomic int compare).
+        self._mount_gen = 0
 
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
@@ -189,28 +234,28 @@ class Service:
         """From the mount-time cache — no pedal I/O. Only meaningful mounted."""
         return slot in self._loops
 
-    def stage_loop(self, slot: int, done: threading.Event,
-                   cancel: threading.Event, result: dict) -> None:
-        """Enqueue a copy of the slot's loop off the pedal into loops/.
+    def stage_loop(self, slot: int) -> LoopStage:
+        """Enqueue a copy of the slot's loop off the pedal into loops/ and return
+        a LoopStage the caller blocks on.
 
-        Blocking bridge: the caller (a web thread) passes a `done` event, a
-        `cancel` event, and a `result` dict. The worker stages to a path unique
-        to this request, fills `result` with `path` or `error`, and sets `done`.
-        If the caller gives up (timeout) it sets `cancel`; the worker then
-        discards its own staged file rather than leaving an orphan no response
-        generator will ever purge. The mounted/no-loop fast paths are checked by
-        the web handler before enqueue; the worker rechecks for the races.
+        Blocking bridge: the worker stages to a path unique to this request and
+        hands the outcome to the returned handle. If the caller times out it
+        calls cancel_and_reap(); the handle guarantees exactly one side owns the
+        staged file, so nothing is orphaned. The job carries the current mount
+        generation so a stale job (queued before an unplug/replug) is skipped.
         """
         self._check_slot(slot)
-        self._work.put(("stage_loop", slot, done, cancel, result))
+        stage = LoopStage()
+        self._work.put(("stage_loop", slot, self._mount_gen, stage))
         self._emit()
+        return stage
 
     def delete_loop(self, slot: int) -> bool:
         """Enqueue removal of the slot's loop. False (→404) if none is known."""
         self._check_slot(slot)
         if slot not in self._loops:
             return False
-        self._work.put(("delete_loop", slot))
+        self._work.put(("delete_loop", slot, self._mount_gen))
         self._emit()
         return True
 
@@ -351,6 +396,7 @@ class Service:
         # restart mid-session must still probe the format and requeue.
         if self.pedal_state != "mounted":
             self.pedal_state = "mounted"
+            self._mount_gen += 1        # a new session; stale loop jobs skip
             self.last_error = None
             pedal.clean_temp_files()
             self.fmt, self.fmt_source = pedal.detect_format()
@@ -468,10 +514,11 @@ class Service:
         elif kind == "erase":
             self._do_erase(job[1])
         elif kind == "stage_loop":
-            _, slot, done, cancel, result = job
-            self._do_stage_loop(slot, done, cancel, result)
+            _, slot, gen, stage = job
+            self._do_stage_loop(slot, gen, stage)
         elif kind == "delete_loop":
-            self._do_delete_loop(job[1])
+            _, slot, gen = job
+            self._do_delete_loop(slot, gen)
         elif kind == "end":
             # A convert queues its write *after* the end marker, so the marker
             # can surface with real work still behind it. This worker is the
@@ -571,26 +618,27 @@ class Service:
             self.last_error = f"could not clear slot {slot}: {e}"
         self._emit()
 
-    def _do_stage_loop(self, slot: int, done: threading.Event,
-                       cancel: threading.Event, result: dict) -> None:
+    def _do_stage_loop(self, slot: int, gen: int, stage: LoopStage) -> None:
         """Copy the slot's loop off the pedal into a transient staging file.
 
         Stages to a path unique to this request, so concurrent downloads of the
-        same slot never clobber each other's file. Always sets `done` (in the
-        finally) so the waiting web thread can never block past its own timeout,
-        even if this raises. A read, so no os.sync().
+        same slot never clobber each other's file. The staged path is handed to
+        the waiter through `stage.publish()`, which loses to a concurrent
+        cancel_and_reap() — so a request that times out mid-copy never leaves an
+        orphan. Always sets `stage.done` (in the finally) so the waiter can never
+        block past its own timeout, even if this raises. A read, so no os.sync().
         """
         dest = None
         try:
-            if cancel.is_set():
+            if stage.cancelled():
                 return                          # caller already gave up
-            if not pedal.mounted():
-                result["error"] = "no pedal"
+            if gen != self._mount_gen or not pedal.mounted():
+                stage.error = "no pedal"        # a different session, or none
                 return
             if not pedal.has_loop(slot):
                 # Vanished between the handler's has_loop() check and here.
                 self._loops = self._loops - {slot}
-                result["error"] = "no loop"
+                stage.error = "no loop"
                 return
             dest = config.LOOPS / f"slot-{slot:02d}-{uuid.uuid4().hex}.wav"
             self.busy = "Reading loop"
@@ -598,26 +646,25 @@ class Service:
             self.progress = None
             self._emit()
             pedal.copy_loop(slot, dest)
-            if cancel.is_set():
-                # The caller timed out while we copied; purge our own file so it
+            if not stage.publish(str(dest)):
+                # The caller gave up while we copied; purge our own file so it
                 # doesn't linger — no response generator will ever stream it.
                 dest.unlink(missing_ok=True)
-                return
-            result["path"] = str(dest)
         except FileNotFoundError:
             if dest is not None:
                 dest.unlink(missing_ok=True)
-            result["error"] = "no loop"
+            self._loops = self._loops - {slot}  # the loop is gone; drop it
+            stage.error = "no loop"
         except Exception as e:                  # surface like a failed convert
             if dest is not None:
                 dest.unlink(missing_ok=True)
-            result["error"] = str(e)
+            stage.error = str(e)
         finally:
-            done.set()
+            stage.done.set()
 
-    def _do_delete_loop(self, slot: int) -> None:
-        if not pedal.mounted():
-            return
+    def _do_delete_loop(self, slot: int, gen: int) -> None:
+        if gen != self._mount_gen or not pedal.mounted():
+            return                              # a different session, or none
         if not pedal.has_loop(slot):
             self._loops = self._loops - {slot}
             self._emit()

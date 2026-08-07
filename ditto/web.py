@@ -205,22 +205,22 @@ def create_app(service: Service) -> Flask:
         if not service.has_loop(slot):
             return jsonify(error="no loop in that slot"), 404
 
-        done = threading.Event()
-        cancel = threading.Event()
-        result: dict = {}
-        service.stage_loop(slot, done, cancel, result)
-        if not done.wait(config.LOOP_STAGE_TIMEOUT):
-            # Tell the worker to discard whatever it stages: this request is
-            # gone, so nothing would ever stream or purge that file.
-            cancel.set()
+        stage = service.stage_loop(slot)
+        if not stage.done.wait(config.LOOP_STAGE_TIMEOUT):
+            # Give up. cancel_and_reap settles the handoff under a lock: if the
+            # worker already published a file we purge it here; otherwise the
+            # worker sees the cancel and purges its own. Either way, no orphan.
+            orphan = stage.cancel_and_reap()
+            if orphan:
+                Path(orphan).unlink(missing_ok=True)
             return jsonify(error="timed out staging loop"), 503
 
-        err = result.get("error")
-        if err:
+        if stage.error:
+            err = stage.error
             code = 404 if err == "no loop" else (503 if err == "no pedal" else 500)
             return jsonify(error=err), code
 
-        path = result["path"]
+        path = stage.path
         released = threading.Event()
 
         def purge():
