@@ -305,6 +305,24 @@ def create_app(service: Service) -> Flask:
         service.end_session()
         return jsonify(ok=True)
 
+    @app.post("/api/update")
+    def update():
+        """Pull the latest code and restart. State-changing, so the
+        block_cross_site guard covers it. Returns 200 with the deployed revision
+        on success; 409 if the device is busy; 503 if it's shutting down; 502 if
+        the update itself failed (no network, no git checkout, bad code that was
+        rolled back, restart not permitted)."""
+        ok, message = service.update()
+        if ok:
+            return jsonify(ok=True, revision=message)
+        if "busy" in message or "already running" in message:
+            code = 409
+        elif "shutting down" in message:
+            code = 503
+        else:
+            code = 502
+        return jsonify(error=message), code
+
     @app.get("/api/events")
     def events():
         q = service.subscribe()

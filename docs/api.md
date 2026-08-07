@@ -18,6 +18,10 @@ Full snapshot. The same object is pushed over `/api/events`.
   "ending": false,
   "error": null,
   "ip": "192.168.1.42",
+  "version": "0.3.0",
+  "revision": "a1b2c3d",
+  "update_available": false,
+  "remote_revision": null,
   "format": { "codec": "pcm_s24le", "sample_rate": 44100, "channels": 1 },
   "format_source": "probed from BT.WAV",
   "capacity": {
@@ -64,6 +68,10 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `panel` | Empty object when running `--headless` |
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
+| `version` | Package version string |
+| `revision` | Short git commit of the deployed code, or `null` off a git checkout. Watch it change to confirm an update took |
+| `update_available` | `true` when a startup check found the tracked remote branch ahead of the deployed commit. `false` until the check completes, if it's up to date, or if the check couldn't run (offline, no checkout) |
+| `remote_revision` | Short git commit the remote is at, when `update_available`; else `null` |
 
 `capacity.used_seconds` is derived from the real bytes on the volume
 (`(bytes_total − bytes_free) / rate`) while the pedal is mounted, so it already
@@ -221,6 +229,30 @@ physical button. Returns immediately; watch `/api/events` for progress.
 
 ---
 
+## POST /api/update
+
+Over-the-air self-update. Pulls the tracked branch, redeploys the app, and
+restarts the service. The restart runs out of process (a separate oneshot unit),
+so the browser's `EventSource` simply drops and reconnects; watch `revision` in
+the snapshot change to confirm the new code is running.
+
+```json
+{ "ok": true, "revision": "a1b2c3d" }
+```
+
+Refused while the device is busy so a restart never interrupts a write. The
+device must have OTA set up (a git checkout at `/var/lib/ditto/src` and the
+restart sudoers rule) — see the README.
+
+| Status | Meaning |
+|---|---|
+| `200` | Update deployed; the service is restarting |
+| `409` | Busy (work is in flight or queued, or an update is already running) — retry when idle |
+| `502` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
+| `503` | The device is shutting down — try again after it comes back up |
+
+---
+
 ## GET /api/events
 
 Server-sent events. One `data:` frame containing a full state snapshot on
@@ -245,9 +277,11 @@ curl -N http://dittobacktracker.local/api/events
 | `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `DELETE /api/slots/<n>`, `POST /api/upload` | Bad input: slot out of range, non-audio file, or a file ffprobe can't read. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
 | `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>` | No such trash entry, or the slot has no loop |
+| `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
 | `500` | `GET /api/loops/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error). Body is `{"error": "..."}` |
-| `503` | `GET /api/loops/<n>` | No pedal mounted, or staging the loop exceeded its time limit. Body is `{"error": "..."}` |
+| `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
+| `503` | `GET /api/loops/<n>`, `POST /api/update` | No pedal mounted / loop staging timed out; or, for update, the device is shutting down. Body is `{"error": "..."}` |
 
 `POST /api/upload` is the exception to the rule. It is a batch, so it returns
 `201` even when some files were rejected, and reports those per file in

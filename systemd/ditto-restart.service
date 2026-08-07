@@ -1,0 +1,9 @@
+[Unit]
+Description=DittoBackTracker: restart the web service (OTA helper)
+# Deliberately not enabled and not WantedBy anything: it is started on demand by
+# the app after a self-update (POST /api/update), never at boot. Running the
+# restart from a separate unit means it is not the process being restarted.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart ditto-web.service

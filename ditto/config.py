@@ -26,6 +26,22 @@ TRASH = DATA / "trash"
 LOOPS = DATA / "loops"
 DB_PATH = DATA / "state.db"
 
+# Over-the-air self-update. SRC is the git checkout the device tracks; APP is the
+# deployed copy the service runs from (WorkingDirectory). Both live on the
+# writable data partition, provisioned once — not created by ensure_dirs.
+SRC = DATA / "src"
+APP = DATA / "app"
+# Full commit SHA of the code actually deployed to APP, written only after a
+# successful swap so it never reports code that failed to land. The UI shows a
+# short form and the update check compares against it.
+REVISION_FILE = APP / "REVISION"
+# Branch the device follows. A device is an appliance that tracks one branch.
+UPDATE_BRANCH = os.environ.get("DITTO_UPDATE_BRANCH", "main")
+# A oneshot unit that restarts ditto-web from outside the web process, so the
+# restart isn't killing the thing that triggered it. Started via a NOPASSWD
+# sudoers rule (see etc/99-ditto-restart); code changes never touch /etc.
+RESTART_SERVICE = "ditto-restart.service"
+
 # Pedal
 PEDAL_LABEL = os.environ.get("DITTO_PEDAL_LABEL", "DITTOPLUS")
 # The label is interpolated into a device path and later handed to privileged
