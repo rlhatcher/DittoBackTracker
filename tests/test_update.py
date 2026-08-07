@@ -156,6 +156,31 @@ def test_no_update_when_current(service, repos, monkeypatch):
     service._current_sha = _head(src)
     service._check_for_update()
     assert service._update_available is False
+    assert service._remote_revision is None      # null unless an update exists
+
+
+def test_check_skipped_during_deploy(service, repos, monkeypatch):
+    # A deploy holds _update_lock; the check must skip rather than run git on the
+    # checkout concurrently.
+    src = repos["src"]
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    service._current_sha = _head(src)
+    service._update_available, service._remote_revision = False, None
+    assert service._update_lock.acquire(blocking=False)
+    try:
+        service._check_for_update()
+    finally:
+        service._update_lock.release()
+    assert service._update_available is False
+    assert service._remote_revision is None      # skipped entirely
+
+
+def test_update_watch_startup_only_returns(service, monkeypatch):
+    # A non-positive interval means "startup check only" — the loop must return
+    # rather than spin. (SRC has no checkout here, so the check is a fast no-op.)
+    monkeypatch.setattr(config, "UPDATE_CHECK_SECS", 0)
+    service._update_watch()
 
 
 def test_update_rolls_back_when_new_code_wont_load(service, repos, tmp_path,

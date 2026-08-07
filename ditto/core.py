@@ -130,18 +130,18 @@ class Service:
         self._last_prog_emit = 0.0
 
         self._stop = threading.Event()
+        # The update watcher checks the remote at startup and then periodically,
+        # off the boot path so it never delays the app coming up (and no-ops
+        # without a checkout or network). Tracked in _threads so shutdown() joins
+        # it rather than leaving it to emit during teardown.
         self._threads = [
             threading.Thread(target=self._worker, daemon=True, name="worker"),
             threading.Thread(target=self._monitor, daemon=True, name="monitor"),
+            threading.Thread(target=self._update_watch, daemon=True,
+                             name="updatecheck"),
         ]
         for t in self._threads:
             t.start()
-
-        # Check the remote for a newer version once at startup, off the boot
-        # path so it never delays the app coming up (and no-ops without a
-        # checkout or network). A one-shot daemon; nothing joins it.
-        threading.Thread(target=self._check_for_update, daemon=True,
-                         name="updatecheck").start()
 
     # ---------------------------------------------------------------- events
 
@@ -503,23 +503,53 @@ class Service:
             return (r.stderr.strip() or "import failed").splitlines()[-1][:200]
         return None
 
+    def _update_watch(self) -> None:
+        """Check for a newer version at startup, then every UPDATE_CHECK_SECS so a
+        release published while the device stays on is noticed without a reboot.
+        Interruptible by _stop; a non-positive interval means startup-only."""
+        self._check_for_update()
+        interval = config.UPDATE_CHECK_SECS
+        if interval <= 0:
+            return
+        while not self._stop.wait(interval):
+            self._check_for_update()
+
     def _check_for_update(self) -> None:
-        """Background: fetch the remote and flag whether it has something newer
-        than the deployed checkout. No-op without a checkout or network."""
+        """Fetch the remote and flag whether it has something newer than the
+        deployed checkout. No-op without a checkout or network. A failed fetch
+        leaves the last known state. Emits only when the result changes.
+
+        Runs the whole check under _update_lock so it never runs git on the
+        checkout concurrently with a deploy (update() holds the same lock): if a
+        deploy holds it, the check just skips this round."""
         src = config.SRC
         if self._current_sha is None or not (src / ".git").is_dir():
             return
+        if not self._update_lock.acquire(blocking=False):
+            return          # a deploy (or another check) owns the checkout
         try:
-            self._git(src, "fetch", "--quiet", "origin", config.UPDATE_BRANCH)
-        except (subprocess.SubprocessError, OSError):
-            return          # offline or no remote — leave "no update" showing
-        ref = f"origin/{config.UPDATE_BRANCH}"
-        remote_full = self._rev_parse(src, ref)
-        if not remote_full:
-            return
-        self._remote_revision = self._rev_parse(src, ref, short=True)
-        self._update_available = remote_full != self._current_sha
-        self._emit()
+            try:
+                self._git(src, "fetch", "--quiet", "origin",
+                          config.UPDATE_BRANCH)
+            except (subprocess.SubprocessError, OSError):
+                return      # offline or no remote — leave the current state
+            ref = f"origin/{config.UPDATE_BRANCH}"
+            remote_full = self._rev_parse(src, ref)
+            if not remote_full:
+                return
+            available = remote_full != self._current_sha
+            # Contract: remote_revision is meaningful only when an update is
+            # available; keep it null otherwise.
+            remote_short = self._rev_parse(src, ref, short=True) if available else None
+        finally:
+            self._update_lock.release()
+        if self._stop.is_set():
+            return          # shutting down — don't publish during teardown
+        if (available != self._update_available
+                or remote_short != self._remote_revision):
+            self._update_available = available
+            self._remote_revision = remote_short
+            self._emit()
 
     def _deployed_head(self) -> "tuple[Optional[str], Optional[str]]":
         """(short, full) SHA of the deployed code. Prefer the SHA recorded at the
