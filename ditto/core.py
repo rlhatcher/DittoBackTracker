@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -24,9 +25,51 @@ def mmss(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
+class LoopStage:
+    """Coordination handle for the blocking loop-download bridge between a web
+    thread (the waiter) and the worker.
+
+    It closes the timeout/publish handoff: the waiter giving up and the worker
+    finishing the copy resolve under one lock, so exactly one side owns the
+    staged file and it is never orphaned. `done` is set by the worker when the
+    outcome is settled; the waiter blocks on it with a timeout.
+    """
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.path: Optional[str] = None      # set once, by whoever the worker
+        self.error: Optional[str] = None     # hands the outcome to
+        self._cancel = False
+        self._lock = threading.Lock()
+
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancel
+
+    def publish(self, path: str) -> bool:
+        """Worker: hand `path` to the waiter. Returns True if accepted; False if
+        the waiter already gave up, in which case the worker must purge `path`."""
+        with self._lock:
+            if self._cancel:
+                return False
+            self.path = path
+            return True
+
+    def cancel_and_reap(self) -> Optional[str]:
+        """Waiter: give up. Returns an already-published path for the waiter to
+        purge (else None); after this, publish() will refuse and the worker
+        purges its own file."""
+        with self._lock:
+            self._cancel = True
+            return self.path
+
+
 class Service:
     def __init__(self, headless: bool = False) -> None:
         config.ensure_dirs()
+        # Staged loop copies are transient; clear any left behind by a crash
+        # mid-download so nothing accumulates on the data partition.
+        self._purge_staged_loops()
         self.battery = Battery()
         self.panel = None
         if not headless:
@@ -42,9 +85,24 @@ class Service:
         self.fmt_source = "default"
         self.pedal_state = "absent"          # absent | mounted | error
         self.busy: Optional[str] = None      # human-readable current activity
+        # True while `busy` is a read (loop staging): the pedal is being read,
+        # not written, so the panel must not tell the user "DON'T PULL".
+        self.busy_read = False
         self.progress: Optional[float] = None
         self.last_error: Optional[str] = None
         self.ending = False
+
+        # Slots that hold a LOOP.WAV, scanned once on mount (never per _emit —
+        # 99 stats over 1 MB/s USB per SSE frame would be visibly slow). A
+        # frozenset reassigned on change, so snapshot() readers on other threads
+        # always see a consistent set without a lock.
+        self._loops: "frozenset[int]" = frozenset()
+        # Bumped on every transition into the mounted state. A loop job captures
+        # it at enqueue; the worker skips the job if it no longer matches, so a
+        # job queued in one plug-in session never reads or deletes a LOOP.WAV
+        # from a different pedal mounted after an unplug/replug. Only the monitor
+        # thread writes it; the worker only reads (an atomic int compare).
+        self._mount_gen = 0
 
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
@@ -89,10 +147,16 @@ class Service:
     def capacity(self) -> Dict:
         free, total = pedal.capacity()
         rate = media.bytes_per_second(self.fmt)
-        used_secs = sum(s["duration"] for s in db.all_slots())
         if total and rate:
+            # Count real bytes on the volume, not summed DB durations: this
+            # includes LOOP.WAV (and anything else physically present), so the
+            # gauge stops overstating free time the moment loops exist. FAT
+            # cluster slack errs toward showing less free — the safe direction.
+            used_secs = (total - free) / rate
             total_secs = total / rate
         else:
+            # Unmounted: no byte figures to trust, fall back to DB durations.
+            used_secs = sum(s["duration"] for s in db.all_slots())
             total_secs = 0
         return {
             "bytes_free": free, "bytes_total": total,
@@ -114,6 +178,7 @@ class Service:
             "format_source": self.fmt_source,
             "slots": db.all_slots(),
             "slot_count": config.SLOTS,
+            "loops": sorted(self._loops),
             "capacity": self.capacity(),
             "battery": {
                 "available": self.battery.available,
@@ -164,6 +229,35 @@ class Service:
         self._work.put(("erase", slot))
         self._emit()
         return trash_id
+
+    def has_loop(self, slot: int) -> bool:
+        """From the mount-time cache — no pedal I/O. Only meaningful mounted."""
+        return slot in self._loops
+
+    def stage_loop(self, slot: int) -> LoopStage:
+        """Enqueue a copy of the slot's loop off the pedal into loops/ and return
+        a LoopStage the caller blocks on.
+
+        Blocking bridge: the worker stages to a path unique to this request and
+        hands the outcome to the returned handle. If the caller times out it
+        calls cancel_and_reap(); the handle guarantees exactly one side owns the
+        staged file, so nothing is orphaned. The job carries the current mount
+        generation so a stale job (queued before an unplug/replug) is skipped.
+        """
+        self._check_slot(slot)
+        stage = LoopStage()
+        self._work.put(("stage_loop", slot, self._mount_gen, stage))
+        self._emit()
+        return stage
+
+    def delete_loop(self, slot: int) -> bool:
+        """Enqueue removal of the slot's loop. False (→404) if none is known."""
+        self._check_slot(slot)
+        if slot not in self._loops:
+            return False
+        self._work.put(("delete_loop", slot, self._mount_gen))
+        self._emit()
+        return True
 
     def move(self, src: int, dst: int) -> None:
         """Move to an empty slot, or swap with an occupied one.
@@ -283,6 +377,7 @@ class Service:
         if not pedal.present():
             if self.pedal_state != "absent":
                 self.pedal_state = "absent"
+                self._loops = frozenset()   # presence is only knowable mounted
                 self._emit()
             return
 
@@ -291,6 +386,7 @@ class Service:
         except pedal.PedalError as e:
             if self.pedal_state != "error":
                 self.pedal_state = "error"
+                self._loops = frozenset()
                 self.last_error = str(e)
                 self._emit()
             return
@@ -300,9 +396,11 @@ class Service:
         # restart mid-session must still probe the format and requeue.
         if self.pedal_state != "mounted":
             self.pedal_state = "mounted"
+            self._mount_gen += 1        # a new session; stale loop jobs skip
             self.last_error = None
             pedal.clean_temp_files()
             self.fmt, self.fmt_source = pedal.detect_format()
+            self._scan_loops()
             self._requeue_unsynced()
             self._emit()
 
@@ -327,6 +425,24 @@ class Service:
             if row["synced_hash"] != h or slot not in on_pedal:
                 self._work.put(("write", slot))
 
+    def _scan_loops(self) -> None:
+        """Refresh the loop-presence cache from the pedal. Once per mount."""
+        self._loops = frozenset(
+            n for n in range(1, config.SLOTS + 1) if pedal.has_loop(n))
+
+    @staticmethod
+    def _purge_staged_loops() -> None:
+        """Delete every transient staged loop copy. A staged file is disposable
+        as long as the pedal holds the original, so this can run any time."""
+        try:
+            for p in config.LOOPS.glob("*"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
     def _render(self) -> None:
         if not self.panel:
             return
@@ -335,7 +451,15 @@ class Service:
         bat = self.battery.percent
         bat_s = f"{bat}%" if bat is not None else "--"
 
-        if self.busy:
+        if self.busy and self.busy_read:
+            # A read (loop staging). Unplugging mid-read is low-risk, so the
+            # panel shows activity without the "DON'T PULL" alarm a write needs.
+            self.panel.render("reading", [
+                f"{self.busy}"[:21],
+                f"{bat_s}",
+                "Reading - please wait",
+            ], self.progress)
+        elif self.busy:
             lines = [f"{self.busy}"[:21]]
             slots = db.all_slots()
             done = sum(1 for s in slots if s["state"] == "synced")
@@ -376,6 +500,7 @@ class Service:
             finally:
                 self._in_flight.clear()
                 self.busy = None
+                self.busy_read = False
                 self.progress = None
                 self._emit()
 
@@ -388,6 +513,12 @@ class Service:
             self._do_write(job[1])
         elif kind == "erase":
             self._do_erase(job[1])
+        elif kind == "stage_loop":
+            _, slot, gen, stage = job
+            self._do_stage_loop(slot, gen, stage)
+        elif kind == "delete_loop":
+            _, slot, gen = job
+            self._do_delete_loop(slot, gen)
         elif kind == "end":
             # A convert queues its write *after* the end marker, so the marker
             # can surface with real work still behind it. This worker is the
@@ -485,6 +616,67 @@ class Service:
             os.sync()
         except OSError as e:
             self.last_error = f"could not clear slot {slot}: {e}"
+        self._emit()
+
+    def _do_stage_loop(self, slot: int, gen: int, stage: LoopStage) -> None:
+        """Copy the slot's loop off the pedal into a transient staging file.
+
+        Stages to a path unique to this request, so concurrent downloads of the
+        same slot never clobber each other's file. The staged path is handed to
+        the waiter through `stage.publish()`, which loses to a concurrent
+        cancel_and_reap() — so a request that times out mid-copy never leaves an
+        orphan. Always sets `stage.done` (in the finally) so the waiter can never
+        block past its own timeout, even if this raises. A read, so no os.sync().
+        """
+        dest = None
+        try:
+            if stage.cancelled():
+                return                          # caller already gave up
+            if gen != self._mount_gen or not pedal.mounted():
+                stage.error = "no pedal"        # a different session, or none
+                return
+            if not pedal.has_loop(slot):
+                # Vanished between the handler's has_loop() check and here.
+                self._loops = self._loops - {slot}
+                stage.error = "no loop"
+                return
+            dest = config.LOOPS / f"slot-{slot:02d}-{uuid.uuid4().hex}.wav"
+            self.busy = "Reading loop"
+            self.busy_read = True
+            self.progress = None
+            self._emit()
+            pedal.copy_loop(slot, dest)
+            if not stage.publish(str(dest)):
+                # The caller gave up while we copied; purge our own file so it
+                # doesn't linger — no response generator will ever stream it.
+                dest.unlink(missing_ok=True)
+        except FileNotFoundError:
+            if dest is not None:
+                dest.unlink(missing_ok=True)
+            self._loops = self._loops - {slot}  # the loop is gone; drop it
+            stage.error = "no loop"
+        except Exception as e:                  # surface like a failed convert
+            if dest is not None:
+                dest.unlink(missing_ok=True)
+            stage.error = str(e)
+        finally:
+            stage.done.set()
+
+    def _do_delete_loop(self, slot: int, gen: int) -> None:
+        if gen != self._mount_gen or not pedal.mounted():
+            return                              # a different session, or none
+        if not pedal.has_loop(slot):
+            self._loops = self._loops - {slot}
+            self._emit()
+            return
+        self.busy = "Removing loop"
+        self._emit()
+        try:
+            pedal.remove_loop(slot)
+            os.sync()
+            self._loops = self._loops - {slot}
+        except OSError as e:
+            self.last_error = f"could not remove loop {slot}: {e}"
         self._emit()
 
     def _drain(self, timeout: float = 300.0) -> None:

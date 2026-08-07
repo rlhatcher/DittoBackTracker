@@ -1,0 +1,6 @@
+# Dev/test dependencies. On the Pi the runtime deps come from apt
+# (python3-flask, python3-waitress — see install.sh); this file lets CI and a
+# local checkout install them with pip plus the test runner.
+flask
+waitress
+pytest

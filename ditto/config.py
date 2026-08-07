@@ -21,6 +21,9 @@ DATA = _abs_path("DITTO_DATA", "/var/lib/ditto")
 SOURCES = DATA / "sources"
 STAGED = DATA / "staged"
 TRASH = DATA / "trash"
+# Transient staging for loop downloads: a LOOP.WAV is copied here off the pedal,
+# streamed to the browser, then purged. Nothing durable lives here.
+LOOPS = DATA / "loops"
 DB_PATH = DATA / "state.db"
 
 # Pedal
@@ -35,7 +38,9 @@ if not re.fullmatch(r"[A-Za-z0-9_.-]{1,11}", PEDAL_LABEL) or PEDAL_LABEL in ("."
 PEDAL_DEV = Path(f"/dev/disk/by-label/{PEDAL_LABEL}")
 MOUNT = _abs_path("DITTO_MOUNT", "/media/ditto")
 
-# The pedal keeps two files per slot. We only ever touch BT.WAV.
+# The pedal keeps two files per slot. We write and remove only BT.WAV; LOOP.WAV
+# (the user's own recording) is read for download and removed only on an
+# explicit user action, never as a side effect.
 TRACK_FILENAME = "BT.WAV"
 LOOP_FILENAME = "LOOP.WAV"
 SLOT_DIR = "{:02d}track"
@@ -67,6 +72,12 @@ LONG_PRESS_SECS = 3.0
 # Web
 PORT = int(os.environ.get("DITTO_PORT", "80"))
 POLL_SECS = 2.0              # pedal detection interval
+# Upper bound the loop-download handler waits for the worker to stage a loop off
+# the pedal before giving up with a 503. Must clear the worst case: a whole-pedal
+# loop is ~8 min at 1 MB/s, so this leaves margin above that plus a little FIFO
+# backlog. Generous because a stalled wait only ties up one waitress thread on a
+# single-user box.
+LOOP_STAGE_TIMEOUT = 600.0
 TRASH_KEEP_DAYS = 30
 # Whole-request cap for the two upload endpoints. A single lossless source is a
 # few tens of MB; this leaves headroom for a batch while refusing a runaway
@@ -79,5 +90,5 @@ MAX_UPLOAD_BYTES = _max_upload_mb * 1024 * 1024
 
 
 def ensure_dirs() -> None:
-    for d in (SOURCES, STAGED, TRASH):
+    for d in (SOURCES, STAGED, TRASH, LOOPS):
         d.mkdir(parents=True, exist_ok=True)
