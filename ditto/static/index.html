@@ -549,6 +549,11 @@ const es = new EventSource("/api/events");
 let reconnectTimer = null;
 es.onopen = () => {
   if (reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+  // A reconnect while "updating" means the post-update restart has come back:
+  // clear the in-progress lock so the button reflects the fresh snapshot. The
+  // page isn't reloaded across an update (EventSource just reconnects), so
+  // nothing else would reset it and the button would stay stuck on "Updating…".
+  if (updating){ updating = false; if (state) render(state); }
 };
 es.onmessage = e => render(JSON.parse(e.data));
 es.onerror = () => {
