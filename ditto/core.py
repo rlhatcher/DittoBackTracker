@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -188,16 +189,20 @@ class Service:
         """From the mount-time cache — no pedal I/O. Only meaningful mounted."""
         return slot in self._loops
 
-    def stage_loop(self, slot: int, event: threading.Event, result: dict) -> None:
+    def stage_loop(self, slot: int, done: threading.Event,
+                   cancel: threading.Event, result: dict) -> None:
         """Enqueue a copy of the slot's loop off the pedal into loops/.
 
-        Blocking bridge: the caller (a web thread) passes a completion `event`
-        and a `result` dict; the worker fills `result` with `path` or `error`
-        and sets `event`. The mounted/no-loop fast paths are checked by the web
-        handler before enqueue; the worker rechecks for the vanished-loop race.
+        Blocking bridge: the caller (a web thread) passes a `done` event, a
+        `cancel` event, and a `result` dict. The worker stages to a path unique
+        to this request, fills `result` with `path` or `error`, and sets `done`.
+        If the caller gives up (timeout) it sets `cancel`; the worker then
+        discards its own staged file rather than leaving an orphan no response
+        generator will ever purge. The mounted/no-loop fast paths are checked by
+        the web handler before enqueue; the worker rechecks for the races.
         """
         self._check_slot(slot)
-        self._work.put(("stage_loop", slot, event, result))
+        self._work.put(("stage_loop", slot, done, cancel, result))
         self._emit()
 
     def delete_loop(self, slot: int) -> bool:
@@ -327,6 +332,7 @@ class Service:
         if not pedal.present():
             if self.pedal_state != "absent":
                 self.pedal_state = "absent"
+                self._loops = frozenset()   # presence is only knowable mounted
                 self._emit()
             return
 
@@ -335,6 +341,7 @@ class Service:
         except pedal.PedalError as e:
             if self.pedal_state != "error":
                 self.pedal_state = "error"
+                self._loops = frozenset()
                 self.last_error = str(e)
                 self._emit()
             return
@@ -461,8 +468,8 @@ class Service:
         elif kind == "erase":
             self._do_erase(job[1])
         elif kind == "stage_loop":
-            _, slot, event, result = job
-            self._do_stage_loop(slot, event, result)
+            _, slot, done, cancel, result = job
+            self._do_stage_loop(slot, done, cancel, result)
         elif kind == "delete_loop":
             self._do_delete_loop(job[1])
         elif kind == "end":
@@ -564,14 +571,19 @@ class Service:
             self.last_error = f"could not clear slot {slot}: {e}"
         self._emit()
 
-    def _do_stage_loop(self, slot: int, event: threading.Event,
-                       result: dict) -> None:
+    def _do_stage_loop(self, slot: int, done: threading.Event,
+                       cancel: threading.Event, result: dict) -> None:
         """Copy the slot's loop off the pedal into a transient staging file.
 
-        Always sets `event` (in the finally) so the waiting web thread can never
-        block past its own timeout, even if this raises. A read, so no os.sync().
+        Stages to a path unique to this request, so concurrent downloads of the
+        same slot never clobber each other's file. Always sets `done` (in the
+        finally) so the waiting web thread can never block past its own timeout,
+        even if this raises. A read, so no os.sync().
         """
+        dest = None
         try:
+            if cancel.is_set():
+                return                          # caller already gave up
             if not pedal.mounted():
                 result["error"] = "no pedal"
                 return
@@ -580,20 +592,28 @@ class Service:
                 self._loops = self._loops - {slot}
                 result["error"] = "no loop"
                 return
-            dest = config.LOOPS / f"slot-{slot:02d}.wav"
-            dest.unlink(missing_ok=True)        # clear any stale orphan first
+            dest = config.LOOPS / f"slot-{slot:02d}-{uuid.uuid4().hex}.wav"
             self.busy = "Reading loop"
             self.busy_read = True
             self.progress = None
             self._emit()
             pedal.copy_loop(slot, dest)
+            if cancel.is_set():
+                # The caller timed out while we copied; purge our own file so it
+                # doesn't linger — no response generator will ever stream it.
+                dest.unlink(missing_ok=True)
+                return
             result["path"] = str(dest)
         except FileNotFoundError:
+            if dest is not None:
+                dest.unlink(missing_ok=True)
             result["error"] = "no loop"
         except Exception as e:                  # surface like a failed convert
+            if dest is not None:
+                dest.unlink(missing_ok=True)
             result["error"] = str(e)
         finally:
-            event.set()
+            done.set()
 
     def _do_delete_loop(self, slot: int) -> None:
         if not pedal.mounted():

@@ -126,13 +126,15 @@ read.
 ## API
 
 - `GET /api/loops/<slot>` — stage + stream the loop as a file download.
-  `404` if the slot has no loop; `409`/`503` if no pedal is mounted; blocks
-  briefly while staging. Read-only and transient, so a `GET` is acceptable.
+  `404` if the slot has no loop; `503` if no pedal is mounted (or staging times
+  out); `500` on an unexpected staging failure; blocks briefly while staging.
+  Read-only and transient, so a `GET` is acceptable.
 - `DELETE /api/loops/<slot>` — enqueue loop deletion. State-changing, so covered
   by the existing `block_cross_site` guard. Returns `ok`; `404` if no loop.
-- **Snapshot / SSE** gains a per-slot `has_loop` boolean so the UI can render the
-  loop affordances. (No staging state machine is needed — download is
-  synchronous.)
+- **Snapshot / SSE** gains a top-level `loops: [slot, ...]` array (the
+  loop-bearing slots) so the UI can render the loop affordances — including on a
+  slot that holds a loop but no backing track. (No staging state machine is
+  needed — download is synchronous.)
 
 ## UI
 

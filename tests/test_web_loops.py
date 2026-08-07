@@ -23,12 +23,13 @@ class FakeService:
     def has_loop(self, slot):
         return slot in self._loops
 
-    def stage_loop(self, slot, event: threading.Event, result: dict):
+    def stage_loop(self, slot, done: threading.Event,
+                   cancel: threading.Event, result: dict):
         # Emulate the worker: write a staged file and signal completion.
         p = self._tmp / f"slot-{slot:02d}.wav"
         p.write_bytes(b"LOOPBYTES")
         result["path"] = str(p)
-        event.set()
+        done.set()
 
     def delete_loop(self, slot):
         if slot not in self._loops:
@@ -67,6 +68,18 @@ def test_get_streams_and_purges(env):
     rv.close()
     # The transient staged copy is purged once the response completes.
     assert not (tmp / "slot-05.wav").exists()
+
+
+def test_get_timeout_503(env, monkeypatch):
+    client, svc, _ = env
+    monkeypatch.setattr(config, "LOOP_STAGE_TIMEOUT", 0.05)
+
+    # A stage that never signals completion: the handler must time out and 503.
+    def never_done(slot, done, cancel, result):
+        pass
+
+    svc.stage_loop = never_done
+    assert client.get("/api/loops/5").status_code == 503
 
 
 def test_delete_no_loop_404(env):

@@ -73,10 +73,11 @@ LONG_PRESS_SECS = 3.0
 PORT = int(os.environ.get("DITTO_PORT", "80"))
 POLL_SECS = 2.0              # pedal detection interval
 # Upper bound the loop-download handler waits for the worker to stage a loop off
-# the pedal before giving up with a 503. A whole-pedal loop is ~8 min at 1 MB/s,
-# plus any FIFO backlog ahead of it; generous because a stalled wait only ties
-# up one waitress thread on a single-user box.
-LOOP_STAGE_TIMEOUT = 300.0
+# the pedal before giving up with a 503. Must clear the worst case: a whole-pedal
+# loop is ~8 min at 1 MB/s, so this leaves margin above that plus a little FIFO
+# backlog. Generous because a stalled wait only ties up one waitress thread on a
+# single-user box.
+LOOP_STAGE_TIMEOUT = 600.0
 TRASH_KEEP_DAYS = 30
 # Whole-request cap for the two upload endpoints. A single lossless source is a
 # few tens of MB; this leaves headroom for a batch while refusing a runaway

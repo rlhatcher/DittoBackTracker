@@ -205,10 +205,14 @@ def create_app(service: Service) -> Flask:
         if not service.has_loop(slot):
             return jsonify(error="no loop in that slot"), 404
 
-        event = threading.Event()
+        done = threading.Event()
+        cancel = threading.Event()
         result: dict = {}
-        service.stage_loop(slot, event, result)
-        if not event.wait(config.LOOP_STAGE_TIMEOUT):
+        service.stage_loop(slot, done, cancel, result)
+        if not done.wait(config.LOOP_STAGE_TIMEOUT):
+            # Tell the worker to discard whatever it stages: this request is
+            # gone, so nothing would ever stream or purge that file.
+            cancel.set()
             return jsonify(error="timed out staging loop"), 503
 
         err = result.get("error")

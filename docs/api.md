@@ -156,6 +156,7 @@ nothing on the pedal, so it needs no cross-site guard.
 |---|---|
 | `200` | `Content-Disposition: attachment; filename="loop-NN.wav"`, `audio/wav` body |
 | `404` | The slot has no loop |
+| `500` | Staging failed for another reason (e.g. a local I/O error copying off the pedal). Body is `{"error": "..."}` |
 | `503` | No pedal is mounted, or staging exceeded its time limit |
 
 ---
@@ -245,6 +246,7 @@ curl -N http://dittobacktracker.local/api/events
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
 | `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>` | No such trash entry, or the slot has no loop |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
+| `500` | `GET /api/loops/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error). Body is `{"error": "..."}` |
 | `503` | `GET /api/loops/<n>` | No pedal mounted, or staging the loop exceeded its time limit. Body is `{"error": "..."}` |
 
 `POST /api/upload` is the exception to the rule. It is a batch, so it returns
