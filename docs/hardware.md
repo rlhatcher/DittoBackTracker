@@ -58,9 +58,8 @@ Two thresholds use it:
 | At or under 15% (`CRITICAL_CHARGE_PCT`) | The session ends automatically: finish the queued writes, flush, unmount, halt |
 
 Both are skipped if the gauge is absent or if the cell is charging. **A build
-without the UPS HAT has no charge protection at all** — `can_write()` returns
-true when no gauge is present, on the basis that a missing sensor shouldn't
-brick the device.
+without the UPS HAT has no charge protection at all** — writes are allowed when
+no gauge is present.
 
 The reason for the 30% floor: available current falls as the cell drains, and an
 over-current condition makes the Pi reboot-loop. A reboot mid-write can corrupt
