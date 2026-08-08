@@ -1,7 +1,7 @@
 # What the Ditto+ expects
 
-Measured on a real pedal in August 2026. TC Electronic ships a nine-page
-quick-start guide with one line about USB, so all of this came from observation.
+Measured on a real pedal in August 2026. None of it is in TC Electronic's
+documentation.
 
 ---
 
@@ -35,10 +35,6 @@ bottleneck.
 
 Mono, not stereo: the Ditto+ has one input and one output. Published sources say
 "44.1 kHz WAV" and stop there. The bit depth and channel count were measured.
-
-Rather than hardcoding this, the code reads a pedal-written file at runtime and
-copies its format. That should survive firmware changes and adapt to other
-models.
 
 ### Converting
 

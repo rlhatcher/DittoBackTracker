@@ -1,10 +1,10 @@
 # DittoBackTracker
 
-Load backing tracks onto a TC Electronic Ditto+ looper from your phone.
+Load backing tracks onto a TC Electronic Ditto+ looper over WiFi.
 
 The Ditto+ plays backing tracks, but getting them onto it needs a computer. The
 pedal mounts as a USB drive and wants 44.1 kHz / 24-bit / **mono** WAV in a
-specific folder layout. A phone can't mount USB storage or transcode audio.
+specific folder layout.
 
 DittoBackTracker is a battery-powered dongle that sits between them. Plug it
 into the pedal, open a web page, drag MP3s in. It converts them to the pedal's
@@ -18,16 +18,10 @@ format and writes them to the right slots.
   └──────────────┘                  └──────────────────────┘
 ```
 
-Sending the MP3 rather than the WAV is what makes this practical over WiFi. A
-five-minute track is about 5 MB compressed and 38 MB in the pedal's format. The
-small file goes over the air; the Pi does the expansion locally.
-
----
-
 ## What it does
 
 - Drag and drop from any browser
-- Converts to the pedal's format, read from the pedal itself rather than hardcoded
+- Converts to the pedal's format
 - 99-slot map showing what is loaded, converting or written
 - Drag between slots to reorder; dropping onto an occupied slot swaps them
 - Drag to the bin to remove, with undo
@@ -40,29 +34,15 @@ small file goes over the air; the Pi does the expansion locally.
 
 ---
 
-## Status
-
-Working, and in use on a Pi Zero 2 W with a real Ditto+.
-
-The button, LED and display are implemented but have not been run against real
-hardware. There is no enclosure design. See
-[docs/roadmap.md](docs/roadmap.md).
-
----
-
 ## Parts
 
-About £61 from scratch, plus £10 if you fit the optional button, LED and display.
-
-| Part | Notes |
-|---|---|
-| Raspberry Pi Zero 2 W | A soldered header is only needed for the optional display |
-| Waveshare UPS HAT (C) + 1000 mAh 803040 LiPo | Same 65×30 mm footprint, pogo-pin mount |
-| microSD card, 8 GB or larger | |
-| micro-USB OTG adapter | |
-| USB-A to **mini-B** cable | The Ditto+ port is mini-B, not micro or C |
-
-Optional: momentary button, LED, and a 128×32 PiOLED.
+| Part                                         |
+| -------------------------------------------- |
+| Raspberry Pi Zero 2 W                        |
+| Waveshare UPS HAT (C) + 1000 mAh 803040 LiPo |
+| microSD card, 8 GB or larger                 |
+| micro-USB OTG adapter                        |
+| USB-A to **mini-B** cable                    |
 
 Details in [docs/hardware.md](docs/hardware.md).
 
@@ -85,51 +65,12 @@ Open `http://dittobacktracker.local/` and plug the pedal in.
 
 ### Updating over the air
 
-Once installed, the device updates itself: the **Update** control at the bottom
-of the web page pulls the latest code, redeploys, and restarts — no laptop, no
-reboot, no SSH. The page reconnects on its own and the version line shows the new
-commit. It's refused while a write is in flight, so an update never interrupts
-one.
+The device updates itself: when its GitHub remote moves, an **Update** control
+appears at the bottom of the web page and pulls the new code.
 
-The device checks its GitHub remote in the background — at startup and then
-periodically (hourly by default, set with `DITTO_UPDATE_CHECK_SECS`; a value of
-`0` or less checks only at startup) — so a release published while it's on shows
-up without a reboot. When the tracked remote branch's commit differs from what's
-deployed, an **Update available** control appears in the footer; when they match
-there's nothing to press. (The device converges to the remote, so a rebase or
-force-push counts too — not only a strictly newer commit.) The check is
-best-effort — if the device is offline it keeps the last known state.
-
-This works because the app is pure Python on the writable data partition, so an
-update is just replace-code-and-restart — the read-only root never comes into it.
-`install.sh` sets up the two pieces it needs: a `ditto-restart.service` helper
-(so the restart runs outside the web process) and a scoped sudoers rule that lets
-the service trigger it.
-
-Those two live under `/etc`, so a device that already has the read-only overlay
-enabled needs them installed once with the overlay off. It's the same dance as
-provisioning step 9, and it just re-runs `install.sh`:
-
-```bash
-# disable the overlay for one boot
-sudo overlayroot-chroot
-sed -i 's/^overlayroot=.*/overlayroot=""/' /etc/overlayroot.conf
-exit
-sudo reboot
-
-# root is writable now — reinstall picks up the OTA units
-cd /var/lib/ditto/src && git pull && ./install.sh
-
-# re-enable the overlay
-sudo overlayroot-chroot
-sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
-exit
-sudo reboot
-```
-
-That's a one-time step. After it, code updates go through the **Update** button
-and never touch `/etc` again — only a change to the systemd unit or the sudoers
-rule would need the chroot dance repeated.
+First-time setup needs the read-only overlay off for one boot
+([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)); the
+mechanism is in [docs/api.md](docs/api.md#post-apiupdate).
 
 ### Running it without hardware
 
@@ -148,8 +89,7 @@ DITTO_DATA=/tmp/ditto-data DITTO_MOUNT=/tmp/ditto-mount \
 
 `--headless` skips the button, LED and display. `--debug` uses Flask's built-in
 server, so `waitress` isn't needed here. `--host 127.0.0.1` keeps the
-unauthenticated dev server off your network — the default is `0.0.0.0`, which
-is what the device itself wants but not what you want on a laptop.
+unauthenticated dev server off your network; the default is `0.0.0.0`.
 
 ---
 
@@ -175,17 +115,17 @@ invalidates the cache instead of silently reusing a wrong-format file.
 Content addressing means moving a track between slots is a database change and
 one file copy, with no re-conversion.
 
-| Module | Does |
-|---|---|
-| `config.py` | Paths and constants |
-| `db.py` | SQLite. Sync state is derived from hashes, not a stored flag |
-| `media.py` | ffprobe and ffmpeg |
-| `pedal.py` | Detect, mount, write `BT.WAV`, unmount |
-| `power.py` | Battery gauge and charge thresholds |
-| `oled.py` | SSD1306 driver, about 150 lines, no Pillow or luma |
-| `panel.py` | Button, LED, display — each optional |
-| `core.py` | Session lifecycle and work queue |
-| `web.py` | Flask routes and server-sent events |
+| Module      | Does                                   |
+| ----------- | -------------------------------------- |
+| `config.py` | Paths and constants                    |
+| `db.py`     | SQLite storage                         |
+| `media.py`  | ffprobe and ffmpeg                     |
+| `pedal.py`  | Detect, mount, write `BT.WAV`, unmount |
+| `power.py`  | Battery gauge and charge thresholds    |
+| `oled.py`   | SSD1306 display driver                 |
+| `panel.py`  | Button, LED, display — each optional   |
+| `core.py`   | Session lifecycle and work queue       |
+| `web.py`    | Flask routes and server-sent events    |
 
 The HTTP API is documented in [docs/api.md](docs/api.md).
 
@@ -198,18 +138,6 @@ expects: the audio format, the folder layout, the `BT.WAV` and `LOOP.WAV`
 distinction, real capacity, and what happens when you try to make it release
 over USB. None of that is in TC Electronic's documentation. If you're building
 something else for this pedal, start there.
-
----
-
-## Contributing
-
-Issues and pull requests welcome. [docs/roadmap.md](docs/roadmap.md) lists what
-isn't built yet.
-
-If you change how files are written: no persistent pedal file other than
-`BT.WAV` is created or removed — a temporary file is used during the atomic
-replacement and renamed into place — and `os.sync()` runs before unmounting.
-Breaking any of those risks the pedal's filesystem or someone's recording.
 
 ---
 

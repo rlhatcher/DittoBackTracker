@@ -185,10 +185,10 @@ it. Check as the service user too:
 i2cdetect -y 1          # no sudo
 ```
 
-An empty grid under `sudo` usually means the pogo pins aren't contacting the
-GPIO pads. They can carry enough current to power the Pi while missing the
-signal pins, so the board appears to work. Screw the boards together instead of
-relying on pin pressure.
+An empty grid under `sudo` usually means the pogo pins aren't contacting the GPIO
+pads — they can power the Pi while missing the signal pins, so the board still
+appears to work. The fix is in [hardware.md](hardware.md#assembly): screw the
+boards together rather than relying on pin pressure.
 
 ---
 
@@ -348,14 +348,10 @@ sudo systemctl restart ditto-web
 The `rm` matters: without it, modules deleted upstream linger in the deployed
 copy.
 
-Or just press **Update** in the web UI to get the same result over the air — no
-SSH. It's not the exact commands above: the updater deploys only the app,
-atomically (build beside the live tree, swap by rename, roll back if the new code
-won't load), and asks a helper unit to restart out of process. It needs
-`install.sh` to have installed `ditto-restart.service` and the
-`/etc/sudoers.d/99-ditto-restart` rule (both are part of a normal install). If
-you provisioned before those existed, re-run `install.sh` once with the overlay
-disabled (below) to add them.
+Or press **Update** in the web UI for the same result over the air — how it works
+is in [api.md](api.md#post-apiupdate). It needs the `ditto-restart.service`
+unit and sudoers rule that `install.sh` installs; if you provisioned before those
+existed, re-run `install.sh` once with the overlay disabled (below) to add them.
 
 For changes under `/etc`:
 
@@ -369,6 +365,15 @@ chroot, since editing the file normally writes to the discarded tmpfs layer:
 ```bash
 sudo overlayroot-chroot
 sed -i 's/^overlayroot=.*/overlayroot=""/' /etc/overlayroot.conf
+exit
+sudo reboot
+```
+
+Re-enable it the same way once you're done:
+
+```bash
+sudo overlayroot-chroot
+sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
 exit
 sudo reboot
 ```
