@@ -25,12 +25,16 @@ format and writes them to the right slots.
 - 99-slot map showing what is loaded, converting or written
 - Drag between slots to reorder; dropping onto an occupied slot swaps them
 - Drag to the bin to remove, with undo
+- Print the loaded track list
 - Capacity shown in minutes, because the pedal holds about 63 minutes in total
+- Download or remove a loop the pedal recorded
 - Never writes `LOOP.WAV`, so recorded loops are safe
 - Read-only root filesystem, so cutting the Pi's power is unlikely to corrupt
   the system partition. `state.db`, `sources/`, `staged/` and `trash/` live on
   a separate writable partition and still need a clean unmount — end the
   session with the button or the web page rather than pulling the power
+
+What isn't built yet is in [docs/roadmap.md](docs/roadmap.md).
 
 ---
 
