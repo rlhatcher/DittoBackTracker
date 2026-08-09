@@ -79,10 +79,8 @@ counts `LOOP.WAV` and anything else physically present. Unmounted, it falls back
 to summed backing-track durations.
 
 Slot `state` is one of `converting`, `staged`, `synced`, `error`. Slots with no
-entry are absent from the array. The database does record a `state` (and
-`db.mark_synced` writes `synced`), but the API always re-derives whether a slot
-is `synced` from `source_hash == synced_hash` rather than trusting the stored
-flag.
+entry are absent from the array. A slot reads as `synced` when
+`source_hash == synced_hash`.
 
 ---
 
@@ -156,9 +154,9 @@ download costs nothing; just retry.
 curl -OJ http://dittobacktracker.local/api/loops/5    # -> loop-05.wav
 ```
 
-The request blocks briefly while staging (the copy is seconds to a minute over
-the ~1 MB/s USB link). A `GET` is used deliberately: reading a loop changes
-nothing on the pedal, so it needs no cross-site guard.
+The request blocks while staging: seconds for a typical loop, up to ~8 min for a
+maximal ~477 MiB one over the ~1 MB/s USB link. It waits up to `LOOP_STAGE_TIMEOUT`
+(600 s) before giving up with a `503`.
 
 | Status | Meaning |
 |---|---|
@@ -171,10 +169,8 @@ nothing on the pedal, so it needs no cross-site guard.
 
 ## DELETE /api/loops/&lt;n&gt;
 
-Delete the loop in slot `n` from the pedal. State-changing, so it is covered by
-the same cross-site guard as the other write methods. This is irreversible —
-a loop is a live take with no source and no undo — so the UI confirms first.
-`BT.WAV` and the slot directory are never touched.
+Delete the loop in slot `n` from the pedal. Irreversible — a loop is a live take
+with no source and no undo. `BT.WAV` and the slot directory are never touched.
 
 ```json
 { "ok": true }
@@ -260,9 +256,8 @@ connect, then another on every change. If no change occurs for 15 s a comment
 line is sent instead, so a frame of some kind always arrives within 15 s.
 
 The stream is closed after five minutes and the browser's `EventSource`
-reconnects on its own. Each stream holds a server thread, so they are retired
-rather than left open indefinitely — a client that reconnects needs no special
-handling, but a hand-rolled consumer should expect the stream to end.
+reconnects on its own. A hand-rolled consumer should expect the stream to end
+and reconnect.
 
 ```bash
 curl -N http://dittobacktracker.local/api/events

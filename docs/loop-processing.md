@@ -1,9 +1,8 @@
-# Add loop processing
+# Loop processing — design notes
 
-Spec for reading `LOOP.WAV` recordings off the pedal, alongside the existing
-`BT.WAV` write path. Derived from a design review; the rationale for each
-decision is kept because several are non-obvious and a few close off tempting
-wrong turns.
+Why reading and deleting `LOOP.WAV` recordings works the way it does. The feature
+is built; the endpoints are in [api.md](api.md#get-apiloopsn). What follows is the
+reasoning behind the non-obvious choices, and the wrong turns they close off.
 
 ## Scope
 
@@ -20,18 +19,16 @@ wrong turns.
   just re-converted. **`LOOP.WAV` is the opposite:** a live take, pedal → host,
   with **no source and no way to reconstruct it.** Every decision below follows
   from that asymmetry.
-- **The pedal creates exactly two files:** `BT.WAV` and `LOOP.WAV`
-  (measured — see [pedal-format.md](pedal-format.md)). The volume may still
-  contain our own transient `~bt*.tmp` and, if a Mac ever mounted it, AppleDouble
-  junk — so we act on an **exact-name allowlist**, never on "whatever is in the
-  directory".
-- **Single user, always.** The device is a personal dongle plugged in for a
-  session; it can only ever have one operator. Contention between operations is
-  rare and never adversarial, which lets the design stay simple (FIFO, blocking
-  reads).
-- **~1 MB/s USB, ~477 MiB shared capacity, loops at 7.57 MiB/min** — a loop is
-  seconds-to-a-minute to copy, and the whole loop universe on any pedal is
-  bounded at ≤ 477 MiB.
+- The pedal creates exactly two files, `BT.WAV` and `LOOP.WAV`
+  ([pedal-format.md](pedal-format.md)). The volume may also hold our own transient
+  `~bt*.tmp` and, if a Mac ever mounted it, AppleDouble junk — so we act on an
+  exact-name allowlist, never on "whatever is in the directory".
+- Single user, always. The device is a personal dongle with one operator, so
+  contention is rare and never adversarial. That lets the design stay simple:
+  FIFO, blocking reads.
+- The pedal's ~1 MB/s USB and ~477 MiB capacity ([pedal-format.md](pedal-format.md))
+  bound the copy: seconds for a typical short loop, up to ~8 min for a maximal
+  ~477 MiB one. Every loop on the pedal fits in ≤ 477 MiB in total.
 
 ## Decisions
 
@@ -51,9 +48,8 @@ already guarantee a session never unmounts mid-job. **No web-request thread ever
 reads or writes the pedal directly**, which would reintroduce the
 unmount-during-operation race for reads.
 
-Ordering is plain **FIFO, no priority.** Single user ⇒ the queue is usually
-empty; the contrived "10 queued writes then an instant-download demand" is one
-person waiting on work they just queued, not a defect.
+Ordering is plain FIFO, no priority: with a single user the queue is usually
+empty.
 
 ### Download = stage to Pi, serve from Pi, purge (transient)
 1. Worker copies `LOOP.WAV` from the pedal to a **temporary file on the data
@@ -125,16 +121,11 @@ read.
 
 ## API
 
-- `GET /api/loops/<slot>` — stage + stream the loop as a file download.
-  `404` if the slot has no loop; `503` if no pedal is mounted (or staging times
-  out); `500` on an unexpected staging failure; blocks briefly while staging.
-  Read-only and transient, so a `GET` is acceptable.
-- `DELETE /api/loops/<slot>` — enqueue loop deletion. State-changing, so covered
-  by the existing `block_cross_site` guard. Returns `ok`; `404` if no loop.
-- **Snapshot / SSE** gains a top-level `loops: [slot, ...]` array (the
-  loop-bearing slots) so the UI can render the loop affordances — including on a
-  slot that holds a loop but no backing track. (No staging state machine is
-  needed — download is synchronous.)
+Both endpoints and the snapshot's `loops` array are documented in
+[api.md](api.md#get-apiloopsn). The design points behind them: a loop download is
+a plain `GET` because it changes nothing on the pedal, and the snapshot carries
+the loop-bearing slots directly rather than running a staging state machine,
+because the download is synchronous.
 
 ## UI
 
@@ -178,21 +169,3 @@ read.
    `remove` must gate on a **hash-verified** Pi copy (copy → `fsync` → compare →
    then `unlink`). Cheap (the bytes are already being read) but out of v1 scope,
    and it is the only thing that would justify calling the feature "backup".
-
-## Implementation touch-points
-
-- [config.py](../ditto/config.py): `LOOP_FILENAME = "LOOP.WAV"`; a `LOOPS = DATA
-  / "loops"` staging dir added to `ensure_dirs()`.
-- [pedal.py](../ditto/pedal.py): `loop_path(slot)`, `copy_loop(slot, dest)`
-  (temp + `fsync` + rename, reading *from* the pedal), `remove_loop(slot)`
-  (exact-name `unlink`). `has_loop()` already exists.
-- [core.py](../ditto/core.py): `Service.stage_loop`/`delete_loop`; `_run_job`
-  handling for the two new kinds; `_do_stage_loop`/`_do_delete_loop`; a
-  loop-presence cache refreshed on mount and after delete; distinct busy label;
-  `has_loop` in `snapshot`; byte-based `used_secs` in `capacity`.
-- [web.py](../ditto/web.py): `GET /api/loops/<slot>` (enqueue-block-stream-purge)
-  and `DELETE /api/loops/<slot>`.
-- [static/index.html](../ditto/static/index.html): per-slot loop indicator,
-  download affordance, remove-with-confirm.
-- [docs/api.md](api.md): document both endpoints, `has_loop`, and the transient
-  staging behaviour.
