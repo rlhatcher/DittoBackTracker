@@ -27,8 +27,8 @@ reasoning behind the non-obvious choices, and the wrong turns they close off.
   contention is rare and never adversarial. That lets the design stay simple:
   FIFO, blocking reads.
 - The pedal's ~1 MB/s USB and ~477 MiB capacity ([pedal-format.md](pedal-format.md))
-  bound a loop at seconds-to-a-minute to copy, and every loop on the pedal at
-  ≤ 477 MiB in total.
+  bound the copy: seconds for a typical short loop, up to ~8 min for a maximal
+  ~477 MiB one. Every loop on the pedal fits in ≤ 477 MiB in total.
 
 ## Decisions
 

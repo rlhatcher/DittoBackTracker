@@ -154,8 +154,9 @@ download costs nothing; just retry.
 curl -OJ http://dittobacktracker.local/api/loops/5    # -> loop-05.wav
 ```
 
-The request blocks briefly while staging (the copy is seconds to a minute over
-the ~1 MB/s USB link).
+The request blocks while staging: seconds for a typical loop, up to ~8 min for a
+maximal ~477 MiB one over the ~1 MB/s USB link. It waits up to `LOOP_STAGE_TIMEOUT`
+(600 s) before giving up with a `503`.
 
 | Status | Meaning |
 |---|---|

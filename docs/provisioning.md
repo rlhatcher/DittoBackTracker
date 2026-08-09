@@ -369,12 +369,11 @@ exit
 sudo reboot
 ```
 
-Re-enable it the same way once you're done:
+Re-enable it once you're done. The overlay is off now, so the root is writable
+and you edit `/etc/overlayroot.conf` directly — no chroot:
 
 ```bash
-sudo overlayroot-chroot
-sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
-exit
+sudo sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
 sudo reboot
 ```
 
