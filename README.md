@@ -34,6 +34,8 @@ format and writes them to the right slots.
   a separate writable partition and still need a clean unmount — end the
   session with the button or the web page rather than pulling the power
 
+What isn't built yet is in [docs/roadmap.md](docs/roadmap.md).
+
 ---
 
 ## Parts

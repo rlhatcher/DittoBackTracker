@@ -8,9 +8,8 @@ reasoning behind the non-obvious choices, and the wrong turns they close off.
 
 - **In:** show which slots hold a pedal-recorded loop, download a loop to the
   user's device, delete a loop from the pedal.
-- **Out (deferred):** a persistent on-Pi loop archive / verified "backup",
-  moving a loop when its backing track moves, a staged-copy management screen.
-  See [Deferred](#deferred).
+- **Out (deferred):** moving a loop when its backing track moves, a staged-copy
+  management screen. See [Deferred](#deferred).
 
 ## Constraints that shaped this
 
@@ -157,15 +156,10 @@ because the download is synchronous.
 
 ## Deferred
 
-1. **Staged-copy management surface** — not needed while staging is transient.
-   Only returns if a persistent on-Pi archive is added.
+1. **Staged-copy management surface** — not needed: staging is transient, so
+   nothing accumulates on the Pi to manage.
 2. **Loop-vs-move coupling** — `move`/`swap` operate on `BT.WAV` only; a
    `LOOP.WAV` stays pinned to its physical `/NNtrack/`. So moving a backing track
    *does not* move its loop, and after a move a slot's loop may belong to a
    different track. **Open decision:** accept as a documented limitation, or make
    move/swap carry the loop. Deferred out of v1.
-3. **Verified offload / real "backup"** — if the tool should ever *keep* loops
-   on the Pi and let the user delete from the pedal with a safety net, that
-   `remove` must gate on a **hash-verified** Pi copy (copy → `fsync` → compare →
-   then `unlink`). Cheap (the bytes are already being read) but out of v1 scope,
-   and it is the only thing that would justify calling the feature "backup".
