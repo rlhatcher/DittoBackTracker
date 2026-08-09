@@ -110,6 +110,9 @@ button.act:disabled{opacity:.4;cursor:default}
   white-space:nowrap;border:0}
 h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
   text-transform:uppercase;letter-spacing:.04em}
+/* Card header carrying an action (the Tracks list's Print link) beside the h2. */
+.listhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.listhead h2{margin:0}
 .foot{display:flex;align-items:center;justify-content:space-between;
   margin-top:14px;padding:0 2px;font-size:12px;color:var(--tx2)}
 #ver{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -146,7 +149,10 @@ h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
   </div>
 
   <div class="card" id="listcard">
-    <h2>Tracks</h2>
+    <div class="listhead">
+      <h2>Tracks</h2>
+      <button class="link" id="print" type="button" title="Print the backing-track list" hidden>Print</button>
+    </div>
     <div id="list"></div>
   </div>
 
@@ -286,6 +292,9 @@ function render(s){
       : hasLoop ? `Slot ${n}: recorded loop only` : `Slot ${n} (empty)`;
   });
 
+  // Print applies to loaded backing tracks; hide it when there's nothing to print.
+  $("#print").hidden = !s.slots.length;
+
   const list = $("#list");
   list.innerHTML = "";
   // Union of backing-track slots and loop-bearing slots, in slot order: a slot
@@ -377,6 +386,50 @@ function render(s){
 }
 
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
+
+// Build a concise, self-contained printable document: slot number + track name
+// for the loaded backing tracks, in slot order. Loops and empty slots are left
+// out — this is a "what's in which slot" reference sheet. Kept separate from
+// printList so the output is easy to inspect. Scaling and margins are left to
+// the browser's print dialog.
+function printHtml(s){
+  const rows = (s.slots || []).slice().sort((a,b) => a.slot - b.slot);
+  const body = rows.length
+    ? rows.map(r =>
+        `<tr><td class="n">${String(r.slot).padStart(2,"0")}</td>` +
+        `<td>${escapeHtml(r.display_name)}</td></tr>`).join("")
+    : `<tr><td></td><td class="empty">No backing tracks loaded.</td></tr>`;
+  const count = rows.length + (rows.length === 1 ? " track" : " tracks");
+  const when = new Date().toLocaleDateString();
+  return `<!doctype html><html><head><meta charset="utf-8">` +
+    `<title>DittoBackTracker — backing tracks</title><style>` +
+    // Pin white paper / black ink so a dark-mode browser doesn't render the
+    // print preview (and save-to-PDF) as black text on a dark background.
+    `body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;` +
+    `margin:24px;color:#000;background:#fff}` +
+    `h1{font-size:16px;margin:0 0 2px}` +
+    `.sub{color:#555;font-size:12px;margin:0 0 16px}` +
+    `table{border-collapse:collapse;width:100%}` +
+    `td{padding:4px 8px;border-bottom:1px solid #ddd;vertical-align:baseline}` +
+    `td.n{font-family:ui-monospace,Menlo,monospace;color:#555;width:2.5em;text-align:right;white-space:nowrap}` +
+    `.empty{color:#555}` +
+    `</style></head><body>` +
+    `<h1>DittoBackTracker</h1>` +
+    `<p class="sub">Backing tracks · ${count} · ${when}</p>` +
+    `<table>${body}</table>` +
+    `</body></html>`;
+}
+
+function printList(){
+  if (!state) return;
+  // Opened synchronously from the click so it isn't treated as a pop-up.
+  const w = window.open("", "_blank");
+  if (!w){ fail("Couldn't open the print view — allow pop-ups for this page"); return; }
+  w.document.write(printHtml(state));
+  w.document.close();
+  w.focus();
+  w.print();   // no external resources in the doc, so it's ready immediately
+}
 
 function updateBtnState(s){
   if (updating) return;                 // don't clobber the in-progress label
@@ -523,6 +576,8 @@ $("#done").onclick = async () => {
   if (!confirm("End the session? The pedal will be unmounted and the device will shut down.")) return;
   await fetch("/api/session/end", {method:"POST"});
 };
+
+$("#print").onclick = printList;
 
 function endUpdating(){ updating = false; clearTimeout(updateTimer); updateTimer = null; }
 
