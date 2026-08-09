@@ -387,35 +387,29 @@ function render(s){
 
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 
-// Build a concise, self-contained printable document: slot number + track name
-// for the loaded backing tracks, in slot order. Loops and empty slots are left
-// out — this is a "what's in which slot" reference sheet. Kept separate from
-// printList so the output is easy to inspect. Scaling and margins are left to
-// the browser's print dialog.
+// Build a concise, self-contained printable document: a bare list of slot number
+// + track name for the loaded backing tracks, in slot order. No headings and no
+// row rules — both span the full page width, so scaling the print down leaves
+// long lines against short text. Loops and empty slots are left out. Kept
+// separate from printList so the output is easy to inspect; scaling and margins
+// are left to the browser's print dialog.
 function printHtml(s){
   const rows = (s.slots || []).slice().sort((a,b) => a.slot - b.slot);
   const body = rows.length
     ? rows.map(r =>
         `<tr><td class="n">${String(r.slot).padStart(2,"0")}</td>` +
         `<td>${escapeHtml(r.display_name)}</td></tr>`).join("")
-    : `<tr><td></td><td class="empty">No backing tracks loaded.</td></tr>`;
-  const count = rows.length + (rows.length === 1 ? " track" : " tracks");
-  const when = new Date().toLocaleDateString();
+    : `<tr><td></td><td>No backing tracks loaded.</td></tr>`;
   return `<!doctype html><html><head><meta charset="utf-8">` +
     `<title>DittoBackTracker — backing tracks</title><style>` +
     // Pin white paper / black ink so a dark-mode browser doesn't render the
     // print preview (and save-to-PDF) as black text on a dark background.
     `body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;` +
     `margin:24px;color:#000;background:#fff}` +
-    `h1{font-size:16px;margin:0 0 2px}` +
-    `.sub{color:#555;font-size:12px;margin:0 0 16px}` +
-    `table{border-collapse:collapse;width:100%}` +
-    `td{padding:4px 8px;border-bottom:1px solid #ddd;vertical-align:baseline}` +
-    `td.n{font-family:ui-monospace,Menlo,monospace;color:#555;width:2.5em;text-align:right;white-space:nowrap}` +
-    `.empty{color:#555}` +
+    `table{border-collapse:collapse}` +
+    `td{padding:2px 0;vertical-align:baseline}` +
+    `td.n{padding-right:10px;font-family:ui-monospace,Menlo,monospace;color:#555;text-align:right;white-space:nowrap}` +
     `</style></head><body>` +
-    `<h1>DittoBackTracker</h1>` +
-    `<p class="sub">Backing tracks · ${count} · ${when}</p>` +
     `<table>${body}</table>` +
     `</body></html>`;
 }
