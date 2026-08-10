@@ -323,6 +323,15 @@ def create_app(service: Service) -> Flask:
             code = 502
         return jsonify(error=message), code
 
+    @app.post("/api/update/check")
+    def update_check():
+        """Check the remote for a newer version, on demand. State-changing (it
+        fetches and may flip update_available), so the block_cross_site guard
+        covers it. Always 200 with the result; the SSE stream also carries any
+        change. `ok` is false with a reason when the check couldn't run (no
+        deployment, offline)."""
+        return jsonify(service.check_now())
+
     @app.get("/api/events")
     def events():
         q = service.subscribe()

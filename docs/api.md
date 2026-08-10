@@ -70,7 +70,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
 | `version` | Package version string |
 | `revision` | Short git commit of the deployed code, or `null` off a git checkout. Watch it change to confirm an update took |
-| `update_available` | `true` when the tracked remote branch's commit differs from the deployed commit (the device converges to the remote, so a rebased or force-pushed branch counts too, not only a strictly newer one). The check runs at startup and then every `DITTO_UPDATE_CHECK_SECS` (default 3600; `<= 0` checks only at startup). `false` before the first check and when up to date. A check that can't run (offline, no checkout) leaves the last known value unchanged rather than resetting it |
+| `update_available` | `true` when the tracked remote branch's commit differs from the deployed commit (the device converges to the remote, so a rebased or force-pushed branch counts too, not only a strictly newer one). Checked once at startup and again on demand via `POST /api/update/check` — there is no background polling. `false` before the first check and when up to date. A check that can't run (offline, no checkout) leaves the last known value unchanged |
 | `remote_revision` | Short git commit the remote is at, when `update_available`; else `null` |
 
 `capacity.used_seconds` is derived from the real bytes on the volume
@@ -246,6 +246,30 @@ restart sudoers rule) — see the README.
 | `409` | Busy (work is in flight or queued, or an update is already running) — retry when idle |
 | `502` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
 | `503` | The device is shutting down — try again after it comes back up |
+
+---
+
+## POST /api/update/check
+
+Check the remote for a newer version, on demand — the manual counterpart to the
+startup check, since the device does no background polling. Fetches the tracked
+branch and re-derives `update_available`; if it changed, the new state is also
+pushed over `/api/events`.
+
+Always `200`. `ok` is `false` with a `reason` when the check couldn't run:
+
+```json
+{ "ok": true, "error": null, "revision": "a1b2c3d",
+  "update_available": true, "remote_revision": "e5f6a7b" }
+```
+
+| Field | Meaning |
+|---|---|
+| `ok` | `false` when the check couldn't run — `error` says why: no deployment (not a git checkout), `couldn't reach the remote` (offline), or an update is already running |
+| `update_available` / `remote_revision` | Same meaning as in the state snapshot |
+
+Blocks briefly on the `git fetch` (seconds). State-changing, so the same
+cross-site guard as the other write methods applies (`403` on a foreign origin).
 
 ---
 

@@ -69,8 +69,10 @@ Open `http://dittobacktracker.local/` and plug the pedal in.
 
 ### Updating over the air
 
-The device updates itself: when its GitHub remote moves, an **Update** control
-appears at the bottom of the web page and pulls the new code.
+The device updates itself. It checks for a new version at startup and whenever
+you press **Check for update** at the bottom of the web page; when one is
+available that control becomes **Update available**, and pressing it pulls the
+new code and restarts.
 
 First-time setup needs the read-only overlay off for one boot
 ([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)); the
