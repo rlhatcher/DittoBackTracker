@@ -550,15 +550,18 @@ class Service:
             # Contract: remote_revision is meaningful only when an update is
             # available; keep it null otherwise.
             remote_short = self._rev_parse(src, ref, short=True) if available else None
+            # Publish under the lock: a deploy holds the same lock, so this can't
+            # overwrite update_available against a _current_sha the deploy has
+            # since moved. Skip during teardown.
+            if self._stop.is_set():
+                return None
+            if (available != self._update_available
+                    or remote_short != self._remote_revision):
+                self._update_available = available
+                self._remote_revision = remote_short
+                self._emit()
         finally:
             self._update_lock.release()
-        if self._stop.is_set():
-            return None         # shutting down — don't publish during teardown
-        if (available != self._update_available
-                or remote_short != self._remote_revision):
-            self._update_available = available
-            self._remote_revision = remote_short
-            self._emit()
         return None
 
     def _deployed_head(self) -> "tuple[Optional[str], Optional[str]]":

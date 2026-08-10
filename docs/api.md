@@ -256,7 +256,7 @@ startup check, since the device does no background polling. Fetches the tracked
 branch and re-derives `update_available`; if it changed, the new state is also
 pushed over `/api/events`.
 
-Always `200`. `ok` is `false` with a `reason` when the check couldn't run:
+Always `200`. `ok` is `false` with an `error` string when the check couldn't run:
 
 ```json
 { "ok": true, "error": null, "revision": "a1b2c3d",
@@ -265,7 +265,7 @@ Always `200`. `ok` is `false` with a `reason` when the check couldn't run:
 
 | Field | Meaning |
 |---|---|
-| `ok` | `false` when the check couldn't run — `error` says why: no deployment (not a git checkout), `couldn't reach the remote` (offline), or an update is already running |
+| `ok` | `false` when the check couldn't run — `error` says why: no deployment (not a git checkout), `couldn't reach the remote` or `couldn't read the remote branch` (offline or bad remote), or an update is already running |
 | `update_available` / `remote_revision` | Same meaning as in the state snapshot |
 
 Blocks briefly on the `git fetch` (seconds). State-changing, so the same
