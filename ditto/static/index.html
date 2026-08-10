@@ -402,10 +402,15 @@ function printHtml(s){
     : `<tr><td></td><td>No backing tracks loaded.</td></tr>`;
   return `<!doctype html><html><head><meta charset="utf-8">` +
     `<title>DittoBackTracker — backing tracks</title><style>` +
+    // Zero the page margin so the browser has nowhere to draw its own header and
+    // footer (date, document title, URL, page number) — those are browser chrome,
+    // not content, so they never scale with the print. The body margin below
+    // supplies the actual inset instead.
+    `@page{margin:0}` +
     // Pin white paper / black ink so a dark-mode browser doesn't render the
     // print preview (and save-to-PDF) as black text on a dark background.
     `body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;` +
-    `margin:24px;color:#000;background:#fff}` +
+    `margin:16mm;color:#000;background:#fff}` +
     `table{border-collapse:collapse}` +
     `td{padding:2px 0;vertical-align:baseline}` +
     `td.n{padding-right:10px;font-family:ui-monospace,Menlo,monospace;color:#555;text-align:right;white-space:nowrap}` +
