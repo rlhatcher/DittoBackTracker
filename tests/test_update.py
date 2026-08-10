@@ -60,6 +60,34 @@ def test_update_cross_site_403():
     assert rv.status_code == 403
 
 
+class FakeCheckService:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def check_now(self):
+        return self._payload
+
+
+def _check_client(payload):
+    app = web.create_app(FakeCheckService(payload))
+    app.config.update(TESTING=True)
+    return app.test_client()
+
+
+def test_update_check_returns_payload():
+    payload = {"ok": True, "error": None, "revision": "a1b2c3d",
+               "update_available": True, "remote_revision": "e5f6a7b"}
+    rv = _check_client(payload).post("/api/update/check")
+    assert rv.status_code == 200
+    assert rv.get_json() == payload
+
+
+def test_update_check_cross_site_403():
+    rv = _check_client({"ok": True}).post(
+        "/api/update/check", headers={"Origin": "http://evil.example"})
+    assert rv.status_code == 403
+
+
 # --- core guards / redeploy -------------------------------------------------
 
 @pytest.fixture
@@ -176,11 +204,35 @@ def test_check_skipped_during_deploy(service, repos, monkeypatch):
     assert service._remote_revision is None      # skipped entirely
 
 
-def test_update_watch_startup_only_returns(service, monkeypatch):
-    # A non-positive interval means "startup check only" — the loop must return
-    # rather than spin. (SRC has no checkout here, so the check is a fast no-op.)
-    monkeypatch.setattr(config, "UPDATE_CHECK_SECS", 0)
-    service._update_watch()
+def test_startup_update_check_noops_without_checkout(service):
+    # SRC has no checkout in the temp data dir, so the startup check is a fast
+    # no-op that leaves the state untouched (and never raises).
+    service._startup_update_check()
+    assert service._update_available is False
+    assert service._remote_revision is None
+
+
+def test_check_now_reports_available(service, repos, monkeypatch):
+    src, work = repos["src"], repos["work"]
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    service._current_sha = _head(src)
+
+    (work / "ditto" / "__init__.py").write_text("# b\n")
+    _git("-C", str(work), "commit", "-am", "B")
+    _git("-C", str(work), "push", "origin", "main")
+
+    res = service.check_now()
+    assert res["ok"] is True
+    assert res["update_available"] is True
+    assert res["remote_revision"]
+
+
+def test_check_now_without_checkout(service):
+    # No checkout in the temp data dir → ok False with a reason, and no crash.
+    res = service.check_now()
+    assert res["ok"] is False and res["error"]
+    assert res["update_available"] is False
 
 
 def test_update_rolls_back_when_new_code_wont_load(service, repos, tmp_path,

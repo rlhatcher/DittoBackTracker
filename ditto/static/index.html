@@ -184,7 +184,7 @@ h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
 const $ = s => document.querySelector(s);
 const SLOT_MIME = "application/x-ditto-slot";
 let state = null, selected = null, dragSrc = null, binMode = false;
-let updating = false, updatingFromRev = null, updateTimer = null;
+let updating = false, updatingFromRev = null, updateTimer = null, checking = false;
 
 function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
 
@@ -426,21 +426,19 @@ function printList(){
 }
 
 function updateBtnState(s){
-  if (updating) return;                 // don't clobber the in-progress label
+  if (updating || checking) return;     // don't clobber a transient label
   const b = $("#update");
-  if (s.update_available){
-    b.hidden = false;
+  b.hidden = false;
+  b.disabled = false;
+  if (s && s.update_available){
     b.textContent = "Update available";
     b.className = "link avail";
-    b.disabled = false;
     b.title = s.remote_revision ? "New version " + s.remote_revision : "A newer version is available";
   } else {
-    // Up to date (or no deploy info yet) — nothing to do, so hide the control
-    // rather than show a dead "Up to date" button. The version line stays.
-    b.hidden = true;
+    // Up to date, or not checked yet — offer a manual re-check.
+    b.textContent = "Check for update";
     b.className = "link";
-    b.disabled = true;
-    b.title = "";
+    b.title = "Check GitHub for a newer version";
   }
 }
 
@@ -575,9 +573,49 @@ $("#print").onclick = printList;
 
 function endUpdating(){ updating = false; clearTimeout(updateTimer); updateTimer = null; }
 
-$("#update").onclick = async () => {
+// The single footer button has two resting states: "Update available" (runs the
+// OTA update) and "Check for update" (asks the device to re-check the remote).
+// The click dispatches on the current state.
+$("#update").onclick = () => {
+  if ($("#update").disabled) return;
+  if (state && state.update_available) doUpdate();
+  else doCheck();
+};
+
+async function doCheck(){
   const btn = $("#update");
-  if (btn.disabled) return;
+  checking = true;
+  btn.disabled = true; btn.textContent = "Checking…"; btn.className = "link";
+  let j;
+  try {
+    const r = await fetch("/api/update/check", {method:"POST"});
+    j = await r.json().catch(() => ({}));
+  } catch {
+    checking = false; updateBtnState(state);
+    fail("Update check failed — check the connection");
+    return;
+  }
+  checking = false;
+  if (!j.ok){
+    // The check couldn't run (offline, or not a git deployment).
+    updateBtnState(state);
+    fail(j.error ? "Update check failed: " + j.error : "Update check failed");
+    return;
+  }
+  // Reflect the result. A change also arrives over SSE, but update from the
+  // response so a no-change result (still up to date) still gives feedback.
+  if (state){
+    state.update_available = j.update_available;
+    state.remote_revision = j.remote_revision;
+  }
+  updateBtnState(state);
+  if (!j.update_available){
+    $("#msg").textContent = "Up to date"; $("#msg").className = "msg";
+  }
+}
+
+async function doUpdate(){
+  const btn = $("#update");
   // A known deployed revision is required: completion is detected by the
   // revision changing (see render). Without one — the first snapshot hasn't
   // arrived, or this isn't a git deployment — a pre-restart snapshot would
@@ -620,7 +658,7 @@ $("#update").onclick = async () => {
   // shows the new revision (see render), keeping the button locked so a second
   // update can't start while the restart is pending.
   $("#msg").textContent = "Updating… the page will reconnect"; $("#msg").className = "msg";
-};
+}
 
 const es = new EventSource("/api/events");
 let reconnectTimer = null;

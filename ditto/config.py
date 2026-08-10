@@ -37,10 +37,6 @@ APP = DATA / "app"
 REVISION_FILE = APP / "REVISION"
 # Branch the device follows. A device is an appliance that tracks one branch.
 UPDATE_BRANCH = os.environ.get("DITTO_UPDATE_BRANCH", "main")
-# How often (seconds) to re-check the remote for a newer version after the
-# startup check, so a release published while the device is on is noticed without
-# a reboot. A value <= 0 disables the periodic re-check (startup only).
-UPDATE_CHECK_SECS = int(os.environ.get("DITTO_UPDATE_CHECK_SECS", "3600"))
 # A oneshot unit that restarts ditto-web from outside the web process, so the
 # restart isn't killing the thing that triggered it. Started via a NOPASSWD
 # sudoers rule (see etc/99-ditto-restart); code changes never touch /etc.
