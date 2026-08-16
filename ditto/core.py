@@ -1,4 +1,4 @@
-"""The service: pedal lifecycle, transcode queue, write queue, panel."""
+"""The service: pedal lifecycle, transcode queue, write queue."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -15,8 +16,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import __version__, config, db, media, pedal
-from .panel import Panel, local_ip
-from .power import Battery
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +23,18 @@ log = logging.getLogger(__name__)
 def mmss(seconds: float) -> str:
     m, s = divmod(int(max(seconds, 0)), 60)
     return f"{m}:{s:02d}"
+
+
+def local_ip() -> str:
+    """Best-effort local address, for the web UI. No traffic is sent."""
+    try:
+        # Context-managed so the socket closes even if connect/getsockname
+        # raises; local_ip runs on every snapshot, so a leak would accumulate.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+    except Exception:
+        return "no network"
 
 
 class LoopStage:
@@ -66,17 +77,11 @@ class LoopStage:
 
 
 class Service:
-    def __init__(self, headless: bool = False) -> None:
+    def __init__(self) -> None:
         config.ensure_dirs()
         # Staged loop copies are transient; clear any left behind by a crash
         # mid-download so nothing accumulates on the data partition.
         self._purge_staged_loops()
-        self.battery = Battery()
-        self.panel = None
-        if not headless:
-            self.battery.start()
-            self.panel = Panel(on_press=self.end_session,
-                               on_long=self.force_halt)
 
         self._work: "queue.Queue[tuple]" = queue.Queue()
         self._subs: List["queue.Queue[dict]"] = []
@@ -86,9 +91,10 @@ class Service:
         self.fmt_source = "default"
         self.pedal_state = "absent"          # absent | mounted | error
         self.busy: Optional[str] = None      # human-readable current activity
-        # True while `busy` is a read (loop staging): the pedal is being read,
-        # not written, so the panel must not tell the user "DON'T PULL".
-        self.busy_read = False
+        # What kind of pedal work `busy` is: "write" | "read" | None. Unplugging
+        # mid-read is low-risk, so only a write earns the UI's "don't unplug"
+        # warning — the job that used to belong to the OLED.
+        self.busy_kind: Optional[str] = None
         self.progress: Optional[float] = None
         self.last_error: Optional[str] = None
         self.ending = False
@@ -124,9 +130,6 @@ class Service:
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
         self._in_flight = threading.Event()
-        # Tracks the last can_write() reading so a low-battery write can be
-        # requeued the moment a charger brings the cell back up.
-        self._could_write = True
         self._last_prog_emit = 0.0
 
         self._stop = threading.Event()
@@ -194,6 +197,7 @@ class Service:
         return {
             "pedal": self.pedal_state,
             "busy": self.busy,
+            "busy_kind": self.busy_kind,
             "progress": self.progress,
             "ending": self.ending,
             "error": self.last_error,
@@ -203,13 +207,6 @@ class Service:
             "slot_count": config.SLOTS,
             "loops": sorted(self._loops),
             "capacity": self.capacity(),
-            "battery": {
-                "available": self.battery.available,
-                "percent": self.battery.percent,
-                "charging": self.battery.charging,
-                "can_write": self.battery.can_write(),
-            },
-            "panel": self.panel.status() if self.panel else {},
             "ip": local_ip(),
             "version": __version__,
             "revision": self._revision,
@@ -340,20 +337,12 @@ class Service:
         return slot
 
     def end_session(self) -> None:
-        """Flush, unmount, halt. The graceful ending."""
+        """Flush, unmount, halt. The only way to power the device off."""
         if self.ending:
             return
         self.ending = True
         self._emit()
         self._work.put(("end",))
-
-    def force_halt(self) -> None:
-        """Long press. Emergency only — does not wait for the queue."""
-        if self.ending:
-            return
-        self.ending = True
-        self._emit()
-        threading.Thread(target=self._halt, args=(False,), daemon=True).start()
 
     # -------------------------------------------------------------- self-update
 
@@ -614,9 +603,6 @@ class Service:
             pedal.unmount()
         except Exception:
             log.exception("unmount during shutdown failed")
-        if self.panel:
-            self.panel.close()
-        self.battery.close()
 
     # -------------------------------------------------------------- internals
 
@@ -626,11 +612,10 @@ class Service:
         return None
 
     def _monitor(self) -> None:
-        """Pedal detection and panel rendering."""
+        """Pedal detection."""
         while not self._stop.is_set():
             try:
                 self._tick_pedal()
-                self._render()
             except Exception as e:      # never let the monitor die
                 log.exception("monitor tick failed")
                 self.last_error = str(e)
@@ -672,18 +657,6 @@ class Service:
             self._requeue_unsynced()
             self._emit()
 
-        # A write blocked by low battery leaves the slot staged with the pedal
-        # still mounted, so nothing else requeues it. Catch the moment a
-        # charger brings can_write() back and flush the backlog.
-        can_write = self.battery.can_write()
-        if can_write and not self._could_write:
-            self._requeue_unsynced()
-        self._could_write = can_write
-
-        if self.battery.critical() and not self.ending:
-            self.last_error = "battery critical — ending session"
-            self.end_session()
-
     def _requeue_unsynced(self) -> None:
         on_pedal = pedal.occupied_slots()
         for row in db.all_slots():
@@ -711,46 +684,6 @@ class Service:
         except OSError:
             pass
 
-    def _render(self) -> None:
-        if not self.panel:
-            return
-        if self.ending:
-            return
-        bat = self.battery.percent
-        bat_s = f"{bat}%" if bat is not None else "--"
-
-        if self.busy and self.busy_read:
-            # A read (loop staging). Unplugging mid-read is low-risk, so the
-            # panel shows activity without the "DON'T PULL" alarm a write needs.
-            self.panel.render("reading", [
-                f"{self.busy}"[:21],
-                f"{bat_s}",
-                "Reading - please wait",
-            ], self.progress)
-        elif self.busy:
-            lines = [f"{self.busy}"[:21]]
-            slots = db.all_slots()
-            done = sum(1 for s in slots if s["state"] == "synced")
-            pos = min(done + 1, len(slots)) if slots else 0
-            lines.append(f"Slot {pos} of {len(slots)}   {bat_s}")
-            lines.append("WRITING - DONT PULL")
-            self.panel.render("writing", lines, self.progress)
-        elif self.pedal_state == "mounted":
-            cap = self.capacity()
-            self.panel.render("idle", [
-                f"{local_ip()}"[:21],
-                f"{cap['used_label']} of {cap['total_label']}  {bat_s}",
-                "Ready - press to end",
-            ])
-        elif self.last_error:
-            self.panel.render("error", ["Error:", self.last_error[:21]])
-        else:
-            self.panel.render("boot", [
-                f"{local_ip()}"[:21],
-                f"Battery {bat_s}",
-                "Plug in the pedal",
-            ])
-
     # ------------------------------------------------------------ work queue
 
     def _worker(self) -> None:
@@ -774,7 +707,7 @@ class Service:
             finally:
                 self._in_flight.clear()
                 self.busy = None
-                self.busy_read = False
+                self.busy_kind = None
                 self.progress = None
                 self._emit()
 
@@ -801,7 +734,7 @@ class Service:
             if not self._work.empty():
                 self._work.put(("end",))
                 return
-            self._halt(True)
+            self._halt()
 
     def _do_convert(self, slot: int, h: str, src: Path) -> None:
         row = db.get_slot(slot)
@@ -837,10 +770,6 @@ class Service:
             return
         if not pedal.mounted():
             return          # stays staged; written when the pedal appears
-        if not self.battery.can_write():
-            db.set_state(slot, "staged", "battery too low to write")
-            self._emit()
-            return
 
         wav = media.staged_path(row["source_hash"], self.fmt)
         if not wav.exists():
@@ -868,6 +797,7 @@ class Service:
             return
 
         self.busy = f"Writing {row['display_name']}"
+        self.busy_kind = "write"
         self.progress = 0.0
         self._emit()
         try:
@@ -916,7 +846,7 @@ class Service:
                 return
             dest = config.LOOPS / f"slot-{slot:02d}-{uuid.uuid4().hex}.wav"
             self.busy = "Reading loop"
-            self.busy_read = True
+            self.busy_kind = "read"
             self.progress = None
             self._emit()
             pedal.copy_loop(slot, dest)
@@ -944,6 +874,7 @@ class Service:
             self._emit()
             return
         self.busy = "Removing loop"
+        self.busy_kind = "write"
         self._emit()
         try:
             pedal.remove_loop(slot)
@@ -963,13 +894,13 @@ class Service:
                 return
             time.sleep(0.2)
 
-    def _halt(self, graceful: bool) -> None:
-        if graceful:
-            self.busy = "Finishing writes"
-            self._emit()
-            # The end marker only reaches _halt once the queue is empty, so
-            # this is a short safety bound rather than the actual wait.
-            self._drain(timeout=5.0)
+    def _halt(self) -> None:
+        self.busy = "Finishing writes"
+        self.busy_kind = "write"
+        self._emit()
+        # The end marker only reaches _halt once the queue is empty, so this is
+        # a short safety bound rather than the actual wait.
+        self._drain(timeout=5.0)
         self.busy = "Unmounting"
         self._emit()
         try:
@@ -979,14 +910,13 @@ class Service:
             log.exception("unmount failed")
             self.last_error = str(e)
         self.busy = None
+        self.busy_kind = None
         self._emit()
 
         self._gc()
-        if self.panel:
-            self.panel.shutdown_message()
+        # The browser is the only status surface now, so give the last snapshot
+        # a moment to reach it before the network goes away with the power.
         time.sleep(1.5)
-        if self.panel:
-            self.panel.close()
         subprocess.run(["sudo", "-n", "/sbin/poweroff"], check=False)
 
     def _gc(self) -> None:

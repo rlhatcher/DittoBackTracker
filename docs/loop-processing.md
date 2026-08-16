@@ -35,9 +35,10 @@ reasoning behind the non-obvious choices, and the wrong turns they close off.
 One **read-write** session for the whole plug-in period. BT writes and loop
 reads/deletes coexist; there is no separate read-only mode, because there is no
 single-purpose session in real use. Accepted residual risk: an unclean unplug
-can only damage the operation *in flight* (already fronted by the
-"WRITING – DON'T PULL" panel state); unplugging during reads/idle is low-risk
-because every write is followed by `os.sync()`.
+can only damage the operation *in flight* (fronted by the web UI's
+"— don't unplug" status line, driven by the snapshot's `busy_kind`);
+unplugging during reads/idle is low-risk because every write is followed by
+`os.sync()`.
 
 ### Everything that touches the pedal goes through the work queue
 Loop staging and loop deletion are **jobs on the existing single worker**
@@ -106,17 +107,17 @@ frame would be visibly slow.
 
 ## Operations as jobs
 
-| Job | Trigger | Worker action | Panel/busy label |
+| Job | Trigger | Worker action | `busy` label / `busy_kind` |
 |---|---|---|---|
-| `stage_loop` | `GET /api/loops/<slot>` | copy pedal `LOOP.WAV` → temp in `loops/`, verify readable, signal the waiting request with the path | "Reading loop" (not "WRITING") |
-| `delete_loop` | `DELETE /api/loops/<slot>` | `unlink` exact `LOOP.WAV`, `os.sync()`, refresh loop cache | "Removing loop" |
+| `stage_loop` | `GET /api/loops/<slot>` | copy pedal `LOOP.WAV` → temp in `loops/`, verify readable, signal the waiting request with the path | "Reading loop" / `read` |
+| `delete_loop` | `DELETE /api/loops/<slot>` | `unlink` exact `LOOP.WAV`, `os.sync()`, refresh loop cache | "Removing loop" / `write` |
 
 The web↔worker bridge for `stage_loop` is a **blocking** one: the handler
 enqueues a job carrying a completion `Event` + result/error slots, waits on it
 (bounded timeout), then streams the staged file and purges it in a `finally`.
-Blocking one of the waitress threads is free on a single-user box. A distinct
-busy label is needed so the OLED does not say "WRITING – DON'T PULL" during a
-read.
+Blocking one of the waitress threads is free on a single-user box. `busy_kind`
+distinguishes the two so the UI does not warn "don't unplug" during a read —
+unplugging mid-read costs only the download.
 
 ## API
 
@@ -148,7 +149,7 @@ because the download is synchronous.
 ## Failure modes & accepted risks
 
 - **Unplug mid-write/mid-delete:** can corrupt only that operation's file;
-  fronted by the panel warning. Reads/idle unplug is low-risk. Accepted.
+  fronted by the UI warning. Reads/idle unplug is low-risk. Accepted.
 - **Failed/partial browser download:** costs nothing — the pedal keeps the loop,
   the staged copy is purged, the user retries. Deletion is unrelated.
 - **Loop vanishes between `has_loop` and staging** (e.g. deleted on the pedal):

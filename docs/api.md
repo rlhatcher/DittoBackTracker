@@ -14,6 +14,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 {
   "pedal": "mounted",
   "busy": null,
+  "busy_kind": null,
   "progress": null,
   "ending": false,
   "error": null,
@@ -33,13 +34,6 @@ Full snapshot. The same object is pushed over `/api/events`.
     "used_label": "0:03",
     "total_label": "63:00"
   },
-  "battery": {
-    "available": false,
-    "percent": null,
-    "charging": null,
-    "can_write": true
-  },
-  "panel": { "led": false, "button": false, "oled": false },
   "slot_count": 99,
   "loops": [ 5, 12 ],
   "slots": [
@@ -61,11 +55,9 @@ Full snapshot. The same object is pushed over `/api/events`.
 |---|---|
 | `pedal` | `absent`, `mounted`, `error` |
 | `busy` | Description of current work, or `null` when idle |
+| `busy_kind` | `write` while the pedal is being written to, `read` while it is being read, else `null`. `write` is the device's only "don't unplug" signal |
 | `progress` | 0.0–1.0 during conversion, else `null` |
 | `format_source` | Which pedal file the target format was read from |
-| `battery.available` | `false` when no gauge is fitted; the other battery fields are then `null` |
-| `battery.can_write` | `false` blocks writes. True when charging or when no gauge is present |
-| `panel` | Empty object when running `--headless` |
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
 | `version` | Package version string |
@@ -220,8 +212,9 @@ Put a deleted entry back in its original slot, reconverting if needed. Returns
 
 ## POST /api/session/end
 
-Finish queued writes, flush, unmount the pedal, then power off. Same as the
-physical button. Returns immediately; watch `/api/events` for progress.
+Finish queued writes, flush, unmount the pedal, then power off. The only way
+to shut the device down. Returns immediately; watch `/api/events` for
+progress.
 
 ---
 

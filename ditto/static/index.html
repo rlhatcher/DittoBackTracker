@@ -102,6 +102,10 @@ button.act:disabled{opacity:.4;cursor:default}
 .msg{font-size:13px;color:var(--tx2);flex:1;min-width:0;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .err{color:var(--err)}
+/* Mid-write and shutdown warnings. With no panel LED or display, this line is
+   the only thing telling the user not to pull the plug, so it carries weight
+   the plain status text doesn't. */
+.msg.warn{color:var(--warn);font-weight:600}
 .hide{display:none}
 /* Kept in the accessibility tree and focusable — display:none would take the
    file input out of the tab order and off screen readers. */
@@ -133,7 +137,6 @@ h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
     <h1>DittoBackTracker</h1>
     <div class="meta">
       <span id="pedal"><span class="dot" style="background:var(--tx2)"></span>—</span>
-      <span id="batt">—</span>
     </div>
   </header>
 
@@ -195,9 +198,6 @@ function render(s){
   const map = {mounted:["var(--ok)","connected"],absent:["var(--tx2)","no pedal"],error:["var(--err)","error"]};
   const [c,t] = map[s.pedal] || map.absent;
   pd.innerHTML = `<span class="dot" style="background:${c}"></span>${t}`;
-
-  $("#batt").textContent = s.battery.available && s.battery.percent!=null
-    ? (s.battery.charging ? "⚡ " : "") + s.battery.percent + "%" : "";
 
   if (s.version){
     $("#ver").textContent = "v" + s.version + (s.revision ? " · " + s.revision : "");
@@ -375,10 +375,13 @@ function render(s){
   $("#progwrap").classList.toggle("hide", !busy || s.progress==null);
   if (s.progress!=null) $("#progfill").style.width = (s.progress*100)+"%";
   const m = $("#msg");
-  if (s.ending)            { m.textContent = "Finishing up — wait for the light"; m.className="msg"; }
+  // This page is the only status surface — there is no panel light or display —
+  // so the mid-write warning has to be unmissable here or nowhere.
+  if (s.ending)            { m.textContent = "Shutting down — leave everything plugged in until this page disconnects"; m.className="msg warn"; }
+  else if (s.busy && s.busy_kind === "write")
+                           { m.textContent = s.busy + " — don't unplug"; m.className="msg warn"; }
   else if (s.busy)         { m.textContent = s.busy; m.className="msg"; }
   else if (s.error)        { m.textContent = s.error; m.className="msg err"; }
-  else if (!s.battery.can_write) { m.textContent = "Battery too low to write"; m.className="msg err"; }
   else if (s.pedal==="mounted") { m.textContent = "Ready"; m.className="msg"; }
   else                     { m.textContent = "Plug in the pedal"; m.className="msg"; }
 

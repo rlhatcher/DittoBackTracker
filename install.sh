@@ -24,17 +24,16 @@ fi
 
 # Over-the-air updates pull the git checkout at $SRC, so installing from anywhere
 # else would leave a device whose Update button always fails "no git checkout at
-# /var/lib/ditto/src". Require the documented location (provisioning.md step 7).
+# /var/lib/ditto/src". Require the documented location (provisioning.md step 6).
 if [ "$HERE" != "$SRC" ]; then
   echo "error: run install.sh from the checkout at $SRC (not $HERE), so" >&2
-  echo "over-the-air updates work. See docs/provisioning.md step 7:" >&2
+  echo "over-the-air updates work. See docs/provisioning.md step 6:" >&2
   echo "  git clone <url> $SRC && cd $SRC && ./install.sh" >&2
   exit 1
 fi
 echo "==> packages"
 sudo apt-get update -qq
-sudo apt-get install -y git ffmpeg python3-flask python3-waitress \
-                        python3-smbus python3-gpiozero i2c-tools avahi-daemon
+sudo apt-get install -y git ffmpeg python3-flask python3-waitress avahi-daemon
 
 # Validate the checkout OTA will pull from. This runs after the package step so a
 # device that doesn't have git yet still gets a clear result rather than a bare

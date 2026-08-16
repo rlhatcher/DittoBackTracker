@@ -4,8 +4,9 @@ Setting up a Raspberry Pi Zero 2 W to run DittoBackTracker. About an hour, most
 of it waiting on `apt`.
 
 Two things here are unusual: a **separate data partition** and a **read-only
-root filesystem**. The device loses power when you flip a slide switch, so
-nothing may be written to the OS card during normal operation.
+root filesystem**. The device has no battery, so it can lose power the moment
+the plug comes out — nothing may be written to the OS card during normal
+operation.
 
 End state: a Zero 2 W on WiFi at `dittobacktracker.local`, read-only root, and
 the pedal mountable by an unprivileged service.
@@ -148,51 +149,20 @@ only writable storage once the overlay is on.
 sudo apt update && sudo apt full-upgrade -y
 sudo apt install -y \
   git ffmpeg \
-  python3-flask python3-waitress python3-smbus python3-gpiozero \
-  i2c-tools avahi-daemon \
+  python3-flask python3-waitress \
+  avahi-daemon \
   overlayroot
 ```
 
 Everything from apt, nothing from pip. A read-only root and a virtualenv are an
 awkward combination.
 
----
-
-## 4. I2C and GPIO access
-
-Skip this if you aren't fitting the UPS HAT, button, LED or display.
-
-```bash
-sudo raspi-config nonint do_i2c 0
-sudo usermod -aG i2c,gpio ditto
-sudo reboot
-```
-
-The group membership matters. The service runs as `ditto`, and without it every
-hardware probe fails with a permission error that the code treats the same as
-"not fitted" — so a missing group looks exactly like missing hardware.
-
-With the HAT fitted:
-
-```bash
-sudo i2cdetect -y 1     # expect 0x43, and 0x3c if a display is fitted
-```
-
-Note that `sudo i2cdetect` proves the bus works, not that the service can reach
-it. Check as the service user too:
-
-```bash
-i2cdetect -y 1          # no sudo
-```
-
-An empty grid under `sudo` usually means the pogo pins aren't contacting the GPIO
-pads — they can power the Pi while missing the signal pins, so the board still
-appears to work. The fix is in [hardware.md](hardware.md#assembly): screw the
-boards together rather than relying on pin pressure.
+There is nothing on the GPIO header, so no I2C, no `i2c-tools` and no group
+membership to arrange.
 
 ---
 
-## 5. USB host mode
+## 4. USB host mode
 
 The Zero's data port defaults to host mode. Set it explicitly in
 `/boot/firmware/config.txt`:
@@ -212,7 +182,7 @@ Udev creates the `by-label` symlink. No custom rule needed.
 
 ---
 
-## 6. Mounting
+## 5. Mounting
 
 An fstab entry with `noauto,user` lets the service mount the pedal without
 root:
@@ -245,10 +215,10 @@ you're done with it.
 
 ---
 
-## 7. Install
+## 6. Install
 
 Clone onto the data partition. Your home directory is on the root filesystem,
-which becomes read-only in step 9, so a checkout there can't be updated
+which becomes read-only in step 8, so a checkout there can't be updated
 afterwards.
 
 ```bash
@@ -259,15 +229,15 @@ cd /var/lib/ditto/src
 
 Open `http://dittobacktracker.local/`, plug in the pedal, drop a track in.
 
-Do this before enabling the overlay in step 9. `install.sh` writes to `/etc`,
+Do this before enabling the overlay in step 8. `install.sh` writes to `/etc`,
 and those changes are discarded once the root filesystem is read-only.
 
 The installer is idempotent, and repeats the package install and fstab entry
-from steps 3 and 6. It does not install `overlayroot`, so don't skip step 3.
+from steps 3 and 5. It does not install `overlayroot`, so don't skip step 3.
 
 ---
 
-## 8. Boot time
+## 7. Boot time
 
 Stock boot is 20–40 s, and the device boots every time you use it. Around 10 s
 is achievable.
@@ -295,11 +265,11 @@ boot_delay=0
 
 Measure with `systemd-analyze` and `systemd-analyze blame | head -15`.
 
-Do this before step 9. Each attempt needs a writable root.
+Do this before step 8. Each attempt needs a writable root.
 
 ---
 
-## 9. Read-only root filesystem
+## 8. Read-only root filesystem
 
 Last, once everything above works.
 
@@ -379,43 +349,20 @@ sudo reboot
 
 ---
 
-## 10. Optional: measure throughput and current
+## 9. Optional: measure write throughput
 
-Neither is needed. They're useful if you want numbers for your own hardware.
+Not needed. Useful if you want a number for your own card and cable.
 
-Write throughput, with the pedal mounted. The trailing `sync` is required or
-you measure the page cache:
+With the pedal mounted. The trailing `sync` is required or you measure the page
+cache:
 
 ```bash
 time { dd if=/dev/zero of=/media/ditto/speed.bin bs=1M count=50; sync; }
 rm /media/ditto/speed.bin
 ```
 
-Battery current. Negative means the cell is discharging:
-
-```bash
-python3 - <<'EOF'
-import smbus, time
-BUS, ADDR, SHUNT_OHMS = 1, 0x43, 0.1
-b = smbus.SMBus(BUS)
-
-def read(reg):
-    d = b.read_i2c_block_data(ADDR, reg, 2)
-    v = (d[0] << 8) | d[1]
-    return v - 65536 if v > 32767 else v
-
-print(" bus V   shunt mV   current mA")
-for _ in range(20):
-    bus_v    = (read(0x02) >> 3) * 0.004      # 4 mV per LSB
-    shunt_mv = read(0x01) * 0.01              # 10 uV per LSB
-    print(f"{bus_v:6.3f}   {shunt_mv:8.2f}   {shunt_mv/SHUNT_OHMS:10.1f}")
-    time.sleep(0.5)
-EOF
-```
-
-The 0.1 Ω shunt value comes from Waveshare's FAQ for this board. A full cell
-reads about 4.2 V and an empty one about 3.1 V, which is all the charge
-estimate has to work from.
+Expect roughly 1 MB/s. That figure is what sizes the loop-staging timeout in
+`config.LOOP_STAGE_TIMEOUT`.
 
 ---
 

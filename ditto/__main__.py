@@ -14,15 +14,13 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="ditto")
     p.add_argument("--port", type=int, default=config.PORT)
     p.add_argument("--host", default="0.0.0.0")
-    p.add_argument("--headless", action="store_true",
-                   help="no GPIO/OLED — for development on a laptop")
     p.add_argument("--debug", action="store_true")
     args = p.parse_args(argv)
 
-    service = Service(headless=args.headless)
+    service = Service()
 
-    # systemd stops us with SIGTERM. Without this the pedal stays mounted and
-    # the GPIO/I2C handles leak, so the next start finds a dirty filesystem.
+    # systemd stops us with SIGTERM. Without this the pedal stays mounted, so
+    # the next start finds a dirty filesystem.
     done = threading.Event()
 
     def on_term(_signum, _frame):
