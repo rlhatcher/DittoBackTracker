@@ -5,11 +5,26 @@ this flag is one the user gets no warning about — so every write has to set it
 including the quick ones.
 """
 
+import sys
+import threading
 import time
 
 import pytest
 
 from ditto import config, core, pedal
+
+
+class SlowRead:
+    """A bool whose truthiness yields the GIL, widening the check-then-set
+    window from a couple of bytecodes to something a scheduler will actually
+    split. Without this the race is real but effectively untestable."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __bool__(self):
+        time.sleep(0)
+        return self.value
 
 
 @pytest.fixture
@@ -128,3 +143,89 @@ def test_refusal_is_a_503_not_a_400(service):
     client = web.create_app(service).test_client()
     service.ending = True
     assert client.delete("/api/slots/1").status_code == 503
+
+
+def test_end_session_queues_exactly_one_marker(service, monkeypatch):
+    """Two markers requeue past each other forever and the device never powers
+    off, so the check-set-enqueue has to be atomic.
+
+    The unguarded window is a couple of bytecodes, which the default 5 ms GIL
+    switch interval will almost never split — at stock settings this test
+    passes with or without the lock, which makes it worthless. Dropping the
+    interval forces the interpreter to interleave, so an unguarded
+    check-then-set reliably produces more than one marker.
+    """
+    monkeypatch.setattr(service, "_emit", lambda: None)
+    markers = []
+    real_put = service._work.put
+    monkeypatch.setattr(service._work, "put",
+                        lambda item, *a, **k: (markers.append(item[0]),
+                                               real_put(item, *a, **k))[1])
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        # Several rounds: even with a widened window a single round misses the
+        # interleaving perhaps a third of the time, which would make this a
+        # flaky guard rather than a real one.
+        for _ in range(5):
+            markers.clear()
+            service.ending = SlowRead(False)
+            start = threading.Barrier(16)
+
+            def go():
+                start.wait(timeout=5)
+                service.end_session()
+
+            threads = [threading.Thread(target=go) for _ in range(16)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(timeout=10)
+
+            assert markers.count("end") == 1, \
+                f"{markers.count('end')} end markers — they would requeue forever"
+    finally:
+        sys.setswitchinterval(old_interval)
+        service.ending = True
+
+
+def test_duplicate_end_markers_still_halt(service, monkeypatch):
+    """Belt as well as braces: if a marker ever gets in twice, the device must
+    still power off rather than spin."""
+    monkeypatch.setattr(core.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(pedal, "unmount", lambda: None)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    halted = []
+    monkeypatch.setattr(core.Service, "_halt", lambda self: halted.append(1))
+
+    service.ending = True
+    service._work.put(("end",))
+    service._work.put(("end",))
+
+    deadline = time.monotonic() + 10
+    while not halted and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert halted, "livelocked on duplicate end markers"
+
+
+def test_work_queued_behind_the_marker_still_runs(service, fake_pedal, monkeypatch):
+    """Collapsing duplicates must not drop real work: a convert queues its
+    write after the marker, and that write has to survive the reshuffle."""
+    monkeypatch.setattr(core.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(pedal, "unmount", lambda: None)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    ran = []
+    monkeypatch.setattr(core.Service, "_do_erase",
+                        lambda self, slot: ran.append(slot))
+    monkeypatch.setattr(core.Service, "_halt", lambda self: ran.append("halt"))
+
+    service._updating.set()                 # hold the worker while we load up
+    service._work.put(("end",))
+    service._work.put(("erase", 5))
+    service._work.put(("erase", 6))
+    service._updating.clear()
+
+    deadline = time.monotonic() + 10
+    while "halt" not in ran and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ran == [5, 6, "halt"], f"work was lost or reordered: {ran}"

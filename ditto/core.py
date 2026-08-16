@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import queue
@@ -131,6 +132,13 @@ class Service:
         self._update_available = False
         self._remote_revision: Optional[str] = None
 
+        # Serializes "is this device still accepting work?" with the enqueue
+        # that follows it, and with end_session's own set-and-enqueue. Reentrant
+        # because grouped operations (a forced library delete clearing several
+        # slots) admit once and then call through to per-slot operations that
+        # admit again.
+        self._admit = threading.RLock()
+
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
         self._in_flight = threading.Event()
@@ -226,16 +234,30 @@ class Service:
             raise ValueError(f"slot must be 1-{config.SLOTS}")
 
     def _check_accepting(self) -> None:
-        """Refuse pedal work once the session is ending.
+        """Cheap early refusal, so a doomed upload isn't probed and hashed first.
 
-        Without this the window is small but the outcome is bad: the end marker
-        only halts on an empty queue, so anything queued after that check is
-        abandoned at poweroff — and the caller has already been told the upload
-        succeeded. Better to refuse it and let the user retry on the next
-        session than to accept a track that quietly never lands.
+        Advisory only — `_admitting` is what actually decides.
         """
         if self.ending:
             raise ShuttingDown("the device is shutting down")
+
+    @contextlib.contextmanager
+    def _admitting(self):
+        """Decide and enqueue as one step.
+
+        Testing `ending` and then queueing work is not enough on its own: an
+        upload spends seconds probing and hashing between the two, and
+        end_session can land in that gap — so the work goes in behind an end
+        marker that has already passed, and poweroff discards it after the API
+        said 201.
+
+        Callers do their slow part outside this block and hold it only for the
+        database change and the enqueue.
+        """
+        with self._admit:
+            if self.ending:
+                raise ShuttingDown("the device is shutting down")
+            yield
 
     def upload(self, slot: int, tmp_path: Path, display_name: str) -> Dict:
         self._check_accepting()
@@ -255,20 +277,19 @@ class Service:
         else:
             tmp_path.unlink(missing_ok=True)
 
-        existing = db.get_slot(slot)
-        if existing:
-            db.delete_slot(slot, to_trash=True)
-
-        db.put_slot(slot, h, display_name, info.duration, state="converting")
-        self._work.put(("convert", slot, h, stored))
+        with self._admitting():
+            if db.get_slot(slot):
+                db.delete_slot(slot, to_trash=True)
+            db.put_slot(slot, h, display_name, info.duration, state="converting")
+            self._work.put(("convert", slot, h, stored))
         self._emit()
         return db.get_slot(slot)
 
     def clear(self, slot: int) -> Optional[int]:
-        self._check_accepting()
         self._check_slot(slot)
-        trash_id = db.delete_slot(slot, to_trash=True)
-        self._work.put(("erase", slot))
+        with self._admitting():
+            trash_id = db.delete_slot(slot, to_trash=True)
+            self._work.put(("erase", slot))
         self._emit()
         return trash_id
 
@@ -286,20 +307,24 @@ class Service:
         staged file, so nothing is orphaned. The job carries the current mount
         generation so a stale job (queued before an unplug/replug) is skipped.
         """
-        self._check_accepting()
         self._check_slot(slot)
         stage = LoopStage()
-        self._work.put(("stage_loop", slot, self._mount_gen, stage))
+        with self._admitting():
+            self._work.put(("stage_loop", slot, self._mount_gen, stage))
         self._emit()
         return stage
 
     def delete_loop(self, slot: int) -> bool:
         """Enqueue removal of the slot's loop. False (→404) if none is known."""
+        # Ahead of the no-op return, so the answer doesn't depend on whether
+        # the slot happened to hold a loop: during shutdown this is refused
+        # either way.
         self._check_accepting()
         self._check_slot(slot)
         if slot not in self._loops:
             return False
-        self._work.put(("delete_loop", slot, self._mount_gen))
+        with self._admitting():
+            self._work.put(("delete_loop", slot, self._mount_gen))
         self._emit()
         return True
 
@@ -309,25 +334,25 @@ class Service:
         Swapping rather than overwriting means reordering a setlist never
         destroys anything, so no trash entry and no undo needed.
         """
-        self._check_accepting()
         self._check_slot(src)
         self._check_slot(dst)
         # The move-or-swap decision is made atomically in db, so we queue pedal
         # work from what actually happened rather than a pre-read that a
         # concurrent upload could have invalidated.
-        op = db.move_or_swap(src, dst)
-        if op == "swap":
-            self._work.put(("write", src))
-            self._work.put(("write", dst))
-        elif op == "move":
-            self._work.put(("erase", src))
-            self._work.put(("write", dst))
-        else:
-            return
+        with self._admitting():
+            op = db.move_or_swap(src, dst)
+            if op == "swap":
+                self._work.put(("write", src))
+                self._work.put(("write", dst))
+            elif op == "move":
+                self._work.put(("erase", src))
+                self._work.put(("write", dst))
+            else:
+                return
         self._emit()
 
     def retry(self, slot: int) -> None:
-        self._check_accepting()
+        self._check_accepting()     # ahead of the empty-slot return, as above
         self._check_slot(slot)
         row = db.get_slot(slot)
         if not row:
@@ -337,35 +362,45 @@ class Service:
             db.set_state(slot, "error", "source file missing")
             self._emit()
             return
-        db.set_state(slot, "converting")
-        self._work.put(("convert", slot, row["source_hash"], src))
+        with self._admitting():
+            db.set_state(slot, "converting")
+            self._work.put(("convert", slot, row["source_hash"], src))
         self._emit()
 
     def restore(self, trash_id: int) -> Optional[int]:
-        self._check_accepting()
-        item = db.trash_pop(trash_id)
-        if not item:
-            return None
-        slot = item["slot"]
-        if db.get_slot(slot):
-            db.delete_slot(slot, to_trash=True)
-        db.put_slot(slot, item["source_hash"], item["display_name"],
-                    item["duration"], state="converting")
-        src = self._source_for(item["source_hash"])
-        if src:
-            self._work.put(("convert", slot, item["source_hash"], src))
-        else:
-            db.set_state(slot, "error", "source file missing")
+        with self._admitting():
+            item = db.trash_pop(trash_id)
+            if not item:
+                return None
+            slot = item["slot"]
+            if db.get_slot(slot):
+                db.delete_slot(slot, to_trash=True)
+            db.put_slot(slot, item["source_hash"], item["display_name"],
+                        item["duration"], state="converting")
+            src = self._source_for(item["source_hash"])
+            if src:
+                self._work.put(("convert", slot, item["source_hash"], src))
+            else:
+                db.set_state(slot, "error", "source file missing")
         self._emit()
         return slot
 
     def end_session(self) -> None:
-        """Flush, unmount, halt. The only way to power the device off."""
-        if self.ending:
-            return
-        self.ending = True
+        """Flush, unmount, halt. The only way to power the device off.
+
+        The check, the flag and the marker go under one lock. Two of these
+        racing would each queue a marker, and _run_job requeues a marker
+        whenever the queue is non-empty — so the pair would step over each
+        other indefinitely and the device would never power off. Emitting
+        happens after the lock; it reads the database and has no business
+        holding up a shutdown.
+        """
+        with self._admit:
+            if self.ending:
+                return
+            self.ending = True
+            self._work.put(("end",))
         self._emit()
-        self._work.put(("end",))
 
     # -------------------------------------------------------------- self-update
 
@@ -753,8 +788,22 @@ class Service:
             # A convert queues its write *after* the end marker, so the marker
             # can surface with real work still behind it. This worker is the
             # only thing draining the queue, so halting here would leave those
-            # writes unwritten — requeue and keep going instead.
-            if not self._work.empty():
+            # writes unwritten — go behind the remaining work instead.
+            #
+            # Collapse duplicate markers on the way past. end_session admits
+            # under a lock so it can only ever queue one, but two would requeue
+            # past each other forever and the device would never power off —
+            # too sharp an edge to leave depending on a lock held elsewhere.
+            pending = []
+            while True:
+                try:
+                    pending.append(self._work.get_nowait())
+                except queue.Empty:
+                    break
+            work = [j for j in pending if j[0] != "end"]
+            for j in work:
+                self._work.put(j)
+            if work:
                 self._work.put(("end",))
                 return
             self._halt()
