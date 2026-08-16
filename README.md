@@ -14,7 +14,7 @@ format and writes them to the right slots.
   Phone / laptop                    ┌──────────────────────┐
   ┌──────────────┐    your WiFi     │  DittoBackTracker    │
   │  drag & drop │ ───────────────▶ │   Pi Zero 2 W        │      mini-USB
-  │   web page   │                  │   1S LiPo + boost    │ ───────────────▶ Ditto+
+  │   web page   │                  │   USB power          │ ───────────────▶ Ditto+
   └──────────────┘                  └──────────────────────┘
 ```
 

@@ -815,6 +815,12 @@ class Service:
             return
         if db.get_slot(slot):
             return          # slot was refilled before we got here
+        # An unlink plus an os.sync is a write to the pedal like any other, and
+        # the browser is now the only place a "don't unplug" warning can appear
+        # — so this has to raise the flag even though it finishes quickly.
+        self.busy = f"Clearing slot {slot:02d}"
+        self.busy_kind = "write"
+        self._emit()
         try:
             pedal.remove_track(slot)
             os.sync()
