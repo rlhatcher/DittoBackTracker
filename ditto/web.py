@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from flask import (Flask, Response, jsonify, request,
+from flask import (Flask, Response, abort, jsonify, request, send_file,
                    send_from_directory, stream_with_context)
 
 from . import config, db, pedal
@@ -19,6 +19,29 @@ from .core import Service, ShuttingDown
 
 STATIC = Path(__file__).parent / "static"
 LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
+
+# media.file_hash is sha256().hexdigest()[:20] — exactly 20 lowercase hex chars.
+# This has to be a whitelist match rather than a resolve()-and-contain check,
+# because _source_for *globs* sources/{h}.*: a `*`, `?` or `[` in the hash would
+# make the glob match some other library file entirely, which no amount of path
+# containment checking would catch.
+HASH_RE = re.compile(r"\A[0-9a-f]{20}\Z")
+
+# Content types for auditioning an original upload. Keep in step with
+# config.AUDIO_SUFFIXES — the assertion below fails the import, not a request,
+# if the two ever drift.
+AUDIO_MIME = {
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+    ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
+    ".aif": "audio/aiff", ".aiff": "audio/aiff", ".wma": "audio/x-ms-wma",
+    # Opus here is always in an Ogg container. "audio/opus" names the codec,
+    # not a container, and browsers sniff audio/ogg more reliably.
+    ".opus": "audio/ogg",
+}
+assert set(AUDIO_MIME) == config.AUDIO_SUFFIXES, \
+    "AUDIO_MIME and config.AUDIO_SUFFIXES have drifted apart"
+
+MAX_NAME_LEN = 200
 
 # Each open stream holds a server thread for its whole life, and there are only
 # a handful. Retiring a stream periodically lets EventSource reconnect (it does
@@ -282,6 +305,121 @@ def create_app(service: Service) -> Flask:
         if not ok:
             return jsonify(error="no loop in that slot"), 404
         return jsonify(ok=True)
+
+    # ------------------------------------------------------------- library
+
+    @app.get("/api/library")
+    def library():
+        """Every track on the device, newest first. Searching and sorting happen
+        in the browser: a few hundred rows is a small response, and the snapshot
+        that rides the SSE stream must not grow to carry this."""
+        return jsonify(db.library_all())
+
+    @app.post("/api/library")
+    def library_add():
+        """Ingest files without assigning slots. The pedal holds about twelve
+        tracks; the library holds as many as the card does."""
+        files = request.files.getlist("file")
+        if not files:
+            return jsonify(error="no files"), 400
+        added, errors = [], []
+        for f in files:
+            name = f.filename or "track"
+            suffix = Path(name).suffix.lower()
+            if suffix not in config.AUDIO_SUFFIXES:
+                errors.append({"name": name, "error": "not an audio file"})
+                continue
+            fd, tmp = tempfile.mkstemp(dir=str(config.DATA), suffix=suffix)
+            os.close(fd)
+            tmp_path = Path(tmp)
+            try:
+                f.save(str(tmp_path))
+                # On success the service owns tmp_path — it is moved into
+                # sources/ or unlinked there, so we must not touch it again.
+                added.append(service.add_to_library(tmp_path, Path(name).stem))
+            except ValueError as e:
+                tmp_path.unlink(missing_ok=True)
+                errors.append({"name": name, "error": str(e)})
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        return jsonify(added=added, errors=errors), 201
+
+    @app.patch("/api/library/<h>")
+    def library_rename(h: str):
+        if not HASH_RE.match(h):
+            return jsonify(error="not found"), 404
+        body = request.get_json(silent=True) or {}
+        name = (body.get("name") or "").strip()
+        if not name:
+            return jsonify(error="name must not be empty"), 400
+        if len(name) > MAX_NAME_LEN:
+            return jsonify(error=f"name must be {MAX_NAME_LEN} characters or "
+                                 f"fewer"), 400
+        row = service.rename(h, name)
+        if row is None:
+            return jsonify(error="not found"), 404
+        return jsonify(row)
+
+    @app.delete("/api/library/<h>")
+    def library_forget(h: str):
+        """Delete a track and, with it, the only copy of its audio.
+
+        Refuses while a slot still holds it, naming the slots, unless the caller
+        confirms with ?force — in which case those slots are cleared first.
+        """
+        if not HASH_RE.match(h):
+            return jsonify(error="not found"), 404
+        force = request.args.get("force") is not None
+        done, slots = service.forget(h, force=force)
+        if not done and slots:
+            return jsonify(error="in use", slots=slots), 409
+        if not done:
+            return jsonify(error="not found"), 404
+        return jsonify(ok=True, cleared=slots)
+
+    @app.get("/api/library/<h>/audio")
+    def library_audio(h: str):
+        """Stream an original upload so the browser can audition it.
+
+        Range-capable, so an <audio> element can seek; send_file with
+        conditional=True is what implements Range/If-Range/206/416, and unlike
+        the loop endpoint there is nothing transient to purge afterwards, so
+        there is no reason to hand-roll the streaming.
+
+        Nothing on this device plays audio. This is bytes to the browser.
+        """
+        if not HASH_RE.match(h) or not db.hash_in_library(h):
+            abort(404)
+        path = service._source_for(h)
+        # The library row is the gate: bytes can outlive a delete by up to one
+        # collector pass, and shouldn't stay reachable in the meantime.
+        if path is None or path.parent != config.SOURCES:
+            abort(404)
+        resp = send_file(path, conditional=True, as_attachment=False,
+                         mimetype=AUDIO_MIME.get(path.suffix.lower(),
+                                                 "application/octet-stream"))
+        # sources/ is content-addressed, so the bytes behind this URL can never
+        # change. Caching them makes seeking free after the first pass.
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+    @app.post("/api/slots/<int:slot>/assign")
+    def assign(slot: int):
+        """Put a library track into a slot without uploading it again."""
+        body = request.get_json(silent=True) or {}
+        h = body.get("hash") or ""
+        if not HASH_RE.match(h):
+            return jsonify(error="not found"), 404
+        try:
+            row = service.assign(slot, h)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if row is None:
+            return jsonify(error="not found"), 404
+        return jsonify(row), 201
+
+    # ---------------------------------------------------------------- slots
 
     @app.post("/api/slots/<int:slot>/move")
     def move(slot: int):

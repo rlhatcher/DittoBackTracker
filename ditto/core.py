@@ -304,18 +304,74 @@ class Service:
         # _source_for globs for "{hash}.*", so an extensionless upload would be
         # stored under a name it can never find again.
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
+        # The row before the bytes. The two orderings fail differently and only
+        # one of them fails safely: a row with no file surfaces as "source file
+        # missing" on convert, which is visible and fixable, whereas a file with
+        # no row is invisible and the collector eventually takes it.
+        db.library_add(h, display_name, info.duration)
         if not stored.exists():
             self._store_source(tmp_path, stored)
         else:
             tmp_path.unlink(missing_ok=True)
 
         with self._admitting():
-            if db.get_slot(slot):
-                db.delete_slot(slot, to_trash=True)
-            db.put_slot(slot, h, display_name, info.duration, state="converting")
-            self._work.put(("convert", slot, h, stored))
+            self._assign(slot, h)
         self._emit()
         return db.get_slot(slot)
+
+    def add_to_library(self, tmp_path: Path, display_name: str) -> Dict:
+        """Ingest a file without giving it a slot.
+
+        The pedal holds about twelve tracks and the library holds as many as the
+        card does, so getting audio onto the device and choosing what the pedal
+        carries are separate acts.
+        """
+        info = media.probe(tmp_path)
+        if info is None or info.duration <= 0:
+            tmp_path.unlink(missing_ok=True)
+            raise ValueError("not a readable audio file")
+
+        h = media.file_hash(tmp_path)
+        stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
+        db.library_add(h, display_name, info.duration)
+        if not stored.exists():
+            self._store_source(tmp_path, stored)
+        else:
+            tmp_path.unlink(missing_ok=True)
+        self.library_changed()
+        return db.library_get(h)
+
+    def assign(self, slot: int, source_hash: str) -> Optional[Dict]:
+        """Put a track already in the library into a slot.
+
+        The point of the library: rearranging what the pedal carries costs a
+        transcode at most, and usually not even that — the staged WAV may still
+        be cached — instead of another upload over WiFi.
+        """
+        self._check_slot(slot)
+        if not db.hash_in_library(source_hash):
+            return None
+        self._assign(slot, source_hash)
+        self._emit()
+        return db.get_slot(slot)
+
+    def _assign(self, slot: int, source_hash: str) -> None:
+        """Point a slot at a library track and queue the work to realise it.
+
+        Admits here rather than in each caller: this is the single place all
+        three routes into a slot — upload, restore and assign — change the
+        database and queue work. The lock is reentrant, so a caller that has
+        already admitted (to keep a larger step atomic) nests harmlessly.
+        """
+        with self._admitting():
+            if db.get_slot(slot):
+                db.delete_slot(slot, to_trash=True)
+            db.put_slot(slot, source_hash, state="converting")
+            src = self._source_for(source_hash)
+            if src is None:
+                db.set_state(slot, "error", "source file missing")
+                return
+            self._work.put(("convert", slot, source_hash, src))
 
     def clear(self, slot: int) -> Optional[int]:
         self._check_slot(slot)
@@ -404,18 +460,54 @@ class Service:
             item = db.trash_pop(trash_id)
             if not item:
                 return None
-            slot = item["slot"]
-            if db.get_slot(slot):
-                db.delete_slot(slot, to_trash=True)
-            db.put_slot(slot, item["source_hash"], item["display_name"],
-                        item["duration"], state="converting")
-            src = self._source_for(item["source_hash"])
-            if src:
-                self._work.put(("convert", slot, item["source_hash"], src))
-            else:
-                db.set_state(slot, "error", "source file missing")
+            # The track can have been deleted from the library since the slot
+            # was cleared, in which case there is nothing left to put back.
+            if not db.hash_in_library(item["source_hash"]):
+                return None
+            self._assign(item["slot"], item["source_hash"])
         self._emit()
-        return slot
+        return item["slot"]
+
+    # -------------------------------------------------------------- library
+
+    def rename(self, source_hash: str, name: str) -> Optional[Dict]:
+        """Rename a track. One row changes; the slot list, the grid tooltips and
+        the printed set list all read through to it."""
+        if not db.library_rename(source_hash, name):
+            return None
+        self.library_changed()
+        return db.library_get(source_hash)
+
+    def forget(self, source_hash: str, force: bool = False) -> "tuple[bool, List[int]]":
+        """Delete a track from the library, and with it the only copy of its
+        audio. Returns (done, slots_that_hold_it).
+
+        The one operation that can pull a file out from under a slot, so it
+        refuses while any slot references the track unless the caller has
+        confirmed. The audio itself goes on the next collector pass, once the
+        row that was keeping it alive is gone.
+        """
+        with self._admitting():
+            slots = db.slots_for_hash(source_hash)
+            if slots and not force:
+                return (False, slots)
+            # One admission covering the whole group, so a shutdown can't land
+            # between clearing some slots and deleting the row.
+            for n in slots:
+                self.clear(n)
+            if not db.library_delete(source_hash):
+                return (False, [])
+        self.library_changed()
+        return (True, slots)
+
+    def library_changed(self) -> None:
+        """Single funnel for library mutations.
+
+        A rename reaches the slot list on its own — display_name is joined from
+        library, so the next snapshot already carries it. This is what tells
+        clients the *library list* itself moved.
+        """
+        self._emit()
 
     def end_session(self) -> None:
         """Flush, unmount, halt. The only way to power the device off.
@@ -1107,6 +1199,16 @@ class Service:
     def _gc(self) -> None:
         """Prune expired trash and any file nothing references.
 
+        sources/ and staged/ are collected under deliberately different rules,
+        because they are different kinds of thing. A source *is* the library: it
+        survives until the user deletes the track. A staged WAV is a cache,
+        worth keeping only for a slot that is about to be written in the format
+        the pedal currently wants — losing one costs a re-transcode, which
+        _do_write requeues by itself. Keeping one per library track instead
+        would be ruinous here: mono 24-bit at 44.1 kHz is 132 kB/s, so a
+        four-minute track stages to ~32 MB, and a hundred of them would be ~3 GB
+        of cache standing behind a few hundred MB of actual music.
+
         Runs at startup and at session end. The startup pass is the one that
         matters after a pulled plug, because _halt never ran.
 
@@ -1121,12 +1223,13 @@ class Service:
             # plug — nothing ever references them, at any age.
             for f in config.STAGED.glob("*.wav.part"):
                 f.unlink(missing_ok=True)
+            wanted = {media.staged_path(r["source_hash"], self.fmt).name
+                      for r in db.all_slots()}
             for f in config.STAGED.glob("*.wav"):
-                h = f.name.split("-", 1)[0]
-                if not db.hash_in_use(h) and self._older_than(f, cutoff):
+                if f.name not in wanted and self._older_than(f, cutoff):
                     f.unlink(missing_ok=True)
             for f in config.SOURCES.iterdir():
-                if (f.is_file() and not db.hash_in_use(f.stem)
+                if (f.is_file() and not db.hash_in_library(f.stem)
                         and self._older_than(f, cutoff)):
                     f.unlink(missing_ok=True)
             self._sweep_upload_temps()
