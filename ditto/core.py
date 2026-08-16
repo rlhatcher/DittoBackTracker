@@ -149,6 +149,13 @@ class Service:
         # app coming up (and no-ops without a checkout or network). After that,
         # checks happen only when the user asks. Tracked in _threads so shutdown()
         # joins it rather than leaving it to emit during teardown.
+        # Sweep whatever the last run left behind. _gc otherwise runs only from
+        # _halt(), which a pulled plug never reaches — so without this, every
+        # ungraceful stop leaks interrupted transcodes and upload temporaries
+        # onto a small data partition until the next clean shutdown. Queued
+        # rather than run inline so it stays off the boot path.
+        self._work.put(("gc",))
+
         self._threads = [
             threading.Thread(target=self._worker, daemon=True, name="worker"),
             threading.Thread(target=self._monitor, daemon=True, name="monitor"),
@@ -172,13 +179,30 @@ class Service:
                 self._subs.remove(q)
 
     def _emit(self) -> None:
+        """Publish a snapshot to every open stream, newest-wins.
+
+        Each frame is the whole state, so a queued older frame is worthless the
+        moment a newer one exists. Dropping the *new* frame on a full queue —
+        which is what a bare put_nowait does — serves a slow client (a phone
+        that slept) stale state until something else emits, which for a one-shot
+        change like an error or update_available can be a long time. Discard the
+        backlog instead.
+        """
         snap = self.snapshot()
         with self._subs_lock:
             for q in list(self._subs):
                 try:
                     q.put_nowait(snap)
                 except queue.Full:
-                    pass
+                    try:
+                        while True:
+                            q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait(snap)
+                    except queue.Full:
+                        pass        # the reader refilled it; it has fresh state
 
     # ---------------------------------------------------------------- state
 
@@ -273,7 +297,7 @@ class Service:
         # stored under a name it can never find again.
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
         if not stored.exists():
-            shutil.move(str(tmp_path), str(stored))
+            self._store_source(tmp_path, stored)
         else:
             tmp_path.unlink(missing_ok=True)
 
@@ -664,6 +688,35 @@ class Service:
 
     # -------------------------------------------------------------- internals
 
+    @staticmethod
+    def _store_source(tmp_path: Path, stored: Path) -> None:
+        """Move an accepted upload into sources/ durably.
+
+        sources/ is the only copy of the user's original — a staged WAV is
+        re-derivable from it, it is not re-derivable from anything — and there
+        is no battery any more, so the plug can come out at any instant. Sync
+        the file, then the directory, so both the bytes and the name that
+        reaches them survive a cut. Same shape as media.convert's final step.
+
+        Path.replace rather than shutil.move: mkstemp writes into config.DATA
+        and SOURCES is a subdirectory of it, so this is always a same-filesystem
+        rename. shutil.move would fall back to a copy across filesystems, and
+        that fallback can leave a partial file visible under the final name.
+        """
+        tmp_path.replace(stored)
+        try:
+            with open(stored, "rb") as f:
+                os.fsync(f.fileno())
+            dfd = os.open(str(stored.parent), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            # The rename already happened; a filesystem that won't fsync a
+            # directory is not a reason to fail the upload.
+            log.warning("could not fsync %s", stored, exc_info=True)
+
     def _source_for(self, h: str) -> Optional[Path]:
         for p in config.SOURCES.glob(f"{h}.*"):
             return p
@@ -800,6 +853,8 @@ class Service:
         elif kind == "delete_loop":
             _, slot, gen = job
             self._do_delete_loop(slot, gen)
+        elif kind == "gc":
+            self._gc()
         elif kind == "end":
             # A convert queues its write *after* the end marker, so the marker
             # can surface with real work still behind it. This worker is the
@@ -1022,19 +1077,66 @@ class Service:
         subprocess.run(["sudo", "-n", "/sbin/poweroff"], check=False)
 
     def _gc(self) -> None:
-        """Prune expired trash and any staged file nothing references."""
+        """Prune expired trash and any file nothing references.
+
+        Runs at startup and at session end. The startup pass is the one that
+        matters after a pulled plug, because _halt never ran.
+
+        Recently-written files are left alone (see _older_than), so the pass at
+        session end can leave a just-orphaned file behind. That costs a boot,
+        not the space: the next startup pass collects it.
+        """
+        cutoff = time.time() - config.GC_GRACE_SECS
         try:
             db.prune_trash(config.TRASH_KEEP_DAYS)
             # .part files are transcodes interrupted by a crash or a pulled
-            # plug — nothing ever references them.
+            # plug — nothing ever references them, at any age.
             for f in config.STAGED.glob("*.wav.part"):
                 f.unlink(missing_ok=True)
             for f in config.STAGED.glob("*.wav"):
                 h = f.name.split("-", 1)[0]
-                if not db.hash_in_use(h):
+                if not db.hash_in_use(h) and self._older_than(f, cutoff):
                     f.unlink(missing_ok=True)
             for f in config.SOURCES.iterdir():
-                if f.is_file() and not db.hash_in_use(f.stem):
+                if (f.is_file() and not db.hash_in_use(f.stem)
+                        and self._older_than(f, cutoff)):
                     f.unlink(missing_ok=True)
+            self._sweep_upload_temps()
         except Exception:
             log.exception("garbage collection failed")
+
+    @staticmethod
+    def _older_than(f: Path, cutoff: float) -> bool:
+        """Is this file old enough to be safe to collect?
+
+        upload() places the file in sources/ and only then writes the slot row,
+        so a collector run in that window would see an unreferenced file and
+        delete a upload that is moments from being referenced. Age is what tells
+        the two apart. A file that vanished underneath us is not ours to worry
+        about.
+        """
+        try:
+            return f.stat().st_mtime < cutoff
+        except OSError:
+            return False
+
+    @staticmethod
+    def _sweep_upload_temps() -> None:
+        """Delete stranded upload temporaries in DATA itself.
+
+        The upload handlers mkstemp into config.DATA and hand the path to
+        upload(), which moves or unlinks it. A crash or a pulled plug in
+        between strands a file — potentially a few hundred MB of it — that
+        nothing has ever swept.
+
+        The age bound is what makes this safe to run at startup: an upload in
+        flight right now owns its temp file, and only a stale one can be older
+        than the whole-request upload path could plausibly take.
+        """
+        cutoff = time.time() - config.UPLOAD_TEMP_KEEP_SECS
+        for f in config.DATA.glob("tmp*"):
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+            except OSError:
+                pass

@@ -93,6 +93,10 @@ def test_update_check_cross_site_403():
 @pytest.fixture
 def service():
     svc = core.Service()
+    # Startup queues a collector job, and update() refuses while any job is in
+    # flight. These tests are about update()'s own guards, so wait for the
+    # device to reach idle first rather than racing the boot sweep.
+    svc._drain(timeout=5.0)
     yield svc
     svc.shutdown(timeout=2.0)
 

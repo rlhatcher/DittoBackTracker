@@ -276,6 +276,11 @@ The stream is closed after five minutes and the browser's `EventSource`
 reconnects on its own. A hand-rolled consumer should expect the stream to end
 and reconnect.
 
+Frames may be **coalesced, never reordered**. Each frame is the whole state, so
+a consumer that falls behind has its backlog discarded and receives the newest
+snapshot rather than a queue of stale ones. Don't treat the stream as a change
+log; treat each frame as the current truth.
+
 ```bash
 curl -N http://dittobacktracker.local/api/events
 ```

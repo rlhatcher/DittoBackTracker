@@ -37,7 +37,8 @@ will disconnect as the Pi goes down.
 | | Protection |
 |---|---|
 | The Pi's root filesystem | Read-only, so nothing to corrupt — see [provisioning.md](provisioning.md) |
-| The data partition (`/var/lib/ditto`) | SQLite in WAL mode with `synchronous=FULL`, so the database itself is safe. Converted audio is written to a temp name, fsynced and renamed; an accepted upload is not yet fsynced before the request returns |
+| The data partition (`/var/lib/ditto`) | SQLite in WAL mode with `synchronous=FULL`; every file that matters is written to a temp name, fsynced, then renamed |
+| Uploaded audio in `sources/` | fsynced on ingest before the upload is acknowledged |
 | **The pedal's FAT volume** | **The exposed one.** `BT.WAV` is written temp-then-rename with an fsync and the volume is mounted `flush`, so a cut leaves either the old file or the new one — but a cut *during* a write can still leave a `~bt*.tmp` behind (cleaned automatically on the next mount) and FAT has no journal |
 
 So: the failure mode to avoid is unplugging while the UI says it is writing. The
@@ -45,8 +46,13 @@ status line at the bottom of the page turns amber and reads "— don't unplug"
 whenever the pedal is being written to. That message is the only warning there is
 now that the panel LED is gone.
 
-Interrupted pedal writes leave a `~bt*.tmp` behind; those are cleaned
-automatically on the next mount.
+Anything left behind by a cut is swept on the next start, because the clean-up
+that used to run only at session end now also runs at boot: interrupted
+transcodes (`staged/*.wav.part`), stranded upload temporaries (`tmp*` in the
+data directory, once they're an hour old so an upload in flight is never
+reaped), and orphaned staged and source files. Interrupted pedal writes
+(`~bt*.tmp`) are cleaned on the next mount instead, since they live on the
+pedal.
 
 ---
 
