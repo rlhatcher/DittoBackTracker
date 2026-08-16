@@ -15,7 +15,7 @@ from flask import (Flask, Response, jsonify, request,
                    send_from_directory, stream_with_context)
 
 from . import config, db, pedal
-from .core import Service
+from .core import Service, ShuttingDown
 
 STATIC = Path(__file__).parent / "static"
 LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
@@ -40,6 +40,13 @@ def create_app(service: Service) -> Flask:
     # Shared request-size cap for both upload endpoints; Flask returns 413 when
     # a body exceeds it, before it can fill the data partition.
     app.config["MAX_CONTENT_LENGTH"] = config.MAX_UPLOAD_BYTES
+
+    @app.errorhandler(ShuttingDown)
+    def _shutting_down(e):
+        """503, not 400: the request was fine, the device just isn't taking
+        work any more. A client that retries next session is doing the right
+        thing."""
+        return jsonify(error=str(e)), 503
 
     @app.before_request
     def block_cross_site():

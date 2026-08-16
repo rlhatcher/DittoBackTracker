@@ -20,6 +20,10 @@ from . import __version__, config, db, media, pedal
 log = logging.getLogger(__name__)
 
 
+class ShuttingDown(Exception):
+    """A pedal operation was asked for after the session began ending."""
+
+
 def mmss(seconds: float) -> str:
     m, s = divmod(int(max(seconds, 0)), 60)
     return f"{m}:{s:02d}"
@@ -221,7 +225,20 @@ class Service:
         if not (1 <= slot <= config.SLOTS):
             raise ValueError(f"slot must be 1-{config.SLOTS}")
 
+    def _check_accepting(self) -> None:
+        """Refuse pedal work once the session is ending.
+
+        Without this the window is small but the outcome is bad: the end marker
+        only halts on an empty queue, so anything queued after that check is
+        abandoned at poweroff — and the caller has already been told the upload
+        succeeded. Better to refuse it and let the user retry on the next
+        session than to accept a track that quietly never lands.
+        """
+        if self.ending:
+            raise ShuttingDown("the device is shutting down")
+
     def upload(self, slot: int, tmp_path: Path, display_name: str) -> Dict:
+        self._check_accepting()
         self._check_slot(slot)
 
         info = media.probe(tmp_path)
@@ -248,6 +265,7 @@ class Service:
         return db.get_slot(slot)
 
     def clear(self, slot: int) -> Optional[int]:
+        self._check_accepting()
         self._check_slot(slot)
         trash_id = db.delete_slot(slot, to_trash=True)
         self._work.put(("erase", slot))
@@ -268,6 +286,7 @@ class Service:
         staged file, so nothing is orphaned. The job carries the current mount
         generation so a stale job (queued before an unplug/replug) is skipped.
         """
+        self._check_accepting()
         self._check_slot(slot)
         stage = LoopStage()
         self._work.put(("stage_loop", slot, self._mount_gen, stage))
@@ -276,6 +295,7 @@ class Service:
 
     def delete_loop(self, slot: int) -> bool:
         """Enqueue removal of the slot's loop. False (→404) if none is known."""
+        self._check_accepting()
         self._check_slot(slot)
         if slot not in self._loops:
             return False
@@ -289,6 +309,7 @@ class Service:
         Swapping rather than overwriting means reordering a setlist never
         destroys anything, so no trash entry and no undo needed.
         """
+        self._check_accepting()
         self._check_slot(src)
         self._check_slot(dst)
         # The move-or-swap decision is made atomically in db, so we queue pedal
@@ -306,6 +327,7 @@ class Service:
         self._emit()
 
     def retry(self, slot: int) -> None:
+        self._check_accepting()
         self._check_slot(slot)
         row = db.get_slot(slot)
         if not row:
@@ -320,6 +342,7 @@ class Service:
         self._emit()
 
     def restore(self, trash_id: int) -> Optional[int]:
+        self._check_accepting()
         item = db.trash_pop(trash_id)
         if not item:
             return None
@@ -891,6 +914,12 @@ class Service:
         self._emit()
 
     def _drain(self, timeout: float = 300.0) -> None:
+        """Wait for the worker to go idle. Callers must not be the worker.
+
+        `_in_flight` is set by the worker around every job, so a job that called
+        this would be waiting on itself and could only ever time out. Only the
+        SIGTERM path uses it, from the main thread.
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             # busy alone is racy: the worker dequeues a job before it sets
@@ -901,12 +930,14 @@ class Service:
             time.sleep(0.2)
 
     def _halt(self) -> None:
+        # No _drain here. This runs *as* the end job, inside the worker, so
+        # `_in_flight` is already set on our own behalf — a drain could never
+        # see idle and would burn its whole timeout before every poweroff. It
+        # would also be redundant: the end marker requeues itself until the
+        # queue is empty (see _run_job), which is the real wait.
         self.busy = "Finishing writes"
         self.busy_kind = "write"
         self._emit()
-        # The end marker only reaches _halt once the queue is empty, so this is
-        # a short safety bound rather than the actual wait.
-        self._drain(timeout=5.0)
         self.busy = "Unmounting"
         self._emit()
         try:
