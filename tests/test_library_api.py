@@ -15,7 +15,7 @@ H2 = "bbbbbbbbbbbbbbbbbbbb"
 
 
 @pytest.fixture
-def app(tmp_path, monkeypatch):
+def service(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA", tmp_path)
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "state.db")
     for name in ("SOURCES", "STAGED", "TRASH", "LOOPS"):
@@ -28,11 +28,16 @@ def app(tmp_path, monkeypatch):
 
     svc = core.Service()
     svc._drain(timeout=5.0)          # let the boot sweep finish
-    yield web.create_app(svc)
+    yield svc
     svc.shutdown(timeout=2.0)
     for attr in ("conn", "path"):
         if hasattr(db._local, attr):
             delattr(db._local, attr)
+
+
+@pytest.fixture
+def app(service):
+    return web.create_app(service)
 
 
 @pytest.fixture
@@ -339,3 +344,31 @@ def test_audition_is_a_safe_method_and_needs_no_guard(client):
     rv = client.get(f"/api/library/{H1}/audio",
                     headers={"Sec-Fetch-Site": "cross-site"})
     assert rv.status_code == 200
+
+
+# --- shutdown ---------------------------------------------------------------
+
+def test_library_operations_that_touch_the_pedal_stop_once_ending(client, service):
+    """assign and forget queue pedal work, so they refuse during shutdown like
+    every other pedal operation — otherwise the API answers 201 for a track
+    that poweroff will discard."""
+    seed(H1)
+    db.put_slot(3, H1, state="synced")
+    service.ending = True
+
+    assert client.post("/api/slots/7/assign", json={"hash": H1}).status_code == 503
+    assert client.delete(f"/api/library/{H1}?force").status_code == 503
+    assert db.get_slot(3) is not None, "a refused delete must not clear slots"
+    assert db.hash_in_library(H1)
+
+
+def test_renaming_still_works_while_ending(client, service):
+    """A rename touches one database row and never the pedal, so there is no
+    reason to refuse it."""
+    seed(H1, "Before")
+    service.ending = True
+
+    rv = client.patch(f"/api/library/{H1}", json={"name": "After"})
+
+    assert rv.status_code == 200
+    assert db.library_get(H1)["name"] == "After"

@@ -348,6 +348,7 @@ class Service:
         transcode at most, and usually not even that — the staged WAV may still
         be cached — instead of another upload over WiFi.
         """
+        self._check_accepting()
         self._check_slot(slot)
         if not db.hash_in_library(source_hash):
             return None
