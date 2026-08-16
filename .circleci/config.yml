@@ -6,18 +6,34 @@ jobs:
       - image: cimg/python:3.11
     steps:
       - checkout
+      - run:
+          name: Record the interpreter for the cache key
+          # A venv's bin/ is symlinks to one exact interpreter, so a cache keyed
+          # only on requirements-dev.txt outlives the interpreter it was built
+          # against: cimg/python:3.11 rolls its patch version, the restored
+          # symlinks dangle, and every build fails in "Install dependencies"
+          # until someone bumps the key by hand. Keying on the version too means
+          # an image roll just misses the cache instead of poisoning it.
+          command: python -V > .python-version-ci
       - restore_cache:
           keys:
-            - deps-v1-{{ checksum "requirements-dev.txt" }}
+            - deps-v2-{{ checksum ".python-version-ci" }}-{{ checksum "requirements-dev.txt" }}
       - run:
           name: Install dependencies
           command: |
-            python -m venv venv
+            # Belt as well as braces. `python -m venv` will not replace a
+            # dangling bin/python — it sees the symlink and leaves it — so a
+            # broken restored venv is worse than none at all. Check that the
+            # interpreter actually runs, and start over if it doesn't.
+            if ! venv/bin/python -V >/dev/null 2>&1; then
+              rm -rf venv
+              python -m venv venv
+            fi
             . venv/bin/activate
             pip install --upgrade pip
             pip install -r requirements-dev.txt
       - save_cache:
-          key: deps-v1-{{ checksum "requirements-dev.txt" }}
+          key: deps-v2-{{ checksum ".python-version-ci" }}-{{ checksum "requirements-dev.txt" }}
           paths:
             - venv
       - run:
