@@ -27,6 +27,9 @@ format and writes them to the right slots.
 - Drag to the bin to remove, with undo
 - Print the loaded track list
 - Capacity shown in minutes, because the pedal holds about 63 minutes in total
+- Keep a library on the device: uploads stay until you delete them, so you can
+  swap what the pedal carries without uploading again
+- Rename, search and preview library tracks in the browser
 - Download or remove a loop the pedal recorded
 - Never writes `LOOP.WAV`, so recorded loops are safe
 - Read-only root filesystem, so cutting the Pi's power is unlikely to corrupt
@@ -118,6 +121,17 @@ invalidates the cache instead of silently reusing a wrong-format file.
 
 Content addressing means moving a track between slots is a database change and
 one file copy, with no re-conversion.
+
+`sources/` is the library, and it is the durable half. A row in the `library`
+table is the only thing keeping a file there alive: clearing a slot ends an
+assignment and nothing more, and the audio survives until you delete the track
+outright. `staged/` is the disposable half — a cache kept only for slots about
+to be written, because a full library's worth of 24-bit WAV would be several
+gigabytes and losing one only costs a re-transcode.
+
+That split is the point of the feature. The pedal holds about twelve
+five-minute tracks; the card holds as many as you like. Changing what the pedal
+carries is an assign, not another upload.
 
 | Module      | Does                                   |
 | ----------- | -------------------------------------- |

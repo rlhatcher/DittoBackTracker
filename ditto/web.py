@@ -43,6 +43,10 @@ assert set(AUDIO_MIME) == config.AUDIO_SUFFIXES, \
 
 MAX_NAME_LEN = 200
 
+# Servable front-end assets, by exact name. No charset here — Werkzeug appends
+# one for text/* and would otherwise emit it twice.
+ASSETS = {"app.js": "text/javascript", "app.css": "text/css"}
+
 # Each open stream holds a server thread for its whole life, and there are only
 # a handful. Retiring a stream periodically lets EventSource reconnect (it does
 # so on its own) and reclaims threads left behind by a sleeping phone, so a
@@ -86,9 +90,31 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="cross-site request rejected"), 403
         return None
 
+    def _no_cache(resp):
+        """"Revalidate every time", not "don't cache".
+
+        send_from_directory sets a strong ETag, so an unchanged asset still
+        costs one conditional request and a 304 with no body — nothing on a LAN.
+        What it buys is that an over-the-air update can never leave a browser
+        running yesterday's app.js against today's API. max-age/immutable would
+        need content-hashed filenames, which would need a build step.
+        """
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
     @app.get("/")
     def index():
-        return send_from_directory(STATIC, "index.html")
+        return _no_cache(send_from_directory(STATIC, "index.html"))
+
+    @app.get("/static/<name>")
+    def asset(name: str):
+        """An allowlist rather than a directory route: static_folder=None keeps
+        Flask from adding its own /static rule, and naming the files means a
+        stray file in the directory is never reachable."""
+        mime = ASSETS.get(name)
+        if mime is None:
+            abort(404)
+        return _no_cache(send_from_directory(STATIC, name, mimetype=mime))
 
     @app.get("/api/state")
     def state():

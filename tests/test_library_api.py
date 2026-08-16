@@ -295,6 +295,44 @@ def test_library_mutations_are_covered_by_the_cross_site_guard(client, method,
     assert rv.status_code == 403
 
 
+# --- front-end assets -------------------------------------------------------
+
+@pytest.mark.parametrize("name,kind", [("app.js", "javascript"),
+                                       ("app.css", "css")])
+def test_assets_are_served(client, name, kind):
+    rv = client.get(f"/static/{name}")
+    assert rv.status_code == 200
+    assert kind in rv.headers["Content-Type"]
+    assert rv.headers["Content-Type"].count("charset") == 1
+
+
+def test_assets_must_revalidate(client):
+    """An over-the-air update must never leave a browser running yesterday's
+    app.js against today's API."""
+    rv = client.get("/static/app.js")
+    assert rv.headers["Cache-Control"] == "no-cache"
+    assert rv.headers.get("ETag")
+
+
+def test_an_unchanged_asset_costs_a_304(client):
+    """"Revalidate", not "don't cache" — the body only crosses the wire when it
+    has actually changed."""
+    etag = client.get("/static/app.js").headers["ETag"]
+    rv = client.get("/static/app.js", headers={"If-None-Match": etag})
+    assert rv.status_code == 304
+
+
+def test_the_page_itself_must_revalidate(client):
+    assert client.get("/").headers["Cache-Control"] == "no-cache"
+
+
+@pytest.mark.parametrize("name", ["db.py", "../web.py", "app.js.map", ""])
+def test_only_the_named_assets_are_reachable(client, name):
+    """An allowlist, not a directory route: a stray file in static/ is never
+    served."""
+    assert client.get(f"/static/{name}").status_code in (404, 308)
+
+
 def test_audition_is_a_safe_method_and_needs_no_guard(client):
     """A GET changes nothing, and the <audio> element can't set headers."""
     seed(H1)

@@ -1,0 +1,846 @@
+const $ = s => document.querySelector(s);
+const SLOT_MIME = "application/x-ditto-slot";
+let state = null, selected = null, dragSrc = null, binMode = false;
+let updating = false, updatingFromRev = null, updateTimer = null, checking = false;
+
+/* Two sources of truth, deliberately kept apart.
+
+   `state` is the SSE snapshot: server-authoritative, arrives on its own, and
+   render() rebuilds the world from it. `library` is pulled from /api/library
+   and only changes when we ask. The snapshot doesn't carry the library — it is
+   emitted several times a second during a conversion and must stay small.
+
+   They meet in one place: which slots hold a track is read from `state.slots`,
+   not from the library response, so those badges stay live for free. */
+let library = null;
+let editingHash = null;    // a rename in progress; freezes renderLibrary
+let nowPlaying = null;     // hash being auditioned, for the row's play button
+
+function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
+
+function render(s){
+  state = s;
+
+  const pd = $("#pedal");
+  const map = {mounted:["var(--ok)","connected"],absent:["var(--tx2)","no pedal"],error:["var(--err)","error"]};
+  const [c,t] = map[s.pedal] || map.absent;
+  pd.innerHTML = `<span class="dot" style="background:${c}"></span>${t}`;
+
+  if (s.version){
+    $("#ver").textContent = "v" + s.version + (s.revision ? " · " + s.revision : "");
+  }
+  // The update completes when a snapshot shows the deployed revision has changed
+  // (the restart brought up the new build). Gate on that, not on the SSE
+  // reconnect — reconnects also happen on the routine stream rotation, well
+  // before any update, and clearing early could admit a second update.
+  if (updating && s.revision && s.revision !== updatingFromRev){
+    endUpdating();
+  }
+  updateBtnState(s);
+
+  const cap = s.capacity;
+  const frac = cap.total_seconds ? cap.used_seconds/cap.total_seconds : 0;
+  $("#captxt").textContent = cap.used_label + " of " + cap.total_label;
+  const fill = $("#capfill");
+  fill.style.width = Math.min(100, frac*100) + "%";
+  fill.className = "capfill" + (frac>0.95?" err":frac>0.8?" warn":"");
+  $("#capnote").textContent = cap.total_seconds
+    ? mmss(Math.max(0,cap.total_seconds-cap.used_seconds)) + " remaining"
+    : "connect the pedal to see capacity";
+
+  const byslot = {};
+  s.slots.forEach(x => byslot[x.slot] = x);
+  const loops = new Set(s.loops || []);
+
+  const total = s.slot_count || 99;
+  const g = $("#grid");
+  if (g.children.length !== total){
+    g.innerHTML = "";
+    for (let i=1;i<=total;i++){
+      const d = document.createElement("button");
+      d.type = "button";
+      d.className = "cell"; d.title = "Slot "+i; d.dataset.slot = i;
+      d.setAttribute("aria-pressed", "false");
+      d.onclick = () => {
+        // Pick-up-then-place reorder — the keyboard equivalent of the mouse
+        // drag: with an occupied slot already selected, activating a different
+        // slot moves or swaps into it. (state, not the once-built byslot
+        // closure, so occupancy is read from the latest snapshot.)
+        if (selected !== null && selected !== i &&
+            state.slots.some(x => x.slot === selected)){
+          const src = selected;
+          selected = null;
+          moveTo(src, i);
+          render(state);
+          return;
+        }
+        selected = selected===i?null:i;
+        render(state);
+      };
+      d.addEventListener("dragstart", e => {
+        dragSrc = i;
+        e.dataTransfer.setData(SLOT_MIME, String(i));
+        e.dataTransfer.effectAllowed = "move";
+        d.classList.add("dragging");
+        setBinMode(true);
+      });
+      d.addEventListener("dragend", () => {
+        dragSrc = null;
+        d.classList.remove("dragging");
+        setBinMode(false);
+      });
+      ["dragenter","dragover"].forEach(ev => d.addEventListener(ev, e => {
+        e.preventDefault(); e.stopPropagation();
+        if (dragSrc !== i) d.classList.add("over"); }));
+      ["dragleave","drop"].forEach(ev => d.addEventListener(ev, e => {
+        e.preventDefault(); d.classList.remove("over"); }));
+      d.addEventListener("drop", e => {
+        e.stopPropagation();
+        const from = e.dataTransfer.getData(SLOT_MIME);
+        if (from){
+          const src = parseInt(from, 10);
+          if (src !== i) moveTo(src, i);
+        } else {
+          send(e.dataTransfer.files, i);
+        }
+      });
+      g.appendChild(d);
+    }
+  }
+  [...g.children].forEach((d,i) => {
+    const n = i+1, row = byslot[n], hasLoop = loops.has(n);
+    d.className = "cell" + (row?" "+row.state:"") + (hasLoop?" has-loop":"")
+      + (selected===n?" sel":"");
+    d.setAttribute("aria-pressed", selected===n ? "true" : "false");
+    d.draggable = !!row;
+    const loopNote = hasLoop ? " · holds a recorded loop" : "";
+    d.title = row
+      ? `Slot ${n}: ${row.display_name} — drag to another slot to move or swap${loopNote}`
+      : hasLoop ? `Slot ${n}: recorded loop only` : `Slot ${n} (empty)`;
+  });
+
+  // Print applies to loaded backing tracks; hide it when there's nothing to print.
+  $("#print").hidden = !s.slots.length;
+
+  const list = $("#list");
+  list.innerHTML = "";
+  // Union of backing-track slots and loop-bearing slots, in slot order: a slot
+  // that holds only a pedal-recorded loop (no backing track) still gets a row,
+  // so its download/remove controls are reachable.
+  const slotNums = [...new Set([...s.slots.map(x=>x.slot), ...loops])]
+    .sort((a,b)=>a-b);
+  if (!slotNums.length){
+    list.innerHTML = '<div style="color:var(--tx2);font-size:14px">Nothing loaded yet.</div>';
+  }
+  slotNums.forEach(n => {
+    const r = byslot[n], pad = String(n).padStart(2,"0");
+    const el = document.createElement("div");
+    el.className = "track";
+    if (r){
+      const label = {converting:"converting",staged:"staged",synced:"on pedal",error:"error"}[r.state]||r.state;
+      el.innerHTML = `
+        <span class="num">${pad}</span>
+        <span class="nm">${escapeHtml(r.display_name)}</span>
+        <span class="dur">${mmss(r.duration)}</span>
+        <span class="st ${r.state}">${label}</span>`;
+      const x = document.createElement("button");
+      x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
+      x.onclick = () => removeSlot(r.slot, r.display_name);
+      el.appendChild(x);
+    } else {
+      // Loop-only slot: no backing track, so no name/duration/clear control.
+      el.innerHTML = `
+        <span class="num">${pad}</span>
+        <span class="nm loop-only">Loop only</span>
+        <span class="st loop">loop</span>`;
+    }
+    list.appendChild(el);
+    if (loops.has(n)){
+      const lr = document.createElement("div");
+      lr.className = "looprow";
+      const dl = document.createElement("a");
+      dl.className = "loopbtn"; dl.href = `/api/loops/${n}`;
+      dl.setAttribute("download", `loop-${pad}.wav`);
+      dl.textContent = "Download loop";
+      dl.title = `Download the loop from slot ${pad} (leaves it on the pedal)`;
+      lr.appendChild(dl);
+      const rm = document.createElement("button");
+      rm.className = "loopbtn danger"; rm.textContent = "Remove loop";
+      rm.title = `Delete the loop in slot ${pad} from the pedal`;
+      rm.onclick = () => removeLoop(n);
+      lr.appendChild(rm);
+      list.appendChild(lr);
+    }
+    if (r && r.state === "error" && r.error){
+      const e = document.createElement("div");
+      e.className = "err"; e.style.cssText = "font-size:12px;padding:0 0 8px 32px";
+      e.textContent = r.error;
+      list.appendChild(e);
+    }
+  });
+
+  if (binMode){
+    /* leave the bin prompt in place while a slot is being dragged */
+  } else if (selected != null){
+    const pad = String(selected).padStart(2,"0");
+    const occ = byslot[selected];
+    $("#drophead").innerHTML = `Drop here to fill slot <b>${pad}</b>`;
+    const nxt = [selected+1, selected+2].filter(n => n <= total)
+      .map(n => String(n).padStart(2,"0"));
+    $("#dropnote").textContent = occ
+      ? `Slot ${pad} holds “${occ.display_name}” — tap another slot to move it there, drop a file to replace it, or tap ${pad} again to deselect.`
+      : nxt.length
+        ? `Extra files continue into ${nxt.join(", ")}… Tap the slot again to deselect.`
+        : `Slot ${pad} is the last slot. Tap the slot again to deselect.`;
+  } else {
+    $("#drophead").textContent = "Drop audio here, or tap to choose";
+    $("#dropnote").textContent =
+      "Drop straight onto a slot to target it, or use a leading number — “07 Blue Bossa.mp3”";
+  }
+
+  const busy = !!s.busy;
+  $("#progwrap").classList.toggle("hide", !busy || s.progress==null);
+  if (s.progress!=null) $("#progfill").style.width = (s.progress*100)+"%";
+  const m = $("#msg");
+  // This page is the only status surface — there is no panel light or display —
+  // so the mid-write warning has to be unmissable here or nowhere.
+  if (s.ending)            { m.textContent = "Shutting down — leave everything plugged in until this page disconnects"; m.className="msg warn"; }
+  else if (s.busy && s.busy_kind === "write")
+                           { m.textContent = s.busy + " — don't unplug"; m.className="msg warn"; }
+  else if (s.busy)         { m.textContent = s.busy; m.className="msg"; }
+  else if (s.error)        { m.textContent = s.error; m.className="msg err"; }
+  else if (s.pedal==="mounted") { m.textContent = "Ready"; m.className="msg"; }
+  else                     { m.textContent = "Plug in the pedal"; m.className="msg"; }
+
+  $("#done").disabled = s.ending;
+
+  // The library's own rows come from /api/library, but its slot badges and its
+  // assign targets come from the snapshot — so a new snapshot re-renders it.
+  renderLibrary();
+}
+
+function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
+
+// Build a concise, self-contained printable document: a bare list of slot number
+// + track name for the loaded backing tracks, in slot order. No headings and no
+// row rules — both span the full page width, so scaling the print down leaves
+// long lines against short text. Loops and empty slots are left out. Kept
+// separate from printList so the output is easy to inspect; scaling and margins
+// are left to the browser's print dialog.
+function printHtml(s){
+  const rows = (s.slots || []).slice().sort((a,b) => a.slot - b.slot);
+  const body = rows.length
+    ? rows.map(r =>
+        `<tr><td class="n">${String(r.slot).padStart(2,"0")}</td>` +
+        `<td>${escapeHtml(r.display_name)}</td></tr>`).join("")
+    : `<tr><td></td><td>No backing tracks loaded.</td></tr>`;
+  return `<!doctype html><html><head><meta charset="utf-8">` +
+    `<title>DittoBackTracker — backing tracks</title><style>` +
+    // Zero the page margin so the browser has nowhere to draw its own header and
+    // footer (date, document title, URL, page number) — those are browser chrome,
+    // not content, so they never scale with the print. The body margin below
+    // supplies the actual inset instead.
+    `@page{margin:0}` +
+    // Pin white paper / black ink so a dark-mode browser doesn't render the
+    // print preview (and save-to-PDF) as black text on a dark background.
+    `body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;` +
+    `margin:16mm;color:#000;background:#fff}` +
+    `table{border-collapse:collapse}` +
+    `td{padding:2px 0;vertical-align:baseline}` +
+    `td.n{padding-right:10px;font-family:ui-monospace,Menlo,monospace;color:#555;text-align:right;white-space:nowrap}` +
+    `</style></head><body>` +
+    `<table>${body}</table>` +
+    `</body></html>`;
+}
+
+function printList(){
+  if (!state) return;
+  // Opened synchronously from the click so it isn't treated as a pop-up.
+  const w = window.open("", "_blank");
+  if (!w){ fail("Couldn't open the print view — allow pop-ups for this page"); return; }
+  w.document.write(printHtml(state));
+  w.document.close();
+  w.focus();
+  w.print();   // no external resources in the doc, so it's ready immediately
+}
+
+function updateBtnState(s){
+  if (updating || checking) return;     // don't clobber a transient label
+  const b = $("#update");
+  b.hidden = false;
+  b.disabled = false;
+  if (s && s.update_available){
+    b.textContent = "Update available";
+    b.className = "link avail";
+    b.title = s.remote_revision ? "New version " + s.remote_revision : "A newer version is available";
+  } else {
+    // Up to date, or not checked yet — offer a manual re-check.
+    b.textContent = "Check for update";
+    b.className = "link";
+    b.title = "Check GitHub for a newer version";
+  }
+}
+
+function fail(text){ $("#msg").textContent = text; $("#msg").className = "msg err"; }
+
+function moveTo(src, dst){
+  fetch(`/api/slots/${src}/move`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({to: dst})})
+    .then(r => r.ok ? null : r.json().catch(()=>({})))
+    .then(j => { if (j) fail(j.error || "Move failed"); })
+    .catch(() => fail("Move failed — check the connection"));
+}
+
+async function send(files, start){
+  if (!files || !files.length) return;
+  const fd = new FormData();
+  [...files].forEach(f => fd.append("file", f));
+  if (start != null) fd.append("start", start);
+  $("#msg").textContent = start != null
+    ? `Uploading to slot ${String(start).padStart(2,"0")}…` : "Uploading…";
+  let r;
+  try {
+    r = await fetch("/api/upload", {method:"POST", body:fd});
+  } catch {
+    selected = null;
+    fail("Upload failed — check the connection");
+    return;
+  }
+  const j = await r.json().catch(()=>({}));
+  selected = null;
+  // A 413 or a 500 carries no `errors` list, so an ok check has to come first
+  // or the message stays on "Uploading…" forever.
+  if (!r.ok && !(j.errors && j.errors.length)){
+    fail(j.error || `Upload failed (${r.status})`);
+    return;
+  }
+  if (j.errors && j.errors.length){
+    fail(j.errors.map(e=>`${e.name}: ${e.error}`).join("; "));
+  }
+}
+
+const drop = $("#drop");
+
+function setBinMode(on){
+  binMode = on;
+  drop.classList.toggle("bin", on);
+  if (on){
+    $("#drophead").innerHTML = "🗑 Drop here to remove from the pedal";
+    $("#dropnote").textContent = "You can undo straight afterwards.";
+  } else {
+    render(state);
+  }
+}
+
+async function removeSlot(slot, name){
+  let j;
+  try {
+    const r = await fetch(`/api/slots/${slot}`, {method:"DELETE"});
+    j = await r.json().catch(()=>({}));
+    if (!r.ok){ fail(j.error || "Could not clear the slot"); return; }
+  } catch {
+    fail("Could not clear the slot — check the connection");
+    return;
+  }
+  const host = $("#undoslot");
+  host.innerHTML = "";
+  // The delete names its own trash entry. Reading back the newest item
+  // instead would offer to restore whatever was deleted last, not this.
+  if (j.trash_id == null) return;
+  const label = name || "slot " + String(slot).padStart(2,"0");
+  const b = document.createElement("button");
+  b.className = "undo";
+  b.textContent = `Undo “${label.length > 16 ? label.slice(0,15)+"…" : label}”`;
+  b.onclick = async () => {
+    // fetch only rejects on a network error, so a 404 (the entry has since
+    // been pruned) would otherwise look like success. Check r.ok explicitly.
+    try {
+      const r = await fetch(`/api/trash/${j.trash_id}/restore`, {method:"POST"});
+      if (!r.ok) fail("Undo failed — the trash entry has gone");
+    } catch {
+      fail("Undo failed — check the connection");
+    }
+    host.innerHTML = "";
+  };
+  host.appendChild(b);
+  setTimeout(() => { if (host.firstChild === b) host.innerHTML = ""; }, 12000);
+}
+
+async function removeLoop(slot){
+  // A loop is a live take with no source — deleting it is irreversible, so
+  // guard the accidental click. No undo: there is nothing to restore from.
+  const pad = String(slot).padStart(2,"0");
+  if (!confirm(`Delete the loop in slot ${pad} from the pedal? You can't undo this.`)) return;
+  try {
+    const r = await fetch(`/api/loops/${slot}`, {method:"DELETE"});
+    if (!r.ok){
+      const j = await r.json().catch(()=>({}));
+      fail(j.error || "Could not remove the loop");
+    }
+  } catch {
+    fail("Could not remove the loop — check the connection");
+  }
+}
+
+/* No click handler here: #drop is the input's <label>, so the browser opens
+   the picker. Calling .click() as well would open it twice. */
+$("#file").onchange = e => { send(e.target.files, selected); e.target.value=""; };
+["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => {
+  const from = e.dataTransfer.getData(SLOT_MIME);
+  if (from){
+    const slot = parseInt(from, 10);
+    const row = (state?.slots || []).find(s => s.slot === slot);
+    removeSlot(slot, row && row.display_name);
+  } else {
+    send(e.dataTransfer.files, selected);
+  }
+});
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => e.preventDefault());
+
+$("#done").onclick = async () => {
+  if (!confirm("End the session? The pedal will be unmounted and the device will shut down.")) return;
+  await fetch("/api/session/end", {method:"POST"});
+};
+
+$("#print").onclick = printList;
+
+function endUpdating(){ updating = false; clearTimeout(updateTimer); updateTimer = null; }
+
+// The single footer button has two resting states: "Update available" (runs the
+// OTA update) and "Check for update" (asks the device to re-check the remote).
+// The click dispatches on the current state.
+$("#update").onclick = () => {
+  if ($("#update").disabled) return;
+  if (state && state.update_available) doUpdate();
+  else doCheck();
+};
+
+async function doCheck(){
+  const btn = $("#update");
+  checking = true;
+  btn.disabled = true; btn.textContent = "Checking…"; btn.className = "link";
+  let j;
+  try {
+    const r = await fetch("/api/update/check", {method:"POST"});
+    j = await r.json().catch(() => ({}));
+  } catch {
+    checking = false; updateBtnState(state);
+    fail("Update check failed — check the connection");
+    return;
+  }
+  checking = false;
+  if (!j.ok){
+    // The check couldn't run (offline, or not a git deployment).
+    updateBtnState(state);
+    fail(j.error ? "Update check failed: " + j.error : "Update check failed");
+    return;
+  }
+  // Reflect the result. A change also arrives over SSE, but update from the
+  // response so a no-change result (still up to date) still gives feedback.
+  if (state){
+    state.update_available = j.update_available;
+    state.remote_revision = j.remote_revision;
+  }
+  updateBtnState(state);
+  if (!j.update_available){
+    $("#msg").textContent = "Up to date"; $("#msg").className = "msg";
+  }
+}
+
+async function doUpdate(){
+  const btn = $("#update");
+  // A known deployed revision is required: completion is detected by the
+  // revision changing (see render). Without one — the first snapshot hasn't
+  // arrived, or this isn't a git deployment — a pre-restart snapshot would
+  // differ from a null baseline and clear `updating` before the update lands.
+  if (!state || !state.revision){
+    fail("Device state isn't ready yet — try again in a moment");
+    return;
+  }
+  if (!confirm("Update to the latest version and restart? The device will briefly disconnect.")) return;
+  updating = true;
+  // Remember the revision we're leaving; render() clears `updating` once a
+  // snapshot reports a different one (the new build is up).
+  updatingFromRev = state.revision;
+  btn.disabled = true; btn.textContent = "Updating…"; btn.className = "link";
+  // Safety net: if no new revision ever arrives (restart failed to come back),
+  // don't leave the button stuck forever.
+  clearTimeout(updateTimer);
+  updateTimer = setTimeout(() => {
+    if (!updating) return;
+    endUpdating();
+    if (state) render(state);
+    fail("Update didn't confirm — reload the page to check");
+  }, 180000);
+  let j;
+  try {
+    const r = await fetch("/api/update", {method:"POST"});
+    j = await r.json().catch(() => ({}));
+    if (!r.ok){
+      // 409 = busy, 502 = update failed. Restore the button so they can retry.
+      fail(j.error || "Update failed");
+      endUpdating(); updateBtnState(state);
+      return;
+    }
+  } catch {
+    fail("Update failed — check the connection");
+    endUpdating(); updateBtnState(state);
+    return;
+  }
+  // Success: the service is restarting. `updating` stays set until a snapshot
+  // shows the new revision (see render), keeping the button locked so a second
+  // update can't start while the restart is pending.
+  $("#msg").textContent = "Updating… the page will reconnect"; $("#msg").className = "msg";
+}
+
+const es = new EventSource("/api/events");
+let reconnectTimer = null;
+es.onopen = () => {
+  if (reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+  // Refetch the library on every (re)connect. That covers the first connect,
+  // the server's five-minute stream rotation, and the reconnect after an
+  // over-the-air restart — so a second tab is never more than one rotation
+  // behind another tab's rename or delete, without the snapshot having to
+  // carry a change counter.
+  loadLibrary();
+};
+es.onmessage = e => render(JSON.parse(e.data));
+es.onerror = () => {
+  // The server retires each stream after five minutes and EventSource
+  // reconnects on its own (readyState CONNECTING), which completes in well
+  // under a second — so a planned rotation must stay silent. Only surface a
+  // real outage: CLOSED immediately, or CONNECTING that hasn't recovered
+  // within the grace window (onopen clears the timer, the next snapshot
+  // overwrites the message).
+  if (es.readyState === EventSource.CLOSED){
+    $("#msg").textContent = "Disconnected"; $("#msg").className = "msg err";
+  } else if (es.readyState === EventSource.CONNECTING && reconnectTimer === null){
+    reconnectTimer = setTimeout(() => {
+      if (es.readyState !== EventSource.OPEN){
+        $("#msg").textContent = "Reconnecting…"; $("#msg").className = "msg err";
+      }
+    }, 8000);
+  }
+};
+
+/* ------------------------------------------------------------------ library
+
+   The pedal holds about twelve five-minute tracks; the card holds as many as
+   you like. So "what I own" and "what the pedal is carrying today" are two
+   lists, and this is the first one. Assigning from here costs a transcode at
+   most — usually not even that, since the staged WAV may still be cached —
+   rather than another upload over WiFi. */
+
+// One <audio> for the whole page, retargeted per row. Ninety-nine elements with
+// src set would have the browser fetching metadata for the entire library, and
+// reassigning src is also what guarantees two tracks can't play at once.
+const player = new Audio();
+player.preload = "none";
+player.addEventListener("ended", () => { nowPlaying = null; renderLibrary(); });
+player.addEventListener("error", () => {
+  // Four of the ten accepted formats (.ogg, .opus, .wma, older .flac) don't
+  // play in every browser — Safari in particular. The file is fine and the
+  // pedal will take it; this browser just can't preview it.
+  if (nowPlaying){
+    fail("This browser can't play that format — it will still convert fine");
+    nowPlaying = null;
+    renderLibrary();
+  }
+});
+
+async function loadLibrary(){
+  try {
+    const r = await fetch("/api/library");
+    if (!r.ok) return;
+    library = await r.json();
+  } catch {
+    return;             // a snapshot or a later refetch will put it right
+  }
+  renderLibrary();
+}
+
+// Where an "add to the pedal" click would land: the selected slot if there is
+// one, else the lowest free slot. Loop-bearing slots are left alone — we don't
+// put a backing track under someone's recording by accident.
+function assignTarget(){
+  if (selected != null) return selected;
+  if (!state) return null;
+  const taken = new Set([...(state.slots || []).map(x => x.slot),
+                         ...(state.loops || [])]);
+  for (let i = 1; i <= (state.slot_count || 99); i++){
+    if (!taken.has(i)) return i;
+  }
+  return null;
+}
+
+function libraryView(){
+  const q = ($("#libq").value || "").trim().toLowerCase();
+  const sort = $("#libsort").value;
+  const rows = (library || []).filter(
+    r => !q || r.name.toLowerCase().includes(q));
+  if (sort === "name"){
+    rows.sort((a,b) => a.name.localeCompare(b.name, undefined,
+                                            {sensitivity:"base"}));
+  } else if (sort === "duration"){
+    rows.sort((a,b) => b.duration - a.duration);
+  }                     // "added" is the order the server already returned
+  return rows;
+}
+
+function renderLibrary(){
+  // An inline rename owns the row it's in. Freezing at most a screenful of
+  // static rows for the few seconds an edit takes is free, and far more robust
+  // than trying to preserve the editing node across a rebuild.
+  if (editingHash !== null) return;
+
+  const host = $("#librows");
+  if (!host) return;
+  if (library === null){ host.innerHTML = ""; return; }
+
+  const all = library.length;
+  $("#libtools").hidden = all < 2;   // nothing to search or sort through yet
+  const rows = libraryView();
+
+  // Which slots hold each track, from the snapshot — so these badges follow an
+  // upload or a clear without refetching the library.
+  const bySlot = {};
+  ((state && state.slots) || []).forEach(s => {
+    (bySlot[s.source_hash] = bySlot[s.source_hash] || []).push(s.slot);
+  });
+
+  host.innerHTML = "";
+  if (!all){
+    host.innerHTML = '<div class="empty">Nothing in the library yet. '
+      + 'Anything you upload stays here until you delete it.</div>';
+    $("#libfoot").textContent = "";
+    return;
+  }
+  if (!rows.length){
+    host.innerHTML = '<div class="empty">Nothing matches that search.</div>';
+  }
+
+  const target = assignTarget();
+  rows.forEach(r => host.appendChild(libraryRow(r, bySlot[r.source_hash], target)));
+
+  const mins = library.reduce((t, r) => t + (r.duration || 0), 0);
+  $("#libfoot").innerHTML =
+    `<span>${all} track${all === 1 ? "" : "s"} · ${mmss(mins)}</span>`
+    + (rows.length === all ? "" : `<span>${rows.length} shown</span>`);
+}
+
+function libraryRow(r, slots, target){
+  const el = document.createElement("div");
+  el.className = "librow";
+
+  const nm = document.createElement("span");
+  nm.className = "libname";
+  nm.textContent = r.name;
+  nm.title = "Click to rename";
+  nm.tabIndex = 0;
+  nm.setAttribute("role", "button");
+  const edit = () => startRename(el, nm, r);
+  nm.onclick = edit;
+  nm.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); } };
+  el.appendChild(nm);
+
+  const dur = document.createElement("span");
+  dur.className = "libdur";
+  dur.textContent = mmss(r.duration);
+  el.appendChild(dur);
+
+  if (slots && slots.length){
+    const b = document.createElement("span");
+    b.className = "inslot";
+    b.textContent = slots.map(n => String(n).padStart(2,"0")).join(" ");
+    b.title = slots.length > 1 ? `On the pedal in slots ${b.textContent}`
+                               : `On the pedal in slot ${b.textContent}`;
+    el.appendChild(b);
+  }
+
+  const play = document.createElement("button");
+  play.className = "libbtn" + (nowPlaying === r.source_hash ? " playing" : "");
+  play.type = "button";
+  play.textContent = nowPlaying === r.source_hash ? "■" : "▶";
+  play.title = nowPlaying === r.source_hash ? "Stop" : "Listen";
+  play.setAttribute("aria-label",
+    (nowPlaying === r.source_hash ? "Stop " : "Listen to ") + r.name);
+  play.onclick = () => audition(r);
+  el.appendChild(play);
+
+  const add = document.createElement("button");
+  add.className = "libbtn";
+  add.type = "button";
+  add.disabled = target === null;
+  add.textContent = target === null ? "Full" : "→ " + String(target).padStart(2,"0");
+  add.title = target === null
+    ? "Every slot is taken"
+    : (selected != null
+        ? `Put “${r.name}” in slot ${String(target).padStart(2,"0")}, the slot you have selected`
+        : `Put “${r.name}” in slot ${String(target).padStart(2,"0")}, the lowest free slot`);
+  add.onclick = () => assignToSlot(r, target);
+  el.appendChild(add);
+
+  const del = document.createElement("button");
+  del.className = "libbtn danger";
+  del.type = "button";
+  del.textContent = "×";
+  del.title = `Delete “${r.name}” from the device`;
+  del.setAttribute("aria-label", "Delete " + r.name);
+  del.onclick = () => forget(r);
+  el.appendChild(del);
+
+  return el;
+}
+
+function startRename(row, nm, r){
+  if (editingHash !== null) return;
+  editingHash = r.source_hash;
+  const input = document.createElement("input");
+  input.className = "libedit";
+  input.type = "text";
+  input.value = r.name;
+  input.maxLength = 200;
+  input.setAttribute("aria-label", "Rename " + r.name);
+  row.replaceChild(input, nm);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) return;
+    settled = true;
+    const name = input.value.trim();
+    editingHash = null;
+    if (!save || !name || name === r.name){ renderLibrary(); return; }
+    // Optimistic: the row already reads the new name, and a failure re-reads
+    // the server's version rather than leaving a lie on screen.
+    r.name = name;
+    renderLibrary();
+    try {
+      const resp = await fetch(`/api/library/${r.source_hash}`, {
+        method:"PATCH", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({name})});
+      if (!resp.ok){
+        const j = await resp.json().catch(()=>({}));
+        fail(j.error || "Rename failed");
+        loadLibrary();
+      }
+    } catch {
+      fail("Rename failed — check the connection");
+      loadLibrary();
+    }
+  };
+
+  input.onblur = () => finish(true);
+  input.onkeydown = e => {
+    if (e.key === "Enter"){ e.preventDefault(); finish(true); }
+    else if (e.key === "Escape"){ e.preventDefault(); finish(false); }
+  };
+}
+
+function audition(r){
+  if (nowPlaying === r.source_hash){
+    player.pause();
+    nowPlaying = null;
+    renderLibrary();
+    return;
+  }
+  // Setting src is what stops whatever was playing before.
+  player.src = `/api/library/${r.source_hash}/audio`;
+  nowPlaying = r.source_hash;
+  renderLibrary();
+  player.play().catch(() => {
+    if (nowPlaying === r.source_hash){
+      fail("This browser can't play that format — it will still convert fine");
+      nowPlaying = null;
+      renderLibrary();
+    }
+  });
+}
+
+async function assignToSlot(r, slot){
+  if (slot == null) return;
+  const pad = String(slot).padStart(2,"0");
+  try {
+    const resp = await fetch(`/api/slots/${slot}/assign`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({hash: r.source_hash})});
+    if (!resp.ok){
+      const j = await resp.json().catch(()=>({}));
+      fail(j.error || `Couldn't put that in slot ${pad}`);
+      return;
+    }
+  } catch {
+    fail("Assign failed — check the connection");
+    return;
+  }
+  selected = null;      // consumed; the next click picks its own target
+}
+
+async function forget(r, force){
+  const label = r.name;
+  if (!force && !confirm(
+      `Delete “${label}” from the device? This removes the audio, not just the `
+      + `pedal slot, and you can't undo it.`)) return;
+  let resp, j;
+  try {
+    resp = await fetch(`/api/library/${r.source_hash}` + (force ? "?force" : ""),
+                       {method:"DELETE"});
+    j = await resp.json().catch(()=>({}));
+  } catch {
+    fail("Delete failed — check the connection");
+    return;
+  }
+  if (resp.status === 409){
+    // It's on the pedal. Say which slots, rather than refusing opaquely.
+    const where = (j.slots || []).map(n => String(n).padStart(2,"0")).join(", ");
+    if (confirm(`“${label}” is on the pedal in slot ${where}. Clear `
+                + `${(j.slots || []).length > 1 ? "those slots" : "that slot"} `
+                + `and delete it?`)){
+      return forget(r, true);
+    }
+    return;
+  }
+  if (!resp.ok){ fail(j.error || "Delete failed"); return; }
+  if (nowPlaying === r.source_hash){ player.pause(); nowPlaying = null; }
+  loadLibrary();
+}
+
+async function sendToLibrary(files){
+  if (!files || !files.length) return;
+  const fd = new FormData();
+  [...files].forEach(f => fd.append("file", f));
+  $("#msg").textContent = "Adding to the library…";
+  let r, j;
+  try {
+    r = await fetch("/api/library", {method:"POST", body:fd});
+    j = await r.json().catch(()=>({}));
+  } catch {
+    fail("Upload failed — check the connection");
+    return;
+  }
+  if (!r.ok && !(j.errors && j.errors.length)){
+    fail(j.error || `Upload failed (${r.status})`);
+    return;
+  }
+  if (j.errors && j.errors.length){
+    fail(j.errors.map(e => `${e.name}: ${e.error}`).join("; "));
+  }
+  loadLibrary();
+}
+
+$("#libfile").onchange = e => { sendToLibrary(e.target.files); e.target.value=""; };
+// Uncontrolled inputs: read on demand, never written by a render, so a snapshot
+// arriving mid-keystroke can't wipe what's being typed.
+$("#libq").oninput = renderLibrary;
+$("#libsort").onchange = renderLibrary;
+
+// es.onopen also loads it, but only once the stream handshake completes. Ask
+// now so the card fills even if the event stream is slow or never comes up.
+loadLibrary();
