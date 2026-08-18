@@ -66,12 +66,14 @@ def test_store_source_survives_an_unfsyncable_directory(paths, monkeypatch):
     stored = config.SOURCES / "abc123.mp3"
 
     real_fsync = os.fsync
+    refused = []
 
     def only_dirs_fail(fd):
         # Refuse directories, pass regular files through to the real call.
         # Blanket-failing os.fsync would raise on the file first and never
         # reach the directory branch this test is named for.
         if stat.S_ISDIR(os.fstat(fd).st_mode):
+            refused.append(fd)
             raise OSError("fsync not supported on directories")
         return real_fsync(fd)
 
@@ -79,6 +81,10 @@ def test_store_source_survives_an_unfsyncable_directory(paths, monkeypatch):
     core.Service._store_source(tmp, stored)
 
     assert stored.read_bytes() == b"audio bytes"
+    # Without this the test would still pass if the directory fsync were
+    # dropped altogether — the stub would simply never fire, and the tolerance
+    # this test exists to prove would go untested.
+    assert refused, "the directory fsync was never attempted"
 
 
 def test_store_source_refuses_to_claim_an_unsyncable_file(paths, monkeypatch):
