@@ -229,3 +229,31 @@ def test_work_queued_behind_the_marker_still_runs(service, fake_pedal, monkeypat
     while "halt" not in ran and time.monotonic() < deadline:
         time.sleep(0.05)
     assert ran == [5, 6, "halt"], f"work was lost or reordered: {ran}"
+
+
+def test_the_update_gate_holds_a_job_that_arrives_after_it_closes(service):
+    """update() sets _updating and only then checks for idleness, so the gate
+    has to stop work that arrives during the deploy.
+
+    The worker checks the gate before dequeuing, but an idle worker spends
+    nearly all its time parked in that blocking get() — so a job queued just
+    after the gate closed satisfies the get, and without a second check it runs
+    straight past the gate and alongside the redeploy.
+    """
+    ran = []
+    service._do_erase = lambda slot: ran.append(slot)
+    # Let the boot sweep finish and the worker settle into its blocking get(),
+    # which is the state that exposes the hole rather than hiding it.
+    service._drain(timeout=5.0)
+    time.sleep(0.6)
+
+    service._updating.set()
+    service._work.put(("erase", 42))
+    time.sleep(1.0)
+    assert ran == [], "a job started while an update was admitted"
+
+    service._updating.clear()           # the update bailed; work resumes
+    deadline = time.monotonic() + 5
+    while not ran and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ran == [42], "the held job was dropped instead of resumed"

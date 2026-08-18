@@ -745,6 +745,7 @@ class Service:
     # ------------------------------------------------------------ work queue
 
     def _worker(self) -> None:
+        job = None
         while not self._stop.is_set():
             # Don't start a job while an update is admitted: a redeploy/restart
             # must not overlap pedal work. Anything queued waits here and is
@@ -752,10 +753,24 @@ class Service:
             if self._updating.is_set():
                 self._stop.wait(0.1)
                 continue
-            try:
-                job = self._work.get(timeout=0.5)
-            except queue.Empty:
-                continue
+            if job is None:
+                try:
+                    job = self._work.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                # Check again. An idle worker spends nearly all its time parked
+                # in that get(), so a job arriving just after the gate closed
+                # satisfies the get and would otherwise run straight past it —
+                # which is the common case, not a narrow race.
+                #
+                # Hold the job rather than putting it back: the queue is FIFO
+                # and requeuing would move it behind work queued later, and a
+                # convert has to stay ahead of the write it queues. A held job
+                # is invisible to update()'s idleness check, which is the safe
+                # direction — it is not running, and a pending restart drops it
+                # exactly like anything else still queued.
+                if self._updating.is_set():
+                    continue
             self._in_flight.set()
             try:
                 self._run_job(job)
@@ -763,6 +778,7 @@ class Service:
                 log.exception("job %r failed", job[0])
                 self.last_error = str(e)
             finally:
+                job = None
                 self._in_flight.clear()
                 self.busy = None
                 self.busy_kind = None
