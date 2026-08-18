@@ -283,8 +283,13 @@ class Service:
         marker that has already passed, and poweroff discards it after the API
         said 201.
 
-        Callers do their slow part outside this block and hold it only for the
-        database change and the enqueue.
+        Callers do their slow part — probing, hashing — outside this block.
+        Ingest is the deliberate exception: it holds the admission across
+        writing the source file too, because the library row, the bytes and the
+        slot assignment have to land as one step or a concurrent forced forget
+        can delete the row in between and leave a slot pointing at nothing. That
+        does mean end_session waits on an fsync, which is the behaviour we want:
+        poweroff should not begin midway through storing a track.
         """
         with self._admit:
             if self.ending:
@@ -308,13 +313,19 @@ class Service:
         # one of them fails safely: a row with no file surfaces as "source file
         # missing" on convert, which is visible and fixable, whereas a file with
         # no row is invisible and the collector eventually takes it.
-        inserted = db.library_add(h, display_name, info.duration)
-        self._place_source(h, tmp_path, stored, inserted)
-
+        # One admission over the whole mutation. Splitting it would leave a
+        # window in which a forced forget deletes the row between library_add
+        # and _assign — the slot would then reference a hash with no library
+        # row, reading as "(missing)", and the next collector pass would take
+        # its source file. Reading the row back inside the block keeps the
+        # returned object consistent with what was just committed.
         with self._admitting():
+            inserted = db.library_add(h, display_name, info.duration)
+            self._place_source(h, tmp_path, stored, inserted)
             self._assign(slot, h)
+            row = db.get_slot(slot)
         self._emit()
-        return db.get_slot(slot)
+        return row
 
     def add_to_library(self, tmp_path: Path, display_name: str) -> Dict:
         """Ingest a file without giving it a slot.
@@ -330,10 +341,15 @@ class Service:
 
         h = media.file_hash(tmp_path)
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
-        inserted = db.library_add(h, display_name, info.duration)
-        self._place_source(h, tmp_path, stored, inserted)
+        # Admitted like every other mutation. Without this, end_session could
+        # begin the halt while the source file was still being written and this
+        # would still report success.
+        with self._admitting():
+            inserted = db.library_add(h, display_name, info.duration)
+            self._place_source(h, tmp_path, stored, inserted)
+            row = db.library_get(h)
         self.library_changed()
-        return db.library_get(h)
+        return row
 
     def assign(self, slot: int, source_hash: str) -> Optional[Dict]:
         """Put a track already in the library into a slot.

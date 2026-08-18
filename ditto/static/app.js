@@ -318,6 +318,10 @@ async function send(files, start){
   if (j.errors && j.errors.length){
     fail(j.errors.map(e=>`${e.name}: ${e.error}`).join("; "));
   }
+  // A slot upload creates a library row too. Without this the new track is
+  // missing from the Library card until the next reconnect — in the common
+  // case the five-minute stream rotation.
+  loadLibrary();
 }
 
 const drop = $("#drop");

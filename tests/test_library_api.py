@@ -474,3 +474,54 @@ def test_a_failed_store_leaves_an_established_row_alone(app, monkeypatch, tmp_pa
     svc.add_to_library(src, "Second upload")
 
     assert db.library_get(H1)["name"] == "Already here"
+
+
+def test_library_ingest_is_refused_once_the_session_is_ending(app, monkeypatch,
+                                                              tmp_path):
+    """Ingest has to be admitted like every other mutation. Without it,
+    end_session could begin the halt while the source file was still being
+    written, and this would still report success."""
+    svc = _service_of(app)
+    src = tmp_path / "upload.mp3"
+    src.write_bytes(b"pretend audio")
+    monkeypatch.setattr(core.media, "probe",
+                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
+    monkeypatch.setattr(core.media, "file_hash", lambda p: H1)
+
+    svc.ending = True
+    try:
+        with pytest.raises(core.ShuttingDown):
+            svc.add_to_library(src, "Too late")
+    finally:
+        svc.ending = False
+
+    assert db.library_get(H1) is None
+
+
+def test_upload_holds_one_admission_over_the_whole_mutation(app, monkeypatch,
+                                                            tmp_path):
+    """The row, the bytes and the slot assignment have to land as one step, or
+    a concurrent forced forget can delete the row in between and leave a slot
+    pointing at a hash with no library entry."""
+    svc = _service_of(app)
+    src = tmp_path / "upload.mp3"
+    src.write_bytes(b"pretend audio")
+    monkeypatch.setattr(core.media, "probe",
+                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
+    monkeypatch.setattr(core.media, "file_hash", lambda p: H1)
+
+    held = []
+    real_place = core.Service._place_source
+
+    def watch(self, h, tmp, stored, inserted):
+        # The admission is an RLock; if it is held, this thread already owns it.
+        held.append(svc._admit._is_owned())
+        return real_place(self, h, tmp, stored, inserted)
+
+    monkeypatch.setattr(core.Service, "_place_source", watch)
+    svc.upload(5, src, "Track")
+
+    assert held == [True], "the source was stored outside the admission"
+    row = db.get_slot(5)
+    assert row["source_hash"] == H1
+    assert db.hash_in_library(H1), "the slot must never outlive its library row"
