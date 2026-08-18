@@ -12,6 +12,7 @@ connection on a path the next test can't reach.
 
 import os
 import queue
+import stat
 import time
 
 import pytest
@@ -57,19 +58,47 @@ def test_store_source_moves_the_file_intact(paths):
 
 
 def test_store_source_survives_an_unfsyncable_directory(paths, monkeypatch):
-    """A filesystem that refuses to fsync a directory must not fail the upload
-    — the rename has already happened by then."""
+    """A filesystem that refuses to fsync a *directory* must not fail the
+    upload: the bytes are already durable by then, and only the name is at
+    stake."""
     tmp = paths / "tmpupload"
     tmp.write_bytes(b"audio bytes")
     stored = config.SOURCES / "abc123.mp3"
 
-    def boom(fd):
-        raise OSError("fsync not supported")
+    real_fsync = os.fsync
 
-    monkeypatch.setattr(os, "fsync", boom)
+    def only_dirs_fail(fd):
+        # Refuse directories, pass regular files through to the real call.
+        # Blanket-failing os.fsync would raise on the file first and never
+        # reach the directory branch this test is named for.
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("fsync not supported on directories")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", only_dirs_fail)
     core.Service._store_source(tmp, stored)
 
     assert stored.read_bytes() == b"audio bytes"
+
+
+def test_store_source_refuses_to_claim_an_unsyncable_file(paths, monkeypatch):
+    """The file's own fsync is the whole guarantee. If it fails, the caller
+    must not go on to record a row pointing at bytes that were never confirmed
+    on the card."""
+    tmp = paths / "tmpupload"
+    tmp.write_bytes(b"audio bytes")
+    stored = config.SOURCES / "abc123.mp3"
+
+    def always_fail(fd):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(os, "fsync", always_fail)
+    with pytest.raises(OSError):
+        core.Service._store_source(tmp, stored)
+
+    # sources/ is content-addressed, so an unconfirmed file left behind would be
+    # adopted by the next upload of the same track instead of being rewritten.
+    assert not stored.exists()
 
 
 # --- the upload-temp sweep --------------------------------------------------

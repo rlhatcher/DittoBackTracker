@@ -38,7 +38,7 @@ will disconnect as the Pi goes down.
 |---|---|
 | The Pi's root filesystem | Read-only, so nothing to corrupt — see [provisioning.md](provisioning.md) |
 | The data partition (`/var/lib/ditto`) | SQLite in WAL mode with `synchronous=FULL`; every file that matters is written to a temp name, fsynced, then renamed |
-| Uploaded audio in `sources/` | fsynced on ingest before the upload is acknowledged |
+| Uploaded audio in `sources/` | fsynced on ingest before the upload is acknowledged. If that fsync fails the upload fails too, rather than reporting success for bytes that were never confirmed on the card |
 | **The pedal's FAT volume** | **The exposed one.** `BT.WAV` is written temp-then-rename with an fsync and the volume is mounted `flush`, so a cut leaves either the old file or the new one — but a cut *during* a write can still leave a `~bt*.tmp` behind (cleaned automatically on the next mount) and FAT has no journal |
 
 So: the failure mode to avoid is unplugging while the UI says it is writing. The

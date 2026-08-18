@@ -702,20 +702,34 @@ class Service:
         and SOURCES is a subdirectory of it, so this is always a same-filesystem
         rename. shutil.move would fall back to a copy across filesystems, and
         that fallback can leave a partial file visible under the final name.
+
+        Raises OSError if the bytes could not be confirmed on the card. The two
+        fsyncs get different policies on purpose: the file's is the guarantee
+        this method exists to make, so failing it has to reach the caller rather
+        than let an upload be acknowledged for bytes that were never written.
         """
         tmp_path.replace(stored)
         try:
             with open(stored, "rb") as f:
                 os.fsync(f.fileno())
+        except OSError:
+            # sources/ is content-addressed, so an unconfirmed file left under
+            # this hash would be adopted by the next upload of the same track —
+            # stored.exists() short-circuits the write. Take it away.
+            stored.unlink(missing_ok=True)
+            raise
+        # The directory fsync only makes the *name* durable, and some
+        # filesystems refuse it outright. The bytes are already safe by here,
+        # and os.sync() on the session-end path covers the name, so a refusal
+        # is not worth failing an upload over.
+        try:
             dfd = os.open(str(stored.parent), os.O_RDONLY)
             try:
                 os.fsync(dfd)
             finally:
                 os.close(dfd)
         except OSError:
-            # The rename already happened; a filesystem that won't fsync a
-            # directory is not a reason to fail the upload.
-            log.warning("could not fsync %s", stored, exc_info=True)
+            log.warning("could not fsync %s", stored.parent, exc_info=True)
 
     def _source_for(self, h: str) -> Optional[Path]:
         for p in config.SOURCES.glob(f"{h}.*"):
