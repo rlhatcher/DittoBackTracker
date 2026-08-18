@@ -613,7 +613,15 @@ function renderLibrary(){
   if (library === null){ host.innerHTML = ""; return; }
 
   const all = library.length;
-  $("#libtools").hidden = all < 2;   // nothing to search or sort through yet
+  const hideTools = all < 2;         // nothing to search or sort through yet
+  // The one place this function writes the search box. The standing rule is
+  // that it never does — that is what stops a snapshot arriving mid-keystroke
+  // from wiping what is being typed — but the field is about to be hidden, so
+  // there is no keystroke in flight to lose. Leaving a stale query applied
+  // would filter the last remaining track out of the list with no visible
+  // control to clear it.
+  if (hideTools) $("#libq").value = "";
+  $("#libtools").hidden = hideTools;
   const rows = libraryView();
 
   // Which slots hold each track, from the snapshot — so these badges follow an

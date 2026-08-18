@@ -420,3 +420,57 @@ def test_forget_reports_the_slots_it_cleared_even_if_the_row_had_gone(client):
     assert rv.status_code == 404
     assert rv.get_json()["cleared"] == [3]
     assert db.get_slot(3) is None, "the slot really was cleared"
+
+
+# --- ingest failure must not leave a row with no audio ----------------------
+
+def _service_of(app):
+    """The Service the app was built around, for tests that drive it directly."""
+    return app.view_functions["state"].__closure__[0].cell_contents
+
+
+def test_a_failed_store_retracts_the_row_it_created(app, monkeypatch, tmp_path):
+    """_store_source raises when it cannot confirm the bytes. Nothing collects
+    a library row, so one left behind would sit in the list forever — failing
+    to audition and reporting "source file missing" on every assignment."""
+    svc = _service_of(app)
+    src = tmp_path / "upload.mp3"
+    src.write_bytes(b"pretend audio")
+
+    monkeypatch.setattr(core.media, "probe",
+                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
+    monkeypatch.setattr(core.media, "file_hash", lambda p: H1)
+    monkeypatch.setattr(core.Service, "_store_source",
+                        staticmethod(lambda t, s: (_ for _ in ()).throw(
+                            OSError("no space left on device"))))
+
+    with pytest.raises(OSError):
+        svc.add_to_library(src, "Doomed")
+
+    assert db.library_get(H1) is None, "a row with no audio behind it"
+    assert client_library_empty(app)
+
+
+def client_library_empty(app):
+    return app.test_client().get("/api/library").get_json() == []
+
+
+def test_a_failed_store_leaves_an_established_row_alone(app, monkeypatch, tmp_path):
+    """library_add is DO NOTHING on conflict, so re-uploading a track already in
+    the library must not let a failure here delete the established row — whose
+    file is still good, and is exactly why the write was skipped."""
+    svc = _service_of(app)
+    seed(H1, "Already here")
+    src = tmp_path / "upload.mp3"
+    src.write_bytes(b"pretend audio")
+
+    monkeypatch.setattr(core.media, "probe",
+                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
+    monkeypatch.setattr(core.media, "file_hash", lambda p: H1)
+    boom = staticmethod(lambda t, s: (_ for _ in ()).throw(OSError("nope")))
+    monkeypatch.setattr(core.Service, "_store_source", boom)
+
+    # The stored file already exists, so this returns without calling through.
+    svc.add_to_library(src, "Second upload")
+
+    assert db.library_get(H1)["name"] == "Already here"

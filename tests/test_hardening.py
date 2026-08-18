@@ -308,9 +308,17 @@ def test_gc_keeps_a_staged_file_cached_under_a_different_format(service):
     old = time.time() - config.GC_GRACE_SECS - 60
     os.utime(other, (old, old))
     assert service.fmt == dict(config.DEFAULT_FORMAT), "precondition: unprobed"
+    # A file the same pass must delete. _gc catches and logs its own exceptions,
+    # so without a positive control it could bail before the staged-file loop
+    # and this test would pass on a collector that never ran.
+    canary = config.STAGED / "99999999999999999999-pcm_s24le-44100-1.wav"
+    canary.write_bytes(b"no slot wants this")
+    old = time.time() - config.GC_GRACE_SECS - 60
+    os.utime(canary, (old, old))
 
     service._gc()
 
+    assert not canary.exists(), "the staged-file loop did not run"
     assert other.exists(), "a staged file for an assigned slot was collected"
 
 

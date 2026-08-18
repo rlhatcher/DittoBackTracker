@@ -308,11 +308,8 @@ class Service:
         # one of them fails safely: a row with no file surfaces as "source file
         # missing" on convert, which is visible and fixable, whereas a file with
         # no row is invisible and the collector eventually takes it.
-        db.library_add(h, display_name, info.duration)
-        if not stored.exists():
-            self._store_source(tmp_path, stored)
-        else:
-            tmp_path.unlink(missing_ok=True)
+        inserted = db.library_add(h, display_name, info.duration)
+        self._place_source(h, tmp_path, stored, inserted)
 
         with self._admitting():
             self._assign(slot, h)
@@ -333,11 +330,8 @@ class Service:
 
         h = media.file_hash(tmp_path)
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
-        db.library_add(h, display_name, info.duration)
-        if not stored.exists():
-            self._store_source(tmp_path, stored)
-        else:
-            tmp_path.unlink(missing_ok=True)
+        inserted = db.library_add(h, display_name, info.duration)
+        self._place_source(h, tmp_path, stored, inserted)
         self.library_changed()
         return db.library_get(h)
 
@@ -806,6 +800,33 @@ class Service:
             log.exception("unmount during shutdown failed")
 
     # -------------------------------------------------------------- internals
+
+    def _place_source(self, h: str, tmp_path: Path, stored: Path,
+                      inserted: bool) -> None:
+        """Get the bytes into sources/, retracting the row if they don't land.
+
+        The row is written before the bytes on purpose — a row with no file is
+        visible and fixable, a file with no row is invisible and gets collected.
+        But that only holds while the missing file is temporary. _store_source
+        now raises when it cannot confirm the bytes, and nothing collects a
+        library row: it would sit in the list forever, failing to audition and
+        reporting "source file missing" on every assignment. So a storage
+        failure takes the row with it.
+
+        Only when this call created it. library_add is DO NOTHING on conflict,
+        so re-uploading a track that is already in the library must not let a
+        failure here delete the established row — and its file, which is still
+        perfectly good, is exactly why the write was skipped.
+        """
+        if stored.exists():
+            tmp_path.unlink(missing_ok=True)
+            return
+        try:
+            self._store_source(tmp_path, stored)
+        except Exception:
+            if inserted:
+                db.library_delete(h)
+            raise
 
     @staticmethod
     def _store_source(tmp_path: Path, stored: Path) -> None:

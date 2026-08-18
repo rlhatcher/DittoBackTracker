@@ -406,16 +406,23 @@ def prune_trash(max_age_days: int) -> int:
 
 # ---------------------------------------------------------------- library
 
-def library_add(source_hash: str, name: str, duration: float) -> None:
+def library_add(source_hash: str, name: str, duration: float) -> bool:
     """Record an uploaded track. DO NOTHING on conflict, never an upsert:
-    uploading the same file again must not undo a rename."""
-    conn().execute(
+    uploading the same file again must not undo a rename.
+
+    Returns True if this call inserted the row. The caller needs that to know
+    whether a later failure is its own row to retract or somebody else's to
+    leave alone.
+    """
+    c = conn()
+    cur = c.execute(
         """INSERT INTO library (source_hash, name, duration, added)
            VALUES (?,?,?,?)
            ON CONFLICT(source_hash) DO NOTHING""",
         (source_hash, name, duration, time.time()),
     )
-    conn().commit()
+    c.commit()
+    return cur.rowcount > 0
 
 
 def library_all() -> List[Dict]:
