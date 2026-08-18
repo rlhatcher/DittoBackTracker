@@ -9,12 +9,16 @@ neither carries a copy of its name or duration, so a rename has one home.
 
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
 import threading
 import time
 from typing import Dict, List, Optional
 
 from . import config
+
+log = logging.getLogger(__name__)
 
 _local = threading.local()
 # Serializes connection setup across threads. `PRAGMA journal_mode=WAL` takes an
@@ -130,10 +134,20 @@ def _backup_v1(c: sqlite3.Connection) -> None:
     wanted anyway.
     """
     dest = str(config.DB_PATH) + ".v1"
+    if os.path.exists(dest):
+        return                      # a previous run (or the racing thread) made it
     try:
         c.execute("VACUUM INTO ?", (dest,))
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        # Losing the race to another thread is the expected case and benign.
+        # A full disk or an unwritable directory is not: the migration still
+        # goes ahead, and the rollback path documented against it — restoring
+        # state.db.v1 over state.db — will not be there. Say so, or the absence
+        # is only discovered when it is needed.
+        if not os.path.exists(dest):
+            log.warning("could not write the pre-migration backup %s: %s. The "
+                        "v1 -> v2 migration will still run, but restoring the "
+                        "old schema will not be possible.", dest, e)
 
 
 def _init(c: sqlite3.Connection) -> None:

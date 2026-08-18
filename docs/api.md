@@ -398,7 +398,7 @@ curl -N http://dittobacktracker.local/api/events
 |---|---|---|
 | `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `PATCH /api/library/<hash>` | Bad input: slot out of range, non-audio file, a file ffprobe can't read, or an empty/overlong name. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
-| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>` | No such trash entry, or the slot has no loop |
+| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign` | No such trash entry; the slot has no loop; or no such track in the library — which is also what a malformed hash returns, since it cannot name one |
 | `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |

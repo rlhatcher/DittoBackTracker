@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from ditto import config, core
+from ditto import config, core, db
 
 
 @pytest.fixture
@@ -291,3 +291,40 @@ def test_store_source_syncs_before_it_publishes_the_name(paths, monkeypatch):
     assert "fsync-file" in events and "rename" in events
     assert events.index("fsync-file") < events.index("rename"), \
         f"the name was published before the bytes were confirmed: {events}"
+
+
+def test_gc_keeps_a_staged_file_cached_under_a_different_format(service):
+    """The startup collector runs before any pedal has been probed, so self.fmt
+    is still the default. Matching whole staged filenames — which carry a format
+    tag — would delete every WAV cached under the pedal's real format on every
+    boot, costing a full re-transcode of every assigned slot.
+    """
+    h = "0123456789abcdef0123"
+    db.library_add(h, "Assigned", 120.0)
+    db.put_slot(1, h, state="synced")
+    # Cached under a format the pedal probed last session, not today's default.
+    other = config.STAGED / f"{h}-pcm_s16le-48000-2.wav"
+    other.write_bytes(b"a cached transcode")
+    old = time.time() - config.GC_GRACE_SECS - 60
+    os.utime(other, (old, old))
+    assert service.fmt == dict(config.DEFAULT_FORMAT), "precondition: unprobed"
+
+    service._gc()
+
+    assert other.exists(), "a staged file for an assigned slot was collected"
+
+
+def test_gc_still_drops_staged_files_for_unassigned_tracks(service):
+    """The reason the predicate is per-slot and not per-library-track: mono
+    24-bit at 44.1 kHz is 132 kB/s, so caching one per library track would be
+    gigabytes behind a few hundred MB of music."""
+    h = "fedcba98765432100000"
+    db.library_add(h, "In the library, not on the pedal", 120.0)
+    stale = config.STAGED / f"{h}-pcm_s24le-44100-1.wav"
+    stale.write_bytes(b"cache for a track no slot wants")
+    old = time.time() - config.GC_GRACE_SECS - 60
+    os.utime(stale, (old, old))
+
+    service._gc()
+
+    assert not stale.exists()

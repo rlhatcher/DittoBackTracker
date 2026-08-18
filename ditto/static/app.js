@@ -554,11 +554,20 @@ player.addEventListener("error", () => {
   }
 });
 
+// Fetches can finish out of order — a delete and the refresh behind it, say —
+// and the loser would otherwise overwrite newer data with an older list, putting
+// a deleted or pre-rename row back on screen. Stamp each request and ignore any
+// response that is not the newest one still outstanding.
+let libSeq = 0;
+
 async function loadLibrary(){
+  const mine = ++libSeq;
   try {
     const r = await fetch("/api/library");
     if (!r.ok) return;
-    library = await r.json();
+    const rows = await r.json();
+    if (mine !== libSeq) return;      // a newer request has already answered
+    library = rows;
   } catch {
     return;             // a snapshot or a later refetch will put it right
   }
@@ -781,6 +790,8 @@ async function assignToSlot(r, slot){
     return;
   }
   selected = null;      // consumed; the next click picks its own target
+  loadLibrary();        // the slot badges come from the snapshot, but `added`
+                        // ordering and any server-side change do not
 }
 
 async function forget(r, force){

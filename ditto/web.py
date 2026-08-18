@@ -62,6 +62,21 @@ def slot_from_name(name: str) -> int | None:
     return n if 1 <= n <= config.SLOTS else None
 
 
+def _json_str(body, field: str):
+    """The named field from a JSON object, or None if the request didn't supply
+    a usable one.
+
+    A client can send any JSON at all — a bare array, or the right key with the
+    wrong type. Without this, `{"name": 42}` reaches .strip() and `{"hash": 42}`
+    reaches the hash regex, and both surface as a 500 rather than the 400 or 404
+    the caller deserves.
+    """
+    if not isinstance(body, dict):
+        return None
+    value = body.get(field)
+    return value if isinstance(value, str) else None
+
+
 def create_app(service: Service) -> Flask:
     app = Flask(__name__, static_folder=None)
     # Shared request-size cap for both upload endpoints; Flask returns 413 when
@@ -375,8 +390,7 @@ def create_app(service: Service) -> Flask:
     def library_rename(h: str):
         if not HASH_RE.match(h):
             return jsonify(error="not found"), 404
-        body = request.get_json(silent=True) or {}
-        name = (body.get("name") or "").strip()
+        name = (_json_str(request.get_json(silent=True), "name") or "").strip()
         if not name:
             return jsonify(error="name must not be empty"), 400
         if len(name) > MAX_NAME_LEN:
@@ -397,11 +411,14 @@ def create_app(service: Service) -> Flask:
         if not HASH_RE.match(h):
             return jsonify(error="not found"), 404
         force = request.args.get("force") is not None
-        done, slots = service.forget(h, force=force)
-        if not done and slots:
+        outcome, slots = service.forget(h, force=force)
+        if outcome == "in_use":
             return jsonify(error="in use", slots=slots), 409
-        if not done:
-            return jsonify(error="not found"), 404
+        if outcome == "missing":
+            # The row had already gone, but any slots pointing at it were still
+            # cleared — report them, or the caller cannot tell that the pedal
+            # assignments changed underneath it.
+            return jsonify(error="not found", cleared=slots), 404
         return jsonify(ok=True, cleared=slots)
 
     @app.get("/api/library/<h>/audio")
@@ -433,8 +450,7 @@ def create_app(service: Service) -> Flask:
     @app.post("/api/slots/<int:slot>/assign")
     def assign(slot: int):
         """Put a library track into a slot without uploading it again."""
-        body = request.get_json(silent=True) or {}
-        h = body.get("hash") or ""
+        h = _json_str(request.get_json(silent=True), "hash") or ""
         if not HASH_RE.match(h):
             return jsonify(error="not found"), 404
         try:

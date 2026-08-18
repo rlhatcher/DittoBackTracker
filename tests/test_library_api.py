@@ -372,3 +372,51 @@ def test_renaming_still_works_while_ending(client, service):
 
     assert rv.status_code == 200
     assert db.library_get(H1)["name"] == "After"
+
+
+# --- malformed JSON bodies --------------------------------------------------
+
+@pytest.mark.parametrize("body", [
+    {"name": 42},          # right key, wrong type — used to reach .strip()
+    {"name": None},
+    {"name": ["a"]},
+    [1, 2, 3],             # not an object at all
+    "just a string",
+])
+def test_rename_rejects_a_body_it_cannot_use(client, body):
+    """A client can send any JSON. None of it should reach .strip() and come
+    back as a 500."""
+    seed(H1, "Before")
+    rv = client.patch(f"/api/library/{H1}", json=body)
+    assert rv.status_code == 400
+    assert db.library_get(H1)["name"] == "Before"
+
+
+@pytest.mark.parametrize("body", [
+    {"hash": 42},          # used to reach the hash regex and raise
+    {"hash": None},
+    {"hash": []},
+    [1, 2, 3],
+    "just a string",
+])
+def test_assign_rejects_a_body_it_cannot_use(client, body):
+    seed(H1)
+    rv = client.post("/api/slots/7/assign", json=body)
+    assert rv.status_code == 404
+    assert db.get_slot(7) is None
+
+
+def test_forget_reports_the_slots_it_cleared_even_if_the_row_had_gone(client):
+    """The slots really were cleared. Pairing a failure with an empty list would
+    read as "nothing happened"."""
+    seed(H1)
+    db.put_slot(3, H1, state="synced")
+    # Delete the row underneath, leaving the slot pointing at nothing — the
+    # shape a concurrent delete produces.
+    db.library_delete(H1)
+
+    rv = client.delete(f"/api/library/{H1}?force")
+
+    assert rv.status_code == 404
+    assert rv.get_json()["cleared"] == [3]
+    assert db.get_slot(3) is None, "the slot really was cleared"

@@ -350,9 +350,17 @@ class Service:
         """
         self._check_accepting()
         self._check_slot(slot)
-        if not db.hash_in_library(source_hash):
-            return None
-        self._assign(slot, source_hash)
+        # Inside the admission, not before it. forget() holds the same lock
+        # across reading the slot list, clearing those slots and deleting the
+        # row — so a membership test outside it can pass, then have the track
+        # deleted before the assignment lands. forget has already read its slot
+        # list by then, so it would never clear the new slot, and the collector
+        # would take the source out from under it: a slot reading "(missing)"
+        # with no audio behind it. restore() already checks under the lock.
+        with self._admitting():
+            if not db.hash_in_library(source_hash):
+                return None
+            self._assign(slot, source_hash)
         self._emit()
         return db.get_slot(slot)
 
@@ -479,9 +487,18 @@ class Service:
         self.library_changed()
         return db.library_get(source_hash)
 
-    def forget(self, source_hash: str, force: bool = False) -> "tuple[bool, List[int]]":
+    def forget(self, source_hash: str,
+               force: bool = False) -> "tuple[str, List[int]]":
         """Delete a track from the library, and with it the only copy of its
-        audio. Returns (done, slots_that_hold_it).
+        audio.
+
+        Returns (outcome, slots). Three outcomes, because "it didn't get
+        deleted" and "nothing happened" are not the same thing and the caller
+        has to tell them apart:
+
+          "in_use"  — refused, nothing changed; `slots` hold the track
+          "deleted" — gone; `slots` are the ones cleared on the way
+          "missing" — no such row, but `slots` were still cleared
 
         The one operation that can pull a file out from under a slot, so it
         refuses while any slot references the track unless the caller has
@@ -491,15 +508,16 @@ class Service:
         with self._admitting():
             slots = db.slots_for_hash(source_hash)
             if slots and not force:
-                return (False, slots)
+                return ("in_use", slots)
             # One admission covering the whole group, so a shutdown can't land
             # between clearing some slots and deleting the row.
             for n in slots:
                 self.clear(n)
-            if not db.library_delete(source_hash):
-                return (False, [])
+            deleted = db.library_delete(source_hash)
+        # Either branch may have cleared slots, so both report them and both
+        # emit. Only the refusal above leaves the device untouched.
         self.library_changed()
-        return (True, slots)
+        return ("deleted" if deleted else "missing", slots)
 
     def library_changed(self) -> None:
         """Single funnel for library mutations.
@@ -1224,10 +1242,18 @@ class Service:
             # plug — nothing ever references them, at any age.
             for f in config.STAGED.glob("*.wav.part"):
                 f.unlink(missing_ok=True)
-            wanted = {media.staged_path(r["source_hash"], self.fmt).name
-                      for r in db.all_slots()}
+            # Keyed on the hash, not the full staged filename. The filename
+            # carries a format tag, and self.fmt is still the default until the
+            # monitor has mounted a pedal and probed it — but the startup
+            # collector runs before that. Matching whole names would therefore
+            # delete every WAV cached under the real format on every boot, and
+            # cost a full re-transcode of all assigned slots. Bounded by the
+            # slot count either way, so the format tag is left to decide which
+            # staged file _do_write uses, not which ones survive.
+            assigned = {r["source_hash"] for r in db.all_slots()}
             for f in config.STAGED.glob("*.wav"):
-                if f.name not in wanted and self._older_than(f, cutoff):
+                h = f.name.split("-", 1)[0]
+                if h not in assigned and self._older_than(f, cutoff):
                     f.unlink(missing_ok=True)
             for f in config.SOURCES.iterdir():
                 if (f.is_file() and not db.hash_in_library(f.stem)
