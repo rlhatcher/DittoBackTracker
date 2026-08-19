@@ -4,6 +4,13 @@ Everything the web UI does goes through this. There is no authentication.
 
 Base URL is the device, e.g. `http://dittobacktracker.local/`.
 
+Two things live here, and it's worth keeping them apart. The **library** is
+every track on the device — it survives slots being cleared, and only an
+explicit delete removes one. **Slots** are what the pedal is carrying right now:
+99 assignments pointing at library tracks. A slot's `display_name` and
+`duration` are read from its library track, so renaming once changes it
+everywhere.
+
 ---
 
 ## GET /api/state
@@ -201,14 +208,120 @@ The 50 most recent deletions, newest first.
     "duration": 311.0, "deleted": 1786070717.31 } ]
 ```
 
-Entries are kept 30 days.
+Entries are kept 30 days. Expiry only retires the undo — the track itself
+stays in the library, and its audio with it.
 
 ---
 
 ## POST /api/trash/&lt;id&gt;/restore
 
 Put a deleted entry back in its original slot, reconverting if needed. Returns
-`{"slot": n}`, or `404` if the entry has gone.
+`{"slot": n}`, or `404` if the entry has gone — or if its track has since been
+deleted from the library, leaving nothing to restore.
+
+---
+
+## GET /api/library
+
+Every track on the device, newest first.
+
+```json
+[ { "source_hash": "b9ecf8c94d007de0a5ae", "name": "Blue Bossa",
+    "duration": 311.0, "added": 1786070717.31 } ]
+```
+
+The whole list, unpaginated: a few hundred rows is a small response, and
+searching and sorting are the client's business. Deliberately **not** part of
+the state snapshot, which is pushed over `/api/events` several times a second
+during a conversion and has to stay small. Clients should re-read this endpoint
+when the event stream (re)connects, which happens on load and on each five-minute
+stream rotation.
+
+---
+
+## POST /api/library
+
+Add files to the library without assigning slots. Multipart, one or more `file`
+parts.
+
+`201` with per-file results, in the same shape as `POST /api/upload` — and with
+the same caveat: it is a batch, so it returns `201` even when every file was
+rejected. Check `errors`; don't read `201` as "everything landed". A `400` means
+the whole request was unusable (no `file` part at all).
+
+```json
+{
+  "added": [ { "source_hash": "b9ec…", "name": "track", "duration": 311.0,
+               "added": 1786070717.31 } ],
+  "errors": [ { "name": "notes.txt", "error": "not an audio file" } ]
+}
+```
+---
+
+## PATCH /api/library/&lt;hash&gt;
+
+Rename a track. Body `{"name": "..."}`; 1–200 characters after trimming.
+
+Returns the updated row. `400` for an empty or overlong name, `404` if the
+track is unknown. The new name appears in the slot list, the grid tooltips and
+the print view immediately — there is only one copy of it.
+
+---
+
+## DELETE /api/library/&lt;hash&gt;
+
+Forget a track, and with it the only copy of its audio. The file itself goes on
+the next collector pass.
+
+Refuses with `409` while any slot still holds the track, naming them, so a
+client can ask before destroying something the pedal is using:
+
+```json
+{ "error": "in use", "slots": [3, 7] }
+```
+
+Add `?force` to clear those slots first. On success:
+
+```json
+{ "ok": true, "cleared": [3, 7] }
+```
+
+A `404` means there was no such track — but it can still have changed the
+device, so it carries `cleared` too. That happens when the library row had
+already gone (a concurrent delete, say) while slots still pointed at it: those
+slots are cleared regardless, and reporting an empty result would hide it.
+
+```json
+{ "error": "not found", "cleared": [3] }
+```
+
+---
+
+## POST /api/slots/&lt;n&gt;/assign
+
+Put a track that is already in the library into slot `n`, without uploading it
+again. Body `{"hash": "..."}`. Whatever was in the slot moves to the trash.
+
+`201` with the slot object. `404` if the track isn't in the library, `400` if
+the slot is out of range.
+
+The pedal holds about a dozen tracks and the library holds as many as the card
+does, so this — not another upload — is how you change what the pedal carries.
+
+---
+
+## GET /api/library/&lt;hash&gt;/audio
+
+Stream a track's original file, so a browser can audition it before committing
+a slot to it. Supports `Range`, so `<audio>` can seek; expect `206` for a range
+request and `416` for an unsatisfiable one.
+
+The URL is content-addressed, so the response is cacheable indefinitely. Nothing
+on the device plays audio — this is bytes to the browser.
+
+Note that `.ogg`, `.opus`, `.wma` and (in older browsers) `.flac` are accepted
+for upload but not playable everywhere, Safari especially. That is a browser
+limitation; the file still converts and writes normally.
 
 ---
 
@@ -296,19 +409,22 @@ curl -N http://dittobacktracker.local/api/events
 
 | Status | Where | Meaning |
 |---|---|---|
-| `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `DELETE /api/slots/<n>`, `POST /api/upload` | Bad input: slot out of range, non-audio file, or a file ffprobe can't read. Body is `{"error": "..."}` |
+| `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `PATCH /api/library/<hash>` | Bad input: slot out of range, non-audio file, a file ffprobe can't read, or an empty/overlong name. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
-| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>` | No such trash entry, or the slot has no loop |
+| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign` | No such trash entry; the slot has no loop; or no such track in the library — which is also what a malformed hash returns, since it cannot name one |
 | `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
+| `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
+| `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
 | `500` | `GET /api/loops/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error). Body is `{"error": "..."}` |
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
 | `503` | `GET /api/loops/<n>`, `POST /api/update` | No pedal mounted / loop staging timed out; or, for update, the device is shutting down. Body is `{"error": "..."}` |
 
-`POST /api/upload` is the exception to the rule. It is a batch, so it returns
-`201` even when some files were rejected, and reports those per file in
-`errors` — a `400` from it means the whole request was unusable (no `file`
-part at all, or a `start` outside 1–`slot_count`). Check `errors` on a `201`;
-don't treat `201` as "everything landed".
+`POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both
+are batches, so they return `201` even when some — or all — files were rejected,
+and report those per file in `errors`. A `400` from either means the whole
+request was unusable (no `file` part at all, or a `start` outside
+1–`slot_count`). Check `errors` on a `201`; don't treat `201` as "everything
+landed".
 
 Anything else is a bug.

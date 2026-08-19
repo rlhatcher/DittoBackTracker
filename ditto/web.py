@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from flask import (Flask, Response, jsonify, request,
+from flask import (Flask, Response, abort, jsonify, request, send_file,
                    send_from_directory, stream_with_context)
 
 from . import config, db, pedal
@@ -19,6 +19,33 @@ from .core import Service, ShuttingDown
 
 STATIC = Path(__file__).parent / "static"
 LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
+
+# media.file_hash is sha256().hexdigest()[:20] — exactly 20 lowercase hex chars.
+# This has to be a whitelist match rather than a resolve()-and-contain check,
+# because _source_for *globs* sources/{h}.*: a `*`, `?` or `[` in the hash would
+# make the glob match some other library file entirely, which no amount of path
+# containment checking would catch.
+HASH_RE = re.compile(r"\A[0-9a-f]{20}\Z")
+
+# Content types for auditioning an original upload. Keep in step with
+# config.AUDIO_SUFFIXES — the assertion below fails the import, not a request,
+# if the two ever drift.
+AUDIO_MIME = {
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+    ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
+    ".aif": "audio/aiff", ".aiff": "audio/aiff", ".wma": "audio/x-ms-wma",
+    # Opus here is always in an Ogg container. "audio/opus" names the codec,
+    # not a container, and browsers sniff audio/ogg more reliably.
+    ".opus": "audio/ogg",
+}
+assert set(AUDIO_MIME) == config.AUDIO_SUFFIXES, \
+    "AUDIO_MIME and config.AUDIO_SUFFIXES have drifted apart"
+
+MAX_NAME_LEN = 200
+
+# Servable front-end assets, by exact name. No charset here — Werkzeug appends
+# one for text/* and would otherwise emit it twice.
+ASSETS = {"app.js": "text/javascript", "app.css": "text/css"}
 
 # Each open stream holds a server thread for its whole life, and there are only
 # a handful. Retiring a stream periodically lets EventSource reconnect (it does
@@ -33,6 +60,21 @@ def slot_from_name(name: str) -> int | None:
         return None
     n = int(m.group(1))
     return n if 1 <= n <= config.SLOTS else None
+
+
+def _json_str(body, field: str):
+    """The named field from a JSON object, or None if the request didn't supply
+    a usable one.
+
+    A client can send any JSON at all — a bare array, or the right key with the
+    wrong type. Without this, `{"name": 42}` reaches .strip() and `{"hash": 42}`
+    reaches the hash regex, and both surface as a 500 rather than the 400 or 404
+    the caller deserves.
+    """
+    if not isinstance(body, dict):
+        return None
+    value = body.get(field)
+    return value if isinstance(value, str) else None
 
 
 def create_app(service: Service) -> Flask:
@@ -63,9 +105,31 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="cross-site request rejected"), 403
         return None
 
+    def _no_cache(resp):
+        """"Revalidate every time", not "don't cache".
+
+        send_from_directory sets a strong ETag, so an unchanged asset still
+        costs one conditional request and a 304 with no body — nothing on a LAN.
+        What it buys is that an over-the-air update can never leave a browser
+        running yesterday's app.js against today's API. max-age/immutable would
+        need content-hashed filenames, which would need a build step.
+        """
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
     @app.get("/")
     def index():
-        return send_from_directory(STATIC, "index.html")
+        return _no_cache(send_from_directory(STATIC, "index.html"))
+
+    @app.get("/static/<name>")
+    def asset(name: str):
+        """An allowlist rather than a directory route: static_folder=None keeps
+        Flask from adding its own /static rule, and naming the files means a
+        stray file in the directory is never reachable."""
+        mime = ASSETS.get(name)
+        if mime is None:
+            abort(404)
+        return _no_cache(send_from_directory(STATIC, name, mimetype=mime))
 
     @app.get("/api/state")
     def state():
@@ -282,6 +346,122 @@ def create_app(service: Service) -> Flask:
         if not ok:
             return jsonify(error="no loop in that slot"), 404
         return jsonify(ok=True)
+
+    # ------------------------------------------------------------- library
+
+    @app.get("/api/library")
+    def library():
+        """Every track on the device, newest first. Searching and sorting happen
+        in the browser: a few hundred rows is a small response, and the snapshot
+        that rides the SSE stream must not grow to carry this."""
+        return jsonify(db.library_all())
+
+    @app.post("/api/library")
+    def library_add():
+        """Ingest files without assigning slots. The pedal holds about twelve
+        tracks; the library holds as many as the card does."""
+        files = request.files.getlist("file")
+        if not files:
+            return jsonify(error="no files"), 400
+        added, errors = [], []
+        for f in files:
+            name = f.filename or "track"
+            suffix = Path(name).suffix.lower()
+            if suffix not in config.AUDIO_SUFFIXES:
+                errors.append({"name": name, "error": "not an audio file"})
+                continue
+            fd, tmp = tempfile.mkstemp(dir=str(config.DATA), suffix=suffix)
+            os.close(fd)
+            tmp_path = Path(tmp)
+            try:
+                f.save(str(tmp_path))
+                # On success the service owns tmp_path — it is moved into
+                # sources/ or unlinked there, so we must not touch it again.
+                added.append(service.add_to_library(tmp_path, Path(name).stem))
+            except ValueError as e:
+                tmp_path.unlink(missing_ok=True)
+                errors.append({"name": name, "error": str(e)})
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        return jsonify(added=added, errors=errors), 201
+
+    @app.patch("/api/library/<h>")
+    def library_rename(h: str):
+        if not HASH_RE.match(h):
+            return jsonify(error="not found"), 404
+        name = (_json_str(request.get_json(silent=True), "name") or "").strip()
+        if not name:
+            return jsonify(error="name must not be empty"), 400
+        if len(name) > MAX_NAME_LEN:
+            return jsonify(error=f"name must be {MAX_NAME_LEN} characters or "
+                                 f"fewer"), 400
+        row = service.rename(h, name)
+        if row is None:
+            return jsonify(error="not found"), 404
+        return jsonify(row)
+
+    @app.delete("/api/library/<h>")
+    def library_forget(h: str):
+        """Delete a track and, with it, the only copy of its audio.
+
+        Refuses while a slot still holds it, naming the slots, unless the caller
+        confirms with ?force — in which case those slots are cleared first.
+        """
+        if not HASH_RE.match(h):
+            return jsonify(error="not found"), 404
+        force = request.args.get("force") is not None
+        outcome, slots = service.forget(h, force=force)
+        if outcome == "in_use":
+            return jsonify(error="in use", slots=slots), 409
+        if outcome == "missing":
+            # The row had already gone, but any slots pointing at it were still
+            # cleared — report them, or the caller cannot tell that the pedal
+            # assignments changed underneath it.
+            return jsonify(error="not found", cleared=slots), 404
+        return jsonify(ok=True, cleared=slots)
+
+    @app.get("/api/library/<h>/audio")
+    def library_audio(h: str):
+        """Stream an original upload so the browser can audition it.
+
+        Range-capable, so an <audio> element can seek; send_file with
+        conditional=True is what implements Range/If-Range/206/416, and unlike
+        the loop endpoint there is nothing transient to purge afterwards, so
+        there is no reason to hand-roll the streaming.
+
+        Nothing on this device plays audio. This is bytes to the browser.
+        """
+        if not HASH_RE.match(h) or not db.hash_in_library(h):
+            abort(404)
+        path = service._source_for(h)
+        # The library row is the gate: bytes can outlive a delete by up to one
+        # collector pass, and shouldn't stay reachable in the meantime.
+        if path is None or path.parent != config.SOURCES:
+            abort(404)
+        resp = send_file(path, conditional=True, as_attachment=False,
+                         mimetype=AUDIO_MIME.get(path.suffix.lower(),
+                                                 "application/octet-stream"))
+        # sources/ is content-addressed, so the bytes behind this URL can never
+        # change. Caching them makes seeking free after the first pass.
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+    @app.post("/api/slots/<int:slot>/assign")
+    def assign(slot: int):
+        """Put a library track into a slot without uploading it again."""
+        h = _json_str(request.get_json(silent=True), "hash") or ""
+        if not HASH_RE.match(h):
+            return jsonify(error="not found"), 404
+        try:
+            row = service.assign(slot, h)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if row is None:
+            return jsonify(error="not found"), 404
+        return jsonify(row), 201
+
+    # ---------------------------------------------------------------- slots
 
     @app.post("/api/slots/<int:slot>/move")
     def move(slot: int):

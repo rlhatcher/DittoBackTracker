@@ -1,0 +1,170 @@
+:root{
+  --bg:#f6f5f2; --card:#fff; --line:#e2e0da; --tx:#1b1b19; --tx2:#6b6a65;
+  --ok:#1d9e75; --warn:#ba7517; --err:#c0392b; --accent:#185fa5;
+  /* Loops are the user's own recordings: a distinct hue from the backing-track
+     states (green/amber/red) so a loop reads as "yours", not a BT status. */
+  --loop:#7a4fc0;
+}
+@media (prefers-color-scheme:dark){
+  /* Lighten the semantic colours too: the light-mode --err and --accent fall
+     below WCAG contrast against the dark --card, so error text and the focus
+     ring would be hard to read. */
+  :root{--bg:#161614;--card:#1f1f1d;--line:#33322e;--tx:#eceae4;--tx2:#9b9a94;
+    --ok:#3fc79b;--warn:#e0a34a;--err:#f0736a;--accent:#6ba7e8;--loop:#b18cf0;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;padding-bottom:80px}
+.wrap{max-width:640px;margin:0 auto;padding:16px}
+header{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 16px;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;margin-bottom:12px}
+h1{font-size:16px;font-weight:600;margin:0}
+.meta{font-size:13px;color:var(--tx2);display:flex;gap:14px;align-items:center}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:14px 16px;margin-bottom:12px}
+.capbar{height:10px;border-radius:5px;background:var(--line);overflow:hidden;margin:8px 0 6px}
+.capfill{height:100%;background:var(--ok);transition:width .3s}
+.capfill.warn{background:var(--warn)} .capfill.err{background:var(--err)}
+.row{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--tx2)}
+#grid{display:grid;grid-template-columns:repeat(20,1fr);gap:3px;margin-top:4px}
+.cell{position:relative;aspect-ratio:1;border-radius:2px;background:transparent;
+  padding:0;font:inherit;-webkit-appearance:none;appearance:none;
+  border:1px solid var(--line);cursor:pointer}
+.cell.synced{background:var(--ok);border-color:transparent}
+.cell.staged,.cell.converting{background:var(--warn);border-color:transparent}
+.cell.error{background:var(--err);border-color:transparent}
+/* A loop lives on the slot independently of the backing-track state, so it is
+   an overlay dot in the loop hue, not another background colour. */
+.cell.has-loop::after{content:"";position:absolute;top:1px;right:1px;
+  width:4px;height:4px;border-radius:50%;background:var(--loop);
+  box-shadow:0 0 0 1px var(--card)}
+.cell.sel{outline:2px solid var(--accent);outline-offset:1px}
+.cell.over{outline:2px solid var(--accent);outline-offset:2px;transform:scale(1.35)}
+.cell.dragging{opacity:.35}
+.cell{transition:transform .1s}
+.cell[draggable=true]{cursor:grab}
+.track{display:flex;align-items:center;gap:10px;padding:10px 0;
+  border-bottom:1px solid var(--line)}
+.track:last-child{border-bottom:0}
+.num{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--tx2);width:22px;flex:none}
+.nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dur{font-size:12px;color:var(--tx2);flex:none}
+.st{font-size:12px;flex:none;min-width:74px;text-align:right}
+.st.synced{color:var(--ok)} .st.staged,.st.converting{color:var(--warn)}
+.st.error{color:var(--err)}
+.x{border:0;background:none;color:var(--tx2);cursor:pointer;font-size:17px;
+  line-height:1;padding:2px 4px;flex:none}
+.x:hover{color:var(--err)}
+/* Loop controls sit on their own indented line under the track row, so a
+   narrow phone never has to squeeze them next to the name and state. */
+.looprow{display:flex;flex-wrap:wrap;gap:8px;padding:0 0 10px 32px;margin-top:-2px}
+.loopbtn{background:none;border:1px solid var(--line);color:var(--tx);
+  border-radius:6px;padding:4px 9px;font-size:12px;line-height:1.4;cursor:pointer;
+  text-decoration:none;display:inline-block}
+.loopbtn:hover{border-color:var(--accent)}
+.loopbtn.danger:hover{border-color:var(--err);color:var(--err)}
+.nm.loop-only{color:var(--tx2);font-style:italic}
+.st.loop{color:var(--loop)}
+#drop{display:block;border:1.5px dashed var(--line);border-radius:12px;
+  padding:26px 16px;
+  text-align:center;color:var(--tx2);font-size:14px;cursor:pointer;
+  background:var(--card);transition:border-color .15s,background .15s,color .15s}
+/* The input itself is off screen, so its focus ring has to land on the label. */
+.wrap:has(#file:focus-visible) #drop{outline:2px solid var(--accent);
+  outline-offset:2px}
+/* Same for the Library's own file input, or a keyboard user reaching "Add
+   files" gets no visible focus at all. */
+.wrap:has(#libfile:focus-visible) #libadd{outline:2px solid var(--accent);
+  outline-offset:2px;border-radius:4px}
+#drop.over{border-color:var(--accent);background:rgba(24,95,165,.06)}
+#drop.bin{border-color:var(--err);color:var(--err)}
+#drop.bin.over{background:rgba(192,57,43,.09);border-style:solid}
+button.undo{background:none;border:1px solid var(--line);color:var(--tx);
+  border-radius:6px;padding:5px 10px;font-size:13px;cursor:pointer;
+  white-space:nowrap;flex:none}
+#undoslot{flex:none}
+.bar{position:fixed;left:0;right:0;bottom:0;background:var(--card);
+  border-top:1px solid var(--line);padding:12px 16px;
+  padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  display:flex;gap:12px;align-items:center;justify-content:space-between}
+button.act{background:var(--tx);color:var(--bg);border:0;border-radius:8px;
+  padding:10px 16px;font-size:14px;font-weight:500;cursor:pointer}
+button.act:disabled{opacity:.4;cursor:default}
+.prog{flex:1;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.progfill{height:100%;background:var(--accent);width:0;transition:width .2s}
+.msg{font-size:13px;color:var(--tx2);flex:1;min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.err{color:var(--err)}
+/* Mid-write and shutdown warnings. With no panel LED or display, this line is
+   the only thing telling the user not to pull the plug, so it carries weight
+   the plain status text doesn't. */
+.msg.warn{color:var(--warn);font-weight:600}
+.hide{display:none}
+/* Kept in the accessibility tree and focusable — display:none would take the
+   file input out of the tab order and off screen readers. */
+.vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);
+  white-space:nowrap;border:0}
+h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
+  text-transform:uppercase;letter-spacing:.04em}
+/* Card header carrying an action (the Tracks list's Print link) beside the h2. */
+.listhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.listhead h2{margin:0}
+.foot{display:flex;align-items:center;justify-content:space-between;
+  margin-top:14px;padding:0 2px;font-size:12px;color:var(--tx2)}
+#ver{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.link{background:none;border:0;color:var(--accent);cursor:pointer;
+  font-size:12px;padding:4px 6px}
+.link:hover{text-decoration:underline}
+.link:disabled{color:var(--tx2);cursor:default;text-decoration:none}
+/* A waiting update is a call to action, so it reads as a filled pill. */
+.link.avail{background:var(--accent);color:var(--bg);border-radius:6px;
+  font-weight:600;padding:5px 10px}
+.link.avail:hover{text-decoration:none;opacity:.9}
+
+/* --- Library ------------------------------------------------------------ */
+
+/* Search and sort. Uncontrolled DOM state: renderLibrary reads these and never
+   writes them, so a snapshot arriving mid-keystroke can't wipe what's typed. */
+.libtools{display:flex;gap:8px;margin-bottom:10px}
+#libq{flex:1;min-width:0;background:var(--bg);color:var(--tx);
+  border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;
+  font-size:14px;-webkit-appearance:none;appearance:none}
+#libsort{background:var(--bg);color:var(--tx);border:1px solid var(--line);
+  border-radius:8px;padding:7px 8px;font:inherit;font-size:13px;flex:none}
+#libq:focus-visible,#libsort:focus-visible{outline:2px solid var(--accent);
+  outline-offset:1px}
+
+.librow{display:flex;align-items:center;gap:8px;padding:8px 0;
+  border-bottom:1px solid var(--line)}
+.librow:last-child{border-bottom:0}
+.libname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;cursor:text}
+.libname:hover{text-decoration:underline dotted var(--tx2)}
+/* The row controls are reachable by keyboard, and the accent ring is what the
+   rest of the page uses in place of the browser default — so they need it too
+   or they are the only focusable things here without a visible focus state. */
+.libname:focus-visible,.libbtn:focus-visible{outline:2px solid var(--accent);
+  outline-offset:2px;border-radius:4px}
+/* The inline rename field replaces the name in place, so it sits on the same
+   baseline and doesn't reflow the row. */
+input.libedit{flex:1;min-width:0;background:var(--bg);color:var(--tx);
+  border:1px solid var(--accent);border-radius:6px;padding:3px 6px;font:inherit;
+  font-size:15px}
+.libdur{font-size:12px;color:var(--tx2);flex:none}
+/* Which slots hold this track. Read from the snapshot, so it stays live. */
+.inslot{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ok);
+  border:1px solid var(--ok);border-radius:4px;padding:1px 4px;flex:none}
+.libbtn{background:none;border:1px solid var(--line);color:var(--tx);
+  border-radius:6px;padding:3px 8px;font-size:12px;line-height:1.5;
+  cursor:pointer;flex:none}
+.libbtn:hover{border-color:var(--accent)}
+.libbtn:disabled{opacity:.4;cursor:default}
+.libbtn:disabled:hover{border-color:var(--line)}
+.libbtn.danger:hover{border-color:var(--err);color:var(--err)}
+.libbtn.playing{border-color:var(--accent);color:var(--accent)}
+#libfoot{margin-top:10px}
+.empty{color:var(--tx2);font-size:14px}

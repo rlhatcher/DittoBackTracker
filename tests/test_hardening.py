@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from ditto import config, core
+from ditto import config, core, db
 
 
 @pytest.fixture
@@ -144,7 +144,7 @@ def test_gc_spares_a_freshly_written_source(service):
     """upload() writes the file, then the slot row. A collector run landing in
     that window must not delete an upload that is moments from being
     referenced."""
-    fresh = config.SOURCES / "0123456789abcdef0123.mp3"
+    fresh = config.SOURCES / "abcabcabcabc00000002.mp3"
     fresh.write_bytes(b"just uploaded, no row yet")
 
     service._gc()
@@ -166,7 +166,7 @@ def test_gc_takes_an_old_unreferenced_source(service):
 
 def test_gc_takes_an_interrupted_transcode_at_any_age(service):
     """A .part file is never referenced by anything, however new it is."""
-    part = config.STAGED / "0123456789abcdef0123-pcm_s24le-44100-1.wav.part"
+    part = config.STAGED / "abcabcabcabc00000003-pcm_s24le-44100-1.wav.part"
     part.write_bytes(b"half a wav")
 
     service._gc()
@@ -291,3 +291,52 @@ def test_store_source_syncs_before_it_publishes_the_name(paths, monkeypatch):
     assert "fsync-file" in events and "rename" in events
     assert events.index("fsync-file") < events.index("rename"), \
         f"the name was published before the bytes were confirmed: {events}"
+
+
+def test_gc_keeps_a_staged_file_cached_under_a_different_format(service):
+    """The startup collector runs before any pedal has been probed, so self.fmt
+    is still the default. Matching whole staged filenames — which carry a format
+    tag — would delete every WAV cached under the pedal's real format on every
+    boot, costing a full re-transcode of every assigned slot.
+    """
+    h = "0123456789abcdef0123"
+    db.library_add(h, "Assigned", 120.0)
+    db.put_slot(1, h, state="synced")
+    # Cached under a format the pedal probed last session, not today's default.
+    other = config.STAGED / f"{h}-pcm_s16le-48000-2.wav"
+    other.write_bytes(b"a cached transcode")
+    old = time.time() - config.GC_GRACE_SECS - 60
+    os.utime(other, (old, old))
+    assert service.fmt == dict(config.DEFAULT_FORMAT), "precondition: unprobed"
+    # A file the same pass must delete. _gc catches and logs its own exceptions,
+    # so without a positive control it could bail before the staged-file loop
+    # and this test would pass on a collector that never ran.
+    canary = config.STAGED / "99999999999999999999-pcm_s24le-44100-1.wav"
+    canary.write_bytes(b"no slot wants this")
+    old = time.time() - config.GC_GRACE_SECS - 60
+    os.utime(canary, (old, old))
+
+    service._gc()
+
+    assert not canary.exists(), "the staged-file loop did not run"
+    assert other.exists(), "a staged file for an assigned slot was collected"
+
+
+def test_gc_still_drops_staged_files_for_unassigned_tracks(service):
+    """The reason the predicate is per-slot and not per-library-track: mono
+    24-bit at 44.1 kHz is 132 kB/s, so caching one per library track would be
+    gigabytes behind a few hundred MB of music."""
+    # A hash unique to this test. The service fixture shares one database
+    # across the module and nothing clears library rows between tests, so
+    # reusing another test's hash would leave a row behind that stops its
+    # orphan being collected — an order-dependent failure.
+    h = "abcabcabcabc00000001"
+    db.library_add(h, "In the library, not on the pedal", 120.0)
+    stale = config.STAGED / f"{h}-pcm_s24le-44100-1.wav"
+    stale.write_bytes(b"cache for a track no slot wants")
+    old = time.time() - config.GC_GRACE_SECS - 60
+    os.utime(stale, (old, old))
+
+    service._gc()
+
+    assert not stale.exists()

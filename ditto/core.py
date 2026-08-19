@@ -283,8 +283,13 @@ class Service:
         marker that has already passed, and poweroff discards it after the API
         said 201.
 
-        Callers do their slow part outside this block and hold it only for the
-        database change and the enqueue.
+        Callers do their slow part — probing, hashing — outside this block.
+        Ingest is the deliberate exception: it holds the admission across
+        writing the source file too, because the library row, the bytes and the
+        slot assignment have to land as one step or a concurrent forced forget
+        can delete the row in between and leave a slot pointing at nothing. That
+        does mean end_session waits on an fsync, which is the behaviour we want:
+        poweroff should not begin midway through storing a track.
         """
         with self._admit:
             if self.ending:
@@ -304,18 +309,92 @@ class Service:
         # _source_for globs for "{hash}.*", so an extensionless upload would be
         # stored under a name it can never find again.
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
-        if not stored.exists():
-            self._store_source(tmp_path, stored)
-        else:
-            tmp_path.unlink(missing_ok=True)
+        # The row before the bytes. The two orderings fail differently and only
+        # one of them fails safely: a row with no file surfaces as "source file
+        # missing" on convert, which is visible and fixable, whereas a file with
+        # no row is invisible and the collector eventually takes it.
+        # One admission over the whole mutation. Splitting it would leave a
+        # window in which a forced forget deletes the row between library_add
+        # and _assign — the slot would then reference a hash with no library
+        # row, reading as "(missing)", and the next collector pass would take
+        # its source file. Reading the row back inside the block keeps the
+        # returned object consistent with what was just committed.
+        with self._admitting():
+            inserted = db.library_add(h, display_name, info.duration)
+            self._place_source(h, tmp_path, stored, inserted)
+            self._assign(slot, h)
+            row = db.get_slot(slot)
+        self._emit()
+        return row
 
+    def add_to_library(self, tmp_path: Path, display_name: str) -> Dict:
+        """Ingest a file without giving it a slot.
+
+        The pedal holds about twelve tracks and the library holds as many as the
+        card does, so getting audio onto the device and choosing what the pedal
+        carries are separate acts.
+        """
+        info = media.probe(tmp_path)
+        if info is None or info.duration <= 0:
+            tmp_path.unlink(missing_ok=True)
+            raise ValueError("not a readable audio file")
+
+        h = media.file_hash(tmp_path)
+        stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
+        # Admitted like every other mutation. Without this, end_session could
+        # begin the halt while the source file was still being written and this
+        # would still report success.
+        with self._admitting():
+            inserted = db.library_add(h, display_name, info.duration)
+            self._place_source(h, tmp_path, stored, inserted)
+            row = db.library_get(h)
+        self.library_changed()
+        return row
+
+    def assign(self, slot: int, source_hash: str) -> Optional[Dict]:
+        """Put a track already in the library into a slot.
+
+        The point of the library: rearranging what the pedal carries costs a
+        transcode at most, and usually not even that — the staged WAV may still
+        be cached — instead of another upload over WiFi.
+        """
+        self._check_accepting()
+        self._check_slot(slot)
+        # Inside the admission, not before it. forget() holds the same lock
+        # across reading the slot list, clearing those slots and deleting the
+        # row — so a membership test outside it can pass, then have the track
+        # deleted before the assignment lands. forget has already read its slot
+        # list by then, so it would never clear the new slot, and the collector
+        # would take the source out from under it: a slot reading "(missing)"
+        # with no audio behind it. restore() already checks under the lock.
+        with self._admitting():
+            if not db.hash_in_library(source_hash):
+                return None
+            self._assign(slot, source_hash)
+            # Read it back inside the block, like upload does. A concurrent
+            # forced forget can clear the slot the moment the lock is released,
+            # and a None here becomes a 404 for an assignment that did happen.
+            row = db.get_slot(slot)
+        self._emit()
+        return row
+
+    def _assign(self, slot: int, source_hash: str) -> None:
+        """Point a slot at a library track and queue the work to realise it.
+
+        Admits here rather than in each caller: this is the single place all
+        three routes into a slot — upload, restore and assign — change the
+        database and queue work. The lock is reentrant, so a caller that has
+        already admitted (to keep a larger step atomic) nests harmlessly.
+        """
         with self._admitting():
             if db.get_slot(slot):
                 db.delete_slot(slot, to_trash=True)
-            db.put_slot(slot, h, display_name, info.duration, state="converting")
-            self._work.put(("convert", slot, h, stored))
-        self._emit()
-        return db.get_slot(slot)
+            db.put_slot(slot, source_hash, state="converting")
+            src = self._source_for(source_hash)
+            if src is None:
+                db.set_state(slot, "error", "source file missing")
+                return
+            self._work.put(("convert", slot, source_hash, src))
 
     def clear(self, slot: int) -> Optional[int]:
         self._check_slot(slot)
@@ -404,18 +483,64 @@ class Service:
             item = db.trash_pop(trash_id)
             if not item:
                 return None
-            slot = item["slot"]
-            if db.get_slot(slot):
-                db.delete_slot(slot, to_trash=True)
-            db.put_slot(slot, item["source_hash"], item["display_name"],
-                        item["duration"], state="converting")
-            src = self._source_for(item["source_hash"])
-            if src:
-                self._work.put(("convert", slot, item["source_hash"], src))
-            else:
-                db.set_state(slot, "error", "source file missing")
+            # The track can have been deleted from the library since the slot
+            # was cleared, in which case there is nothing left to put back.
+            if not db.hash_in_library(item["source_hash"]):
+                return None
+            self._assign(item["slot"], item["source_hash"])
         self._emit()
-        return slot
+        return item["slot"]
+
+    # -------------------------------------------------------------- library
+
+    def rename(self, source_hash: str, name: str) -> Optional[Dict]:
+        """Rename a track. One row changes; the slot list, the grid tooltips and
+        the printed set list all read through to it."""
+        if not db.library_rename(source_hash, name):
+            return None
+        self.library_changed()
+        return db.library_get(source_hash)
+
+    def forget(self, source_hash: str,
+               force: bool = False) -> "tuple[str, List[int]]":
+        """Delete a track from the library, and with it the only copy of its
+        audio.
+
+        Returns (outcome, slots). Three outcomes, because "it didn't get
+        deleted" and "nothing happened" are not the same thing and the caller
+        has to tell them apart:
+
+          "in_use"  — refused, nothing changed; `slots` hold the track
+          "deleted" — gone; `slots` are the ones cleared on the way
+          "missing" — no such row, but `slots` were still cleared
+
+        The one operation that can pull a file out from under a slot, so it
+        refuses while any slot references the track unless the caller has
+        confirmed. The audio itself goes on the next collector pass, once the
+        row that was keeping it alive is gone.
+        """
+        with self._admitting():
+            slots = db.slots_for_hash(source_hash)
+            if slots and not force:
+                return ("in_use", slots)
+            # One admission covering the whole group, so a shutdown can't land
+            # between clearing some slots and deleting the row.
+            for n in slots:
+                self.clear(n)
+            deleted = db.library_delete(source_hash)
+        # Either branch may have cleared slots, so both report them and both
+        # emit. Only the refusal above leaves the device untouched.
+        self.library_changed()
+        return ("deleted" if deleted else "missing", slots)
+
+    def library_changed(self) -> None:
+        """Single funnel for library mutations.
+
+        A rename reaches the slot list on its own — display_name is joined from
+        library, so the next snapshot already carries it. This is what tells
+        clients the *library list* itself moved.
+        """
+        self._emit()
 
     def end_session(self) -> None:
         """Flush, unmount, halt. The only way to power the device off.
@@ -695,6 +820,33 @@ class Service:
             log.exception("unmount during shutdown failed")
 
     # -------------------------------------------------------------- internals
+
+    def _place_source(self, h: str, tmp_path: Path, stored: Path,
+                      inserted: bool) -> None:
+        """Get the bytes into sources/, retracting the row if they don't land.
+
+        The row is written before the bytes on purpose — a row with no file is
+        visible and fixable, a file with no row is invisible and gets collected.
+        But that only holds while the missing file is temporary. _store_source
+        now raises when it cannot confirm the bytes, and nothing collects a
+        library row: it would sit in the list forever, failing to audition and
+        reporting "source file missing" on every assignment. So a storage
+        failure takes the row with it.
+
+        Only when this call created it. library_add is DO NOTHING on conflict,
+        so re-uploading a track that is already in the library must not let a
+        failure here delete the established row — and its file, which is still
+        perfectly good, is exactly why the write was skipped.
+        """
+        if stored.exists():
+            tmp_path.unlink(missing_ok=True)
+            return
+        try:
+            self._store_source(tmp_path, stored)
+        except Exception:
+            if inserted:
+                db.library_delete(h)
+            raise
 
     @staticmethod
     def _store_source(tmp_path: Path, stored: Path) -> None:
@@ -1107,6 +1259,16 @@ class Service:
     def _gc(self) -> None:
         """Prune expired trash and any file nothing references.
 
+        sources/ and staged/ are collected under deliberately different rules,
+        because they are different kinds of thing. A source *is* the library: it
+        survives until the user deletes the track. A staged WAV is a cache,
+        worth keeping only for a slot that is about to be written in the format
+        the pedal currently wants — losing one costs a re-transcode, which
+        _do_write requeues by itself. Keeping one per library track instead
+        would be ruinous here: mono 24-bit at 44.1 kHz is 132 kB/s, so a
+        four-minute track stages to ~32 MB, and a hundred of them would be ~3 GB
+        of cache standing behind a few hundred MB of actual music.
+
         Runs at startup and at session end. The startup pass is the one that
         matters after a pulled plug, because _halt never ran.
 
@@ -1121,12 +1283,21 @@ class Service:
             # plug — nothing ever references them, at any age.
             for f in config.STAGED.glob("*.wav.part"):
                 f.unlink(missing_ok=True)
+            # Keyed on the hash, not the full staged filename. The filename
+            # carries a format tag, and self.fmt is still the default until the
+            # monitor has mounted a pedal and probed it — but the startup
+            # collector runs before that. Matching whole names would therefore
+            # delete every WAV cached under the real format on every boot, and
+            # cost a full re-transcode of all assigned slots. Bounded by the
+            # slot count either way, so the format tag is left to decide which
+            # staged file _do_write uses, not which ones survive.
+            assigned = {r["source_hash"] for r in db.all_slots()}
             for f in config.STAGED.glob("*.wav"):
                 h = f.name.split("-", 1)[0]
-                if not db.hash_in_use(h) and self._older_than(f, cutoff):
+                if h not in assigned and self._older_than(f, cutoff):
                     f.unlink(missing_ok=True)
             for f in config.SOURCES.iterdir():
-                if (f.is_file() and not db.hash_in_use(f.stem)
+                if (f.is_file() and not db.hash_in_library(f.stem)
                         and self._older_than(f, cutoff)):
                     f.unlink(missing_ok=True)
             self._sweep_upload_temps()
