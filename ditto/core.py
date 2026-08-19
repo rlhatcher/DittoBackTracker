@@ -991,20 +991,31 @@ class Service:
                     job = self._work.get(timeout=0.5)
                 except queue.Empty:
                     continue
-                # Check again. An idle worker spends nearly all its time parked
-                # in that get(), so a job arriving just after the gate closed
-                # satisfies the get and would otherwise run straight past it —
-                # which is the common case, not a narrow race.
-                #
                 # Hold the job rather than putting it back: the queue is FIFO
                 # and requeuing would move it behind work queued later, and a
                 # convert has to stay ahead of the write it queues. A held job
                 # is invisible to update()'s idleness check, which is the safe
                 # direction — it is not running, and a pending restart drops it
                 # exactly like anything else still queued.
-                if self._updating.is_set():
-                    continue
+
+            # Claim in-flight, then re-check the gate, then give the claim back
+            # if the gate turned out to be shut.
+            #
+            # Both halves matter. The re-check is because an idle worker spends
+            # nearly all its time parked in that get(), so a job arriving just
+            # after the gate closed satisfies the get and would otherwise run
+            # straight past it — the common case, not a narrow race.
+            #
+            # Claiming *before* the re-check is what makes the two sides
+            # mutually exclusive. update() sets _updating and then reads
+            # _in_flight; without the claim this worker reads _updating and
+            # then sets _in_flight, so the two can pass each other and admit a
+            # redeploy alongside a write that is about to start. Claiming first
+            # means whichever runs second sees what the first did.
             self._in_flight.set()
+            if self._updating.is_set():
+                self._in_flight.clear()
+                continue
             try:
                 self._run_job(job)
             except Exception as e:

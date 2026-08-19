@@ -71,3 +71,24 @@ def test_remove_loop_absent_is_noop(mount):
     _slot_dir(mount, 7)
     pedal.remove_loop(7)                                # must not raise
     assert not pedal.has_loop(7)
+
+
+def test_run_turns_a_missing_mount_binary_into_a_pedal_error(monkeypatch):
+    """A missing or non-executable mount(8) raises OSError, which is not a
+    PedalError — so it escapes the monitor's handler and logs a traceback every
+    poll, forever, on a device with a small journal."""
+    def no_such_binary(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "mount")
+
+    monkeypatch.setattr(pedal.subprocess, "run", no_such_binary)
+    with pytest.raises(pedal.PedalError, match="could not run"):
+        pedal._run(["mount", "/media/ditto"], "mount")
+
+
+def test_run_still_maps_a_timeout(monkeypatch):
+    def too_slow(*a, **k):
+        raise pedal.subprocess.TimeoutExpired(cmd="mount", timeout=30)
+
+    monkeypatch.setattr(pedal.subprocess, "run", too_slow)
+    with pytest.raises(pedal.PedalError, match="timed out"):
+        pedal._run(["mount", "/media/ditto"], "mount")

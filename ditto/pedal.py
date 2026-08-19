@@ -31,11 +31,21 @@ class PedalError(Exception):
 
 
 def _run(cmd, what: str) -> subprocess.CompletedProcess:
+    """Run a mount helper, turning every failure into a PedalError.
+
+    OSError matters as much as the timeout: a missing or non-executable
+    mount(8) raises FileNotFoundError or PermissionError, which is not a
+    PedalError and so escapes the caller's handler entirely. In the monitor
+    that lands in the catch-all and logs a full traceback every POLL_SECS
+    forever, on a device with a read-only root and a small journal.
+    """
     try:
         return subprocess.run(cmd, capture_output=True, text=True,
                               timeout=_MOUNT_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise PedalError(f"{what} timed out after {int(_MOUNT_TIMEOUT)}s") from None
+    except OSError as e:
+        raise PedalError(f"{what} could not run: {e}") from None
 
 
 def present() -> bool:
