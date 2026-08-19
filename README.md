@@ -6,7 +6,7 @@ The Ditto+ plays backing tracks, but getting them onto it needs a computer. The
 pedal mounts as a USB drive and wants 44.1 kHz / 24-bit / **mono** WAV in a
 specific folder layout.
 
-DittoBackTracker is a battery-powered dongle that sits between them. Plug it
+DittoBackTracker is a small dongle that sits between them. Plug it
 into the pedal, open a web page, drag MP3s in. It converts them to the pedal's
 format and writes them to the right slots.
 
@@ -14,7 +14,7 @@ format and writes them to the right slots.
   Phone / laptop                    ┌──────────────────────┐
   ┌──────────────┐    your WiFi     │  DittoBackTracker    │
   │  drag & drop │ ───────────────▶ │   Pi Zero 2 W        │      mini-USB
-  │   web page   │                  │   1S LiPo + boost    │ ───────────────▶ Ditto+
+  │   web page   │                  │   USB power          │ ───────────────▶ Ditto+
   └──────────────┘                  └──────────────────────┘
 ```
 
@@ -32,7 +32,7 @@ format and writes them to the right slots.
 - Read-only root filesystem, so cutting the Pi's power is unlikely to corrupt
   the system partition. `state.db`, `sources/`, `staged/` and `trash/` live on
   a separate writable partition and still need a clean unmount — end the
-  session with the button or the web page rather than pulling the power
+  session from the web page rather than pulling the power
 
 What isn't built yet is in [docs/roadmap.md](docs/roadmap.md).
 
@@ -43,7 +43,6 @@ What isn't built yet is in [docs/roadmap.md](docs/roadmap.md).
 | Part                                         |
 | -------------------------------------------- |
 | Raspberry Pi Zero 2 W                        |
-| Waveshare UPS HAT (C) + 1000 mAh 803040 LiPo |
 | microSD card, 8 GB or larger                 |
 | micro-USB OTG adapter                        |
 | USB-A to **mini-B** cable                    |
@@ -90,11 +89,10 @@ package isn't present on a minimal install).
 ```bash
 python3 -m venv .venv && .venv/bin/pip install flask
 DITTO_DATA=/tmp/ditto-data DITTO_MOUNT=/tmp/ditto-mount \
-  .venv/bin/python -m ditto --headless --host 127.0.0.1 --port 8080 --debug
+  .venv/bin/python -m ditto --host 127.0.0.1 --port 8080 --debug
 ```
 
-`--headless` skips the button, LED and display. `--debug` uses Flask's built-in
-server, so `waitress` isn't needed here. `--host 127.0.0.1` keeps the
+`--debug` uses Flask's built-in server, so `waitress` isn't needed here. `--host 127.0.0.1` keeps the
 unauthenticated dev server off your network; the default is `0.0.0.0`.
 
 ---
@@ -127,9 +125,6 @@ one file copy, with no re-conversion.
 | `db.py`     | SQLite storage                         |
 | `media.py`  | ffprobe and ffmpeg                     |
 | `pedal.py`  | Detect, mount, write `BT.WAV`, unmount |
-| `power.py`  | Battery gauge and charge thresholds    |
-| `oled.py`   | SSD1306 display driver                 |
-| `panel.py`  | Button, LED, display — each optional   |
 | `core.py`   | Session lifecycle and work queue       |
 | `web.py`    | Flask routes and server-sent events    |
 

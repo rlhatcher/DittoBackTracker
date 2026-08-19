@@ -68,23 +68,6 @@ DEFAULT_FORMAT = {"sample_rate": 44100, "channels": 1, "codec": "pcm_s24le"}
 AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg",
                   ".aif", ".aiff", ".wma", ".opus"}
 
-# Power
-MIN_CHARGE_PCT = 30          # refuse writes below this
-CRITICAL_CHARGE_PCT = 15     # graceful halt
-INA219_ADDR = 0x43
-I2C_BUS = 1
-
-# Panel
-BUTTON_GPIO = int(os.environ.get("DITTO_BUTTON_GPIO", "17"))
-LED_GPIO = int(os.environ.get("DITTO_LED_GPIO", "27"))
-OLED_ADDR = 0x3C
-OLED_HEIGHT = int(os.environ.get("DITTO_OLED_HEIGHT", "32"))
-if OLED_HEIGHT not in (32, 64):
-    # Anything else gives a page count the SSD1306 addressing doesn't match,
-    # so the display renders garbage rather than failing.
-    raise ValueError("DITTO_OLED_HEIGHT must be 32 or 64")
-LONG_PRESS_SECS = 3.0
-
 # Web
 PORT = int(os.environ.get("DITTO_PORT", "80"))
 POLL_SECS = 2.0              # pedal detection interval

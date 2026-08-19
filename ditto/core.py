@@ -1,11 +1,13 @@
-"""The service: pedal lifecycle, transcode queue, write queue, panel."""
+"""The service: pedal lifecycle, transcode queue, write queue."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -15,15 +17,29 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import __version__, config, db, media, pedal
-from .panel import Panel, local_ip
-from .power import Battery
 
 log = logging.getLogger(__name__)
+
+
+class ShuttingDown(Exception):
+    """A pedal operation was asked for after the session began ending."""
 
 
 def mmss(seconds: float) -> str:
     m, s = divmod(int(max(seconds, 0)), 60)
     return f"{m}:{s:02d}"
+
+
+def local_ip() -> str:
+    """Best-effort local address, for the web UI. No traffic is sent."""
+    try:
+        # Context-managed so the socket closes even if connect/getsockname
+        # raises; local_ip runs on every snapshot, so a leak would accumulate.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+    except Exception:
+        return "no network"
 
 
 class LoopStage:
@@ -66,17 +82,11 @@ class LoopStage:
 
 
 class Service:
-    def __init__(self, headless: bool = False) -> None:
+    def __init__(self) -> None:
         config.ensure_dirs()
         # Staged loop copies are transient; clear any left behind by a crash
         # mid-download so nothing accumulates on the data partition.
         self._purge_staged_loops()
-        self.battery = Battery()
-        self.panel = None
-        if not headless:
-            self.battery.start()
-            self.panel = Panel(on_press=self.end_session,
-                               on_long=self.force_halt)
 
         self._work: "queue.Queue[tuple]" = queue.Queue()
         self._subs: List["queue.Queue[dict]"] = []
@@ -86,9 +96,10 @@ class Service:
         self.fmt_source = "default"
         self.pedal_state = "absent"          # absent | mounted | error
         self.busy: Optional[str] = None      # human-readable current activity
-        # True while `busy` is a read (loop staging): the pedal is being read,
-        # not written, so the panel must not tell the user "DON'T PULL".
-        self.busy_read = False
+        # What kind of pedal work `busy` is: "write" | "read" | None. Unplugging
+        # mid-read is low-risk, so only a write earns the UI's "don't unplug"
+        # warning — the job that used to belong to the OLED.
+        self.busy_kind: Optional[str] = None
         self.progress: Optional[float] = None
         self.last_error: Optional[str] = None
         self.ending = False
@@ -121,12 +132,16 @@ class Service:
         self._update_available = False
         self._remote_revision: Optional[str] = None
 
+        # Serializes "is this device still accepting work?" with the enqueue
+        # that follows it, and with end_session's own set-and-enqueue. Reentrant
+        # because grouped operations (a forced library delete clearing several
+        # slots) admit once and then call through to per-slot operations that
+        # admit again.
+        self._admit = threading.RLock()
+
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
         self._in_flight = threading.Event()
-        # Tracks the last can_write() reading so a low-battery write can be
-        # requeued the moment a charger brings the cell back up.
-        self._could_write = True
         self._last_prog_emit = 0.0
 
         self._stop = threading.Event()
@@ -194,6 +209,7 @@ class Service:
         return {
             "pedal": self.pedal_state,
             "busy": self.busy,
+            "busy_kind": self.busy_kind,
             "progress": self.progress,
             "ending": self.ending,
             "error": self.last_error,
@@ -203,13 +219,6 @@ class Service:
             "slot_count": config.SLOTS,
             "loops": sorted(self._loops),
             "capacity": self.capacity(),
-            "battery": {
-                "available": self.battery.available,
-                "percent": self.battery.percent,
-                "charging": self.battery.charging,
-                "can_write": self.battery.can_write(),
-            },
-            "panel": self.panel.status() if self.panel else {},
             "ip": local_ip(),
             "version": __version__,
             "revision": self._revision,
@@ -224,7 +233,34 @@ class Service:
         if not (1 <= slot <= config.SLOTS):
             raise ValueError(f"slot must be 1-{config.SLOTS}")
 
+    def _check_accepting(self) -> None:
+        """Cheap early refusal, so a doomed upload isn't probed and hashed first.
+
+        Advisory only — `_admitting` is what actually decides.
+        """
+        if self.ending:
+            raise ShuttingDown("the device is shutting down")
+
+    @contextlib.contextmanager
+    def _admitting(self):
+        """Decide and enqueue as one step.
+
+        Testing `ending` and then queueing work is not enough on its own: an
+        upload spends seconds probing and hashing between the two, and
+        end_session can land in that gap — so the work goes in behind an end
+        marker that has already passed, and poweroff discards it after the API
+        said 201.
+
+        Callers do their slow part outside this block and hold it only for the
+        database change and the enqueue.
+        """
+        with self._admit:
+            if self.ending:
+                raise ShuttingDown("the device is shutting down")
+            yield
+
     def upload(self, slot: int, tmp_path: Path, display_name: str) -> Dict:
+        self._check_accepting()
         self._check_slot(slot)
 
         info = media.probe(tmp_path)
@@ -241,19 +277,19 @@ class Service:
         else:
             tmp_path.unlink(missing_ok=True)
 
-        existing = db.get_slot(slot)
-        if existing:
-            db.delete_slot(slot, to_trash=True)
-
-        db.put_slot(slot, h, display_name, info.duration, state="converting")
-        self._work.put(("convert", slot, h, stored))
+        with self._admitting():
+            if db.get_slot(slot):
+                db.delete_slot(slot, to_trash=True)
+            db.put_slot(slot, h, display_name, info.duration, state="converting")
+            self._work.put(("convert", slot, h, stored))
         self._emit()
         return db.get_slot(slot)
 
     def clear(self, slot: int) -> Optional[int]:
         self._check_slot(slot)
-        trash_id = db.delete_slot(slot, to_trash=True)
-        self._work.put(("erase", slot))
+        with self._admitting():
+            trash_id = db.delete_slot(slot, to_trash=True)
+            self._work.put(("erase", slot))
         self._emit()
         return trash_id
 
@@ -273,16 +309,22 @@ class Service:
         """
         self._check_slot(slot)
         stage = LoopStage()
-        self._work.put(("stage_loop", slot, self._mount_gen, stage))
+        with self._admitting():
+            self._work.put(("stage_loop", slot, self._mount_gen, stage))
         self._emit()
         return stage
 
     def delete_loop(self, slot: int) -> bool:
         """Enqueue removal of the slot's loop. False (→404) if none is known."""
+        # Ahead of the no-op return, so the answer doesn't depend on whether
+        # the slot happened to hold a loop: during shutdown this is refused
+        # either way.
+        self._check_accepting()
         self._check_slot(slot)
         if slot not in self._loops:
             return False
-        self._work.put(("delete_loop", slot, self._mount_gen))
+        with self._admitting():
+            self._work.put(("delete_loop", slot, self._mount_gen))
         self._emit()
         return True
 
@@ -297,18 +339,20 @@ class Service:
         # The move-or-swap decision is made atomically in db, so we queue pedal
         # work from what actually happened rather than a pre-read that a
         # concurrent upload could have invalidated.
-        op = db.move_or_swap(src, dst)
-        if op == "swap":
-            self._work.put(("write", src))
-            self._work.put(("write", dst))
-        elif op == "move":
-            self._work.put(("erase", src))
-            self._work.put(("write", dst))
-        else:
-            return
+        with self._admitting():
+            op = db.move_or_swap(src, dst)
+            if op == "swap":
+                self._work.put(("write", src))
+                self._work.put(("write", dst))
+            elif op == "move":
+                self._work.put(("erase", src))
+                self._work.put(("write", dst))
+            else:
+                return
         self._emit()
 
     def retry(self, slot: int) -> None:
+        self._check_accepting()     # ahead of the empty-slot return, as above
         self._check_slot(slot)
         row = db.get_slot(slot)
         if not row:
@@ -318,42 +362,45 @@ class Service:
             db.set_state(slot, "error", "source file missing")
             self._emit()
             return
-        db.set_state(slot, "converting")
-        self._work.put(("convert", slot, row["source_hash"], src))
+        with self._admitting():
+            db.set_state(slot, "converting")
+            self._work.put(("convert", slot, row["source_hash"], src))
         self._emit()
 
     def restore(self, trash_id: int) -> Optional[int]:
-        item = db.trash_pop(trash_id)
-        if not item:
-            return None
-        slot = item["slot"]
-        if db.get_slot(slot):
-            db.delete_slot(slot, to_trash=True)
-        db.put_slot(slot, item["source_hash"], item["display_name"],
-                    item["duration"], state="converting")
-        src = self._source_for(item["source_hash"])
-        if src:
-            self._work.put(("convert", slot, item["source_hash"], src))
-        else:
-            db.set_state(slot, "error", "source file missing")
+        with self._admitting():
+            item = db.trash_pop(trash_id)
+            if not item:
+                return None
+            slot = item["slot"]
+            if db.get_slot(slot):
+                db.delete_slot(slot, to_trash=True)
+            db.put_slot(slot, item["source_hash"], item["display_name"],
+                        item["duration"], state="converting")
+            src = self._source_for(item["source_hash"])
+            if src:
+                self._work.put(("convert", slot, item["source_hash"], src))
+            else:
+                db.set_state(slot, "error", "source file missing")
         self._emit()
         return slot
 
     def end_session(self) -> None:
-        """Flush, unmount, halt. The graceful ending."""
-        if self.ending:
-            return
-        self.ending = True
-        self._emit()
-        self._work.put(("end",))
+        """Flush, unmount, halt. The only way to power the device off.
 
-    def force_halt(self) -> None:
-        """Long press. Emergency only — does not wait for the queue."""
-        if self.ending:
-            return
-        self.ending = True
+        The check, the flag and the marker go under one lock. Two of these
+        racing would each queue a marker, and _run_job requeues a marker
+        whenever the queue is non-empty — so the pair would step over each
+        other indefinitely and the device would never power off. Emitting
+        happens after the lock; it reads the database and has no business
+        holding up a shutdown.
+        """
+        with self._admit:
+            if self.ending:
+                return
+            self.ending = True
+            self._work.put(("end",))
         self._emit()
-        threading.Thread(target=self._halt, args=(False,), daemon=True).start()
 
     # -------------------------------------------------------------- self-update
 
@@ -614,9 +661,6 @@ class Service:
             pedal.unmount()
         except Exception:
             log.exception("unmount during shutdown failed")
-        if self.panel:
-            self.panel.close()
-        self.battery.close()
 
     # -------------------------------------------------------------- internals
 
@@ -626,11 +670,10 @@ class Service:
         return None
 
     def _monitor(self) -> None:
-        """Pedal detection and panel rendering."""
+        """Pedal detection."""
         while not self._stop.is_set():
             try:
                 self._tick_pedal()
-                self._render()
             except Exception as e:      # never let the monitor die
                 log.exception("monitor tick failed")
                 self.last_error = str(e)
@@ -672,18 +715,6 @@ class Service:
             self._requeue_unsynced()
             self._emit()
 
-        # A write blocked by low battery leaves the slot staged with the pedal
-        # still mounted, so nothing else requeues it. Catch the moment a
-        # charger brings can_write() back and flush the backlog.
-        can_write = self.battery.can_write()
-        if can_write and not self._could_write:
-            self._requeue_unsynced()
-        self._could_write = can_write
-
-        if self.battery.critical() and not self.ending:
-            self.last_error = "battery critical — ending session"
-            self.end_session()
-
     def _requeue_unsynced(self) -> None:
         on_pedal = pedal.occupied_slots()
         for row in db.all_slots():
@@ -711,49 +742,10 @@ class Service:
         except OSError:
             pass
 
-    def _render(self) -> None:
-        if not self.panel:
-            return
-        if self.ending:
-            return
-        bat = self.battery.percent
-        bat_s = f"{bat}%" if bat is not None else "--"
-
-        if self.busy and self.busy_read:
-            # A read (loop staging). Unplugging mid-read is low-risk, so the
-            # panel shows activity without the "DON'T PULL" alarm a write needs.
-            self.panel.render("reading", [
-                f"{self.busy}"[:21],
-                f"{bat_s}",
-                "Reading - please wait",
-            ], self.progress)
-        elif self.busy:
-            lines = [f"{self.busy}"[:21]]
-            slots = db.all_slots()
-            done = sum(1 for s in slots if s["state"] == "synced")
-            pos = min(done + 1, len(slots)) if slots else 0
-            lines.append(f"Slot {pos} of {len(slots)}   {bat_s}")
-            lines.append("WRITING - DONT PULL")
-            self.panel.render("writing", lines, self.progress)
-        elif self.pedal_state == "mounted":
-            cap = self.capacity()
-            self.panel.render("idle", [
-                f"{local_ip()}"[:21],
-                f"{cap['used_label']} of {cap['total_label']}  {bat_s}",
-                "Ready - press to end",
-            ])
-        elif self.last_error:
-            self.panel.render("error", ["Error:", self.last_error[:21]])
-        else:
-            self.panel.render("boot", [
-                f"{local_ip()}"[:21],
-                f"Battery {bat_s}",
-                "Plug in the pedal",
-            ])
-
     # ------------------------------------------------------------ work queue
 
     def _worker(self) -> None:
+        job = None
         while not self._stop.is_set():
             # Don't start a job while an update is admitted: a redeploy/restart
             # must not overlap pedal work. Anything queued waits here and is
@@ -761,10 +753,24 @@ class Service:
             if self._updating.is_set():
                 self._stop.wait(0.1)
                 continue
-            try:
-                job = self._work.get(timeout=0.5)
-            except queue.Empty:
-                continue
+            if job is None:
+                try:
+                    job = self._work.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                # Check again. An idle worker spends nearly all its time parked
+                # in that get(), so a job arriving just after the gate closed
+                # satisfies the get and would otherwise run straight past it —
+                # which is the common case, not a narrow race.
+                #
+                # Hold the job rather than putting it back: the queue is FIFO
+                # and requeuing would move it behind work queued later, and a
+                # convert has to stay ahead of the write it queues. A held job
+                # is invisible to update()'s idleness check, which is the safe
+                # direction — it is not running, and a pending restart drops it
+                # exactly like anything else still queued.
+                if self._updating.is_set():
+                    continue
             self._in_flight.set()
             try:
                 self._run_job(job)
@@ -772,9 +778,10 @@ class Service:
                 log.exception("job %r failed", job[0])
                 self.last_error = str(e)
             finally:
+                job = None
                 self._in_flight.clear()
                 self.busy = None
-                self.busy_read = False
+                self.busy_kind = None
                 self.progress = None
                 self._emit()
 
@@ -797,11 +804,25 @@ class Service:
             # A convert queues its write *after* the end marker, so the marker
             # can surface with real work still behind it. This worker is the
             # only thing draining the queue, so halting here would leave those
-            # writes unwritten — requeue and keep going instead.
-            if not self._work.empty():
+            # writes unwritten — go behind the remaining work instead.
+            #
+            # Collapse duplicate markers on the way past. end_session admits
+            # under a lock so it can only ever queue one, but two would requeue
+            # past each other forever and the device would never power off —
+            # too sharp an edge to leave depending on a lock held elsewhere.
+            pending = []
+            while True:
+                try:
+                    pending.append(self._work.get_nowait())
+                except queue.Empty:
+                    break
+            work = [j for j in pending if j[0] != "end"]
+            for j in work:
+                self._work.put(j)
+            if work:
                 self._work.put(("end",))
                 return
-            self._halt(True)
+            self._halt()
 
     def _do_convert(self, slot: int, h: str, src: Path) -> None:
         row = db.get_slot(slot)
@@ -837,10 +858,6 @@ class Service:
             return
         if not pedal.mounted():
             return          # stays staged; written when the pedal appears
-        if not self.battery.can_write():
-            db.set_state(slot, "staged", "battery too low to write")
-            self._emit()
-            return
 
         wav = media.staged_path(row["source_hash"], self.fmt)
         if not wav.exists():
@@ -868,6 +885,7 @@ class Service:
             return
 
         self.busy = f"Writing {row['display_name']}"
+        self.busy_kind = "write"
         self.progress = 0.0
         self._emit()
         try:
@@ -885,6 +903,12 @@ class Service:
             return
         if db.get_slot(slot):
             return          # slot was refilled before we got here
+        # An unlink plus an os.sync is a write to the pedal like any other, and
+        # the browser is now the only place a "don't unplug" warning can appear
+        # — so this has to raise the flag even though it finishes quickly.
+        self.busy = f"Clearing slot {slot:02d}"
+        self.busy_kind = "write"
+        self._emit()
         try:
             pedal.remove_track(slot)
             os.sync()
@@ -916,7 +940,7 @@ class Service:
                 return
             dest = config.LOOPS / f"slot-{slot:02d}-{uuid.uuid4().hex}.wav"
             self.busy = "Reading loop"
-            self.busy_read = True
+            self.busy_kind = "read"
             self.progress = None
             self._emit()
             pedal.copy_loop(slot, dest)
@@ -944,6 +968,7 @@ class Service:
             self._emit()
             return
         self.busy = "Removing loop"
+        self.busy_kind = "write"
         self._emit()
         try:
             pedal.remove_loop(slot)
@@ -954,6 +979,12 @@ class Service:
         self._emit()
 
     def _drain(self, timeout: float = 300.0) -> None:
+        """Wait for the worker to go idle. Callers must not be the worker.
+
+        `_in_flight` is set by the worker around every job, so a job that called
+        this would be waiting on itself and could only ever time out. Only the
+        SIGTERM path uses it, from the main thread.
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             # busy alone is racy: the worker dequeues a job before it sets
@@ -963,13 +994,15 @@ class Service:
                 return
             time.sleep(0.2)
 
-    def _halt(self, graceful: bool) -> None:
-        if graceful:
-            self.busy = "Finishing writes"
-            self._emit()
-            # The end marker only reaches _halt once the queue is empty, so
-            # this is a short safety bound rather than the actual wait.
-            self._drain(timeout=5.0)
+    def _halt(self) -> None:
+        # No _drain here. This runs *as* the end job, inside the worker, so
+        # `_in_flight` is already set on our own behalf — a drain could never
+        # see idle and would burn its whole timeout before every poweroff. It
+        # would also be redundant: the end marker requeues itself until the
+        # queue is empty (see _run_job), which is the real wait.
+        self.busy = "Finishing writes"
+        self.busy_kind = "write"
+        self._emit()
         self.busy = "Unmounting"
         self._emit()
         try:
@@ -979,14 +1012,13 @@ class Service:
             log.exception("unmount failed")
             self.last_error = str(e)
         self.busy = None
+        self.busy_kind = None
         self._emit()
 
         self._gc()
-        if self.panel:
-            self.panel.shutdown_message()
+        # The browser is the only status surface now, so give the last snapshot
+        # a moment to reach it before the network goes away with the power.
         time.sleep(1.5)
-        if self.panel:
-            self.panel.close()
         subprocess.run(["sudo", "-n", "/sbin/poweroff"], check=False)
 
     def _gc(self) -> None:

@@ -92,7 +92,7 @@ def test_update_check_cross_site_403():
 
 @pytest.fixture
 def service():
-    svc = core.Service(headless=True)
+    svc = core.Service()
     yield svc
     svc.shutdown(timeout=2.0)
 
