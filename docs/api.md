@@ -418,7 +418,9 @@ curl -N http://dittobacktracker.local/api/events
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
 | `500` | `GET /api/loops/<n>`, `POST /api/slots/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error); or the upload could not be stored — a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
-| `503` | `GET /api/loops/<n>`, `POST /api/update`, `POST /api/slots/<n>`, `POST /api/upload`, `POST /api/library` | No pedal mounted / loop staging timed out; or, for update, the device is shutting down. Body is `{"error": "..."}` |
+| `503` | `GET /api/loops/<n>` | No pedal mounted, or loop staging exceeded its time limit. Body is `{"error": "..."}` |
+| `503` | `POST /api/update`, `POST /api/slots/<n>` | The device is shutting down and is no longer accepting work. Body is `{"error": "..."}` |
+| `503` | `POST /api/upload`, `POST /api/library` | The device began shutting down part-way through the batch. Body is the usual `{"added": [...], "errors": [...]}` carrying whatever landed before that, **not** an `error` string — the files in `added` are committed and queued |
 
 `POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both
 are batches, so they return `201` even when some — or all — files were rejected,
