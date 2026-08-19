@@ -78,6 +78,16 @@ POLL_SECS = 2.0              # pedal detection interval
 # single-user box.
 LOOP_STAGE_TIMEOUT = 600.0
 TRASH_KEEP_DAYS = 30
+# How long a stranded upload temporary in DATA must sit before the sweep takes
+# it. Comfortably longer than any single upload request can run — an in-flight
+# upload owns its temp file, and reaping one underneath the handler would fail
+# the upload for no reason.
+UPLOAD_TEMP_KEEP_SECS = 3600.0
+# Grace period before the collector will touch a source or staged file. upload()
+# writes the file into sources/ and only then inserts the slot row, so there is a
+# window in which the file exists and nothing references it yet. A collector run
+# landing inside that window would delete the upload out from under the request.
+GC_GRACE_SECS = 300.0
 # Whole-request cap for the two upload endpoints. A single lossless source is a
 # few tens of MB; this leaves headroom for a batch while refusing a runaway
 # body that would fill the small data partition. Flask answers 413 past it.

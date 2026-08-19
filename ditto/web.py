@@ -356,10 +356,21 @@ def create_app(service: Service) -> Flask:
         def gen():
             deadline = time.monotonic() + SSE_MAX_SECONDS
             try:
-                yield f"data: {json.dumps(service.snapshot())}\n\n"
+                # The queue is subscribed before this snapshot is taken, so it
+                # can already hold frames built earlier — and _emit builds a
+                # snapshot before it takes the subscriber lock, so even later
+                # arrivals can carry an older sequence. Send strictly
+                # increasing frames and drop the rest, or a stale one would
+                # land after the initial frame and roll the UI backwards.
+                first = service.snapshot()
+                last_seq = first.get("seq", 0)
+                yield f"data: {json.dumps(first)}\n\n"
                 while time.monotonic() < deadline:
                     try:
                         snap = q.get(timeout=15)
+                        if snap.get("seq", 0) <= last_seq:
+                            continue
+                        last_seq = snap["seq"]
                         yield f"data: {json.dumps(snap)}\n\n"
                     except queue.Empty:
                         yield ": keepalive\n\n"
