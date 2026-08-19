@@ -214,6 +214,27 @@ def test_a_fat_driver_without_directory_fsync_is_silent(mount, tmp_path,
     assert caplog.records == [], "an expected condition was reported as a problem"
 
 
+@pytest.mark.parametrize("name", ["EACCES", "EPERM", "EBADF", "EISDIR", "ENOSPC"])
+def test_access_and_descriptor_failures_are_not_treated_as_unsupported(
+        mount, tmp_path, monkeypatch, caplog, name):
+    """The one handler covers the open, the fsync and the close. Only a genuine
+    "this filesystem cannot do that" belongs in the silent set — an access,
+    policy or descriptor failure has nothing to do with an unsupported
+    operation, and swallowing it rebuilds the ambiguity the set exists to
+    remove."""
+    import errno as _errno
+    wav = tmp_path / "staged.wav"
+    wav.write_bytes(b"RIFF")
+    _fail_dir_fsync(monkeypatch, getattr(_errno, name))
+
+    with caplog.at_level("WARNING"):
+        pedal.write_track(20, wav)
+
+    assert pedal.track_path(20).read_bytes() == b"RIFF", "the write was lost"
+    assert any("may not survive a power cut" in r.getMessage()
+               for r in caplog.records), f"{name} was silently swallowed"
+
+
 def test_a_failing_card_is_reported_but_does_not_fail_the_write(
         mount, tmp_path, monkeypatch, caplog):
     """A real I/O error must not look like the benign case. It still must not

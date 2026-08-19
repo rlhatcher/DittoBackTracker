@@ -158,11 +158,16 @@ def capacity() -> Tuple[int, int]:
 
 
 # errnos that mean "this filesystem has no directory fsync", as opposed to
-# "this write is in trouble". EINVAL is what vfat returns; the rest cover
-# drivers that refuse the open or the operation outright.
+# "this write is in trouble". EINVAL is what vfat returns; ENOTSUP/EOPNOTSUPP
+# cover drivers that refuse the operation outright.
+#
+# Kept deliberately narrow. The same handler covers the open, the fsync and the
+# close, so anything wider starts absorbing failures that have nothing to do
+# with an unsupported operation — EACCES and EPERM are access or policy
+# problems, EBADF is a descriptor bug — and silence there would recreate exactly
+# the ambiguity this set exists to remove.
 _DIR_FSYNC_UNSUPPORTED = frozenset({
     errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP,
-    errno.EPERM, errno.EACCES, errno.EISDIR, errno.EBADF,
 })
 
 
