@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import os
 import queue
@@ -142,6 +143,12 @@ class Service:
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
         self._in_flight = threading.Event()
+        # Stamps every snapshot so a consumer can order them. _emit builds its
+        # snapshot before it takes the subscriber lock, so a frame can reach a
+        # queue after a newer one was built elsewhere — the sequence is what
+        # lets the reader drop it instead of rendering stale state.
+        # next() on an itertools.count is atomic, so no lock is needed.
+        self._snap_seq = itertools.count(1)
         self._last_prog_emit = 0.0
 
         self._stop = threading.Event()
@@ -231,6 +238,7 @@ class Service:
 
     def snapshot(self) -> Dict:
         return {
+            "seq": next(self._snap_seq),
             "pedal": self.pedal_state,
             "busy": self.busy,
             "busy_kind": self.busy_kind,
@@ -698,6 +706,9 @@ class Service:
         the file, then the directory, so both the bytes and the name that
         reaches them survive a cut. Same shape as media.convert's final step.
 
+        The order is the same as media.convert's final step: sync the temporary,
+        rename it into place, then sync the directory.
+
         Path.replace rather than shutil.move: mkstemp writes into config.DATA
         and SOURCES is a subdirectory of it, so this is always a same-filesystem
         rename. shutil.move would fall back to a copy across filesystems, and
@@ -708,16 +719,19 @@ class Service:
         this method exists to make, so failing it has to reach the caller rather
         than let an upload be acknowledged for bytes that were never written.
         """
-        tmp_path.replace(stored)
+        # Sync before the rename, not after. sources/ is content-addressed, so
+        # publishing the name first opens a window in which a power cut leaves
+        # an unconfirmed file under that hash — and the next upload of the same
+        # track would then find stored.exists(), skip the write entirely and
+        # record a row against bytes that were never confirmed. Failing here
+        # costs only the temporary, which nothing has referenced yet.
         try:
-            with open(stored, "rb") as f:
+            with open(tmp_path, "rb") as f:
                 os.fsync(f.fileno())
         except OSError:
-            # sources/ is content-addressed, so an unconfirmed file left under
-            # this hash would be adopted by the next upload of the same track —
-            # stored.exists() short-circuits the write. Take it away.
-            stored.unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
             raise
+        tmp_path.replace(stored)
         # The directory fsync only makes the *name* durable, and some
         # filesystems refuse it outright. The bytes are already safe by here,
         # and os.sync() on the session-end path covers the name, so a refusal

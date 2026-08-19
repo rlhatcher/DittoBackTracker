@@ -10,7 +10,9 @@ against config.DB_PATH and repointing DATA underneath it would strand that
 connection on a path the next test can't reach.
 """
 
+import json
 import os
+import pathlib
 import queue
 import stat
 import time
@@ -219,3 +221,73 @@ def test_emit_reaches_every_subscriber(service):
         while not q.empty():
             frames.append(q.get_nowait())
         assert any(f.get("error") == "broadcast" for f in frames)
+
+
+# --- the SSE initial-frame handoff ------------------------------------------
+
+def test_the_stream_never_sends_a_frame_older_than_the_one_before(service,
+                                                                  monkeypatch):
+    """events() subscribes before it takes its initial snapshot, so the queue
+    can already hold an older frame. Sending it after the initial one would roll
+    the UI backwards.
+
+    Deterministic: the stale frame is placed on the queue before the stream is
+    opened, and a newer one after, so the ordering under test is fixed rather
+    than raced.
+    """
+    from ditto import web
+
+    stale = service.snapshot()                 # built first, so lowest seq
+    stale["error"] = "STALE — must never be sent"
+
+    q = queue.Queue(maxsize=64)
+    q.put(stale)
+    monkeypatch.setattr(service, "subscribe", lambda: q)
+    monkeypatch.setattr(service, "unsubscribe", lambda _q: None)
+
+    client = web.create_app(service).test_client()
+    resp = client.get("/api/events")
+    stream = resp.response
+
+    first = json.loads(next(stream).decode().removeprefix("data: ").strip())
+
+    newer = service.snapshot()                 # built last, so highest seq
+    newer["error"] = "NEWER"
+    q.put(newer)
+
+    second = json.loads(next(stream).decode().removeprefix("data: ").strip())
+    resp.close()
+
+    assert first["seq"] > stale["seq"], "precondition: the queued frame is older"
+    assert second["error"] == "NEWER", f"stale frame was sent: {second['error']!r}"
+    assert second["seq"] > first["seq"]
+
+
+def test_store_source_syncs_before_it_publishes_the_name(paths, monkeypatch):
+    """Order matters, not just that both happen. sources/ is content-addressed,
+    so a name published ahead of its confirmed bytes leaves a window where a
+    power cut strands an unconfirmed file that the next upload of the same
+    track would adopt — skipping the write on stored.exists()."""
+    tmp = paths / "tmpupload"
+    tmp.write_bytes(b"audio bytes")
+    stored = config.SOURCES / "abc123.mp3"
+
+    events = []
+    real_fsync, real_replace = os.fsync, pathlib.Path.replace
+
+    def track_fsync(fd):
+        events.append("fsync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode)
+                      else "fsync-file")
+        return real_fsync(fd)
+
+    def track_replace(self, target):
+        events.append("rename")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(os, "fsync", track_fsync)
+    monkeypatch.setattr(pathlib.Path, "replace", track_replace)
+    core.Service._store_source(tmp, stored)
+
+    assert "fsync-file" in events and "rename" in events
+    assert events.index("fsync-file") < events.index("rename"), \
+        f"the name was published before the bytes were confirmed: {events}"

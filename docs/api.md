@@ -12,6 +12,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 
 ```json
 {
+  "seq": 4128,
   "pedal": "mounted",
   "busy": null,
   "busy_kind": null,
@@ -53,6 +54,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 
 | Field | Values |
 |---|---|
+| `seq` | Monotonically increasing snapshot counter. `/api/events` sends strictly increasing frames and drops the rest, so a consumer never sees state roll backwards; a hand-rolled consumer reading the queue itself should do the same |
 | `pedal` | `absent`, `mounted`, `error` |
 | `busy` | Description of current work, or `null` when idle |
 | `busy_kind` | `write` while the pedal is being written to, `read` while it is being read, else `null`. `write` is the device's only "don't unplug" signal |
@@ -278,8 +280,11 @@ and reconnect.
 
 Frames may be **coalesced, never reordered**. Each frame is the whole state, so
 a consumer that falls behind has its backlog discarded and receives the newest
-snapshot rather than a queue of stale ones. Don't treat the stream as a change
-log; treat each frame as the current truth.
+snapshot rather than a queue of stale ones. Every frame carries a `seq`, and the
+stream only ever sends a frame whose `seq` is higher than the last one it sent —
+including the very first, which can otherwise race frames queued while the
+stream was being set up. Don't treat the stream as a change log; treat each
+frame as the current truth.
 
 ```bash
 curl -N http://dittobacktracker.local/api/events
