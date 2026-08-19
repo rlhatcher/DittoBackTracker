@@ -751,7 +751,15 @@ function startRename(row, nm, r){
         const j = await resp.json().catch(()=>({}));
         fail(j.error || "Rename failed");
         loadLibrary();
+        return;
       }
+      // The optimistic write went to the row object we captured, but
+      // renderLibrary is only frozen during the edit — loadLibrary is not, and
+      // es.onopen fires on the five-minute rotation. If it replaced `library`
+      // while this was in flight, that object is detached and the row would
+      // render the old name until some later refresh. Re-read from the server
+      // so the rendered name is the committed one either way.
+      loadLibrary();
     } catch {
       fail("Rename failed — check the connection");
       loadLibrary();

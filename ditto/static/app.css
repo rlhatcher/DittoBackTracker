@@ -144,6 +144,11 @@ h2{font-size:13px;font-weight:600;color:var(--tx2);margin:0 0 8px;
 .libname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;cursor:text}
 .libname:hover{text-decoration:underline dotted var(--tx2)}
+/* The row controls are reachable by keyboard, and the accent ring is what the
+   rest of the page uses in place of the browser default — so they need it too
+   or they are the only focusable things here without a visible focus state. */
+.libname:focus-visible,.libbtn:focus-visible{outline:2px solid var(--accent);
+  outline-offset:2px;border-radius:4px}
 /* The inline rename field replaces the name in place, so it sits on the same
    baseline and doesn't reflow the row. */
 input.libedit{flex:1;min-width:0;background:var(--bg);color:var(--tx);

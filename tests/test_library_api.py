@@ -6,6 +6,8 @@ duck-typed FakeService in test_web_loops, because the interesting behaviour
 still referenced) lives in the service, not the route.
 """
 
+import threading
+
 import pytest
 
 from ditto import config, core, db, web
@@ -525,3 +527,30 @@ def test_upload_holds_one_admission_over_the_whole_mutation(app, monkeypatch,
     row = db.get_slot(5)
     assert row["source_hash"] == H1
     assert db.hash_in_library(H1), "the slot must never outlive its library row"
+
+
+def test_assign_reads_the_row_back_under_the_admission(app, monkeypatch):
+    """A concurrent forced forget can clear the slot the instant the lock is
+    released. Reading outside the block would return None for an assignment
+    that did happen, which the route maps to a 404."""
+    svc = _service_of(app)
+    seed(H1, "Track")
+
+    observed = []
+    real_get = db.get_slot
+    caller = threading.current_thread()
+
+    def watch(slot):
+        # This thread only. The worker picks up the convert job and calls
+        # get_slot too, and it never holds the admission — counting that would
+        # make the assertion fail regardless of what assign() does.
+        if threading.current_thread() is caller:
+            observed.append(svc._admit._is_owned())
+        return real_get(slot)
+
+    monkeypatch.setattr(db, "get_slot", watch)
+    row = svc.assign(7, H1)
+
+    assert row is not None and row["source_hash"] == H1
+    assert observed and observed[-1] is True, \
+        "the slot row was read after the admission was released"

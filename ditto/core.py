@@ -371,8 +371,12 @@ class Service:
             if not db.hash_in_library(source_hash):
                 return None
             self._assign(slot, source_hash)
+            # Read it back inside the block, like upload does. A concurrent
+            # forced forget can clear the slot the moment the lock is released,
+            # and a None here becomes a 404 for an assignment that did happen.
+            row = db.get_slot(slot)
         self._emit()
-        return db.get_slot(slot)
+        return row
 
     def _assign(self, slot: int, source_hash: str) -> None:
         """Point a slot at a library track and queue the work to realise it.
