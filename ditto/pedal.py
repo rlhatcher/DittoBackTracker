@@ -9,6 +9,8 @@ effect of anything else.
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import shutil
 import subprocess
@@ -18,6 +20,8 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 from . import config, media
+
+log = logging.getLogger(__name__)
 
 # A wedged or half-unplugged USB device makes mount(8) block indefinitely.
 # The monitor thread calls mount() and the shutdown path calls umount(), so an
@@ -153,6 +157,15 @@ def capacity() -> Tuple[int, int]:
     return (st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize)
 
 
+# errnos that mean "this filesystem has no directory fsync", as opposed to
+# "this write is in trouble". EINVAL is what vfat returns; the rest cover
+# drivers that refuse the open or the operation outright.
+_DIR_FSYNC_UNSUPPORTED = frozenset({
+    errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP,
+    errno.EPERM, errno.EACCES, errno.EISDIR, errno.EBADF,
+})
+
+
 def _atomic_copy(src: Path, dest: Path, prefix: str) -> None:
     """Copy `src` over `dest` so `dest` is never seen half-written.
 
@@ -189,8 +202,20 @@ def _atomic_copy(src: Path, dest: Path, prefix: str) -> None:
                 os.fsync(dirfd)
             finally:
                 os.close(dirfd)
-        except OSError:
-            pass    # not supported on all FAT drivers; os.sync() covers it
+        except OSError as e:
+            # Plenty of FAT drivers simply do not implement fsync on a
+            # directory. That is the expected case here, it is harmless, and
+            # the os.sync() the caller does covers it — so it stays silent.
+            #
+            # A failing card is not that, and the two must not look alike. Say
+            # so, but do not raise: the rename has already happened, the file
+            # is in place and readable, and only its directory entry is
+            # unconfirmed. Failing the write here would report a loss that did
+            # not occur and would leave the caller retrying a copy that landed.
+            if e.errno not in _DIR_FSYNC_UNSUPPORTED:
+                log.warning("could not flush the directory entry for %s: %s. "
+                            "The file is written, but may not survive a power "
+                            "cut before the next sync.", dest, e)
     except Exception:
         tmp.unlink(missing_ok=True)
         raise

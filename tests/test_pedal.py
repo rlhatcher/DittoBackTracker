@@ -182,3 +182,51 @@ def test_clean_temp_files_removes_interrupted_writes(mount, monkeypatch):
     assert list(d.glob("~bt*.tmp")) == []
     assert (d / config.TRACK_FILENAME).exists(), "a real track was deleted"
     assert (d / config.LOOP_FILENAME).exists(), "a recorded loop was deleted"
+
+
+def _fail_dir_fsync(monkeypatch, err):
+    """Make fsync fail for directories only, leaving file fsync working."""
+    import os as _os
+    import stat as _stat
+    real = _os.fsync
+
+    def only_dirs_fail(fd):
+        if _stat.S_ISDIR(_os.fstat(fd).st_mode):
+            raise OSError(err, "boom")
+        return real(fd)
+
+    monkeypatch.setattr(pedal.os, "fsync", only_dirs_fail)
+
+
+def test_a_fat_driver_without_directory_fsync_is_silent(mount, tmp_path,
+                                                        monkeypatch, caplog):
+    """Plenty of FAT drivers simply do not implement it. That is expected, and
+    the caller's os.sync() covers it, so it must not cry wolf."""
+    import errno as _errno
+    wav = tmp_path / "staged.wav"
+    wav.write_bytes(b"RIFF")
+    _fail_dir_fsync(monkeypatch, _errno.EINVAL)
+
+    with caplog.at_level("WARNING"):
+        pedal.write_track(11, wav)
+
+    assert pedal.track_path(11).read_bytes() == b"RIFF"
+    assert caplog.records == [], "an expected condition was reported as a problem"
+
+
+def test_a_failing_card_is_reported_but_does_not_fail_the_write(
+        mount, tmp_path, monkeypatch, caplog):
+    """A real I/O error must not look like the benign case. It still must not
+    raise: the rename already happened, so the file is in place — failing here
+    would report a loss that did not occur."""
+    import errno as _errno
+    wav = tmp_path / "staged.wav"
+    wav.write_bytes(b"RIFF")
+    _fail_dir_fsync(monkeypatch, _errno.EIO)
+
+    with caplog.at_level("WARNING"):
+        pedal.write_track(12, wav)
+
+    assert pedal.track_path(12).read_bytes() == b"RIFF", "the write was lost"
+    assert any("may not survive a power cut" in r.getMessage()
+               for r in caplog.records), "a failing card went unreported"
