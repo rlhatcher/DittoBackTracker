@@ -463,6 +463,15 @@ def library_delete(source_hash: str) -> bool:
         raise
 
 
+def library_hashes() -> set:
+    """Every hash the library knows, as one query.
+
+    For the collector, which would otherwise ask once per file in sources/.
+    """
+    return {r["source_hash"] for r in
+            conn().execute("SELECT source_hash FROM library")}
+
+
 def hash_in_library(source_hash: str) -> bool:
     """Is this audio still wanted? The library row is the only thing that keeps
     a file in sources/ alive — a slot assignment does not, and neither does a

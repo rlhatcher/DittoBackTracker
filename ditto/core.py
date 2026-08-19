@@ -213,7 +213,13 @@ class Service:
 
     # ---------------------------------------------------------------- state
 
-    def capacity(self) -> Dict:
+    def capacity(self, slots: Optional[List[Dict]] = None) -> Dict:
+        """Free/used time on the pedal.
+
+        `slots` lets a caller that has already read the slot table hand it over
+        rather than pay for it twice — snapshot() does, and snapshot() runs at
+        5 Hz during a conversion.
+        """
         free, total = pedal.capacity()
         rate = media.bytes_per_second(self.fmt)
         if total and rate:
@@ -225,7 +231,9 @@ class Service:
             total_secs = total / rate
         else:
             # Unmounted: no byte figures to trust, fall back to DB durations.
-            used_secs = sum(s["duration"] for s in db.all_slots())
+            if slots is None:
+                slots = db.all_slots()
+            used_secs = sum(s["duration"] for s in slots)
             total_secs = 0
         return {
             "bytes_free": free, "bytes_total": total,
@@ -237,6 +245,11 @@ class Service:
         }
 
     def snapshot(self) -> Dict:
+        # Read the slot table once and hand it to capacity(), which otherwise
+        # reads it again for its unmounted fallback — and unmounted is the
+        # normal state during a conversion, which is exactly when this runs at
+        # 5 Hz.
+        slots = db.all_slots()
         return {
             "seq": next(self._snap_seq),
             "pedal": self.pedal_state,
@@ -247,10 +260,10 @@ class Service:
             "error": self.last_error,
             "format": self.fmt,
             "format_source": self.fmt_source,
-            "slots": db.all_slots(),
+            "slots": slots,
             "slot_count": config.SLOTS,
             "loops": sorted(self._loops),
-            "capacity": self.capacity(),
+            "capacity": self.capacity(slots),
             "ip": local_ip(),
             "version": __version__,
             "revision": self._revision,
@@ -1089,7 +1102,10 @@ class Service:
                 self._emit()
 
         try:
-            media.convert(src, h, self.fmt, progress=prog)
+            # row["duration"] is joined from the library, where upload()
+            # stored what it probed. Passing it saves convert an ffprobe.
+            media.convert(src, h, self.fmt, progress=prog,
+                          duration=row["duration"])
         except media.ConvertError as e:
             db.set_state(slot, "error", str(e))
             self._emit()
@@ -1307,8 +1323,13 @@ class Service:
                 h = f.name.split("-", 1)[0]
                 if h not in assigned and self._older_than(f, cutoff):
                     f.unlink(missing_ok=True)
+            # One query for the whole library rather than one per file, the
+            # same shape as the staged sweep above. The library is meant to
+            # grow to card capacity, so a per-file round trip against a
+            # synchronous=FULL database is O(library) on every boot.
+            known = db.library_hashes()
             for f in config.SOURCES.iterdir():
-                if (f.is_file() and not db.hash_in_library(f.stem)
+                if (f.is_file() and f.stem not in known
                         and self._older_than(f, cutoff)):
                     f.unlink(missing_ok=True)
             self._sweep_upload_temps()

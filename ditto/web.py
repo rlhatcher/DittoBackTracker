@@ -226,7 +226,12 @@ def create_app(service: Service) -> Flask:
         # someone's performance by accident.
         reserved = {s["slot"] for s in db.all_slots()}
         if pedal.mounted():
-            reserved |= {n for n in range(1, config.SLOTS + 1) if pedal.has_loop(n)}
+            # service.has_loop reads the cache built once per mount. Calling
+            # pedal.has_loop here instead would stat 99 directories over a
+            # ~1 MB/s USB link on every upload request — the exact cost the
+            # cache exists to avoid.
+            reserved |= {n for n in range(1, config.SLOTS + 1)
+                         if service.has_loop(n)}
         results, errors = [], []
         planned = []
         if start is not None:

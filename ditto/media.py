@@ -78,12 +78,18 @@ def staged_path(source_hash: str, spec: Dict) -> Path:
 
 
 def convert(src: Path, source_hash: str, spec: Dict,
-            progress=None) -> Path:
+            progress=None, duration: float = 0.0) -> Path:
     """Transcode to the pedal's exact format. Returns the staged WAV path.
 
     Both metadata flags matter: -map_metadata -1 alone still leaves ffmpeg
     writing a LIST/INFO chunk with its own version string. -f wav is needed
     because the .part suffix defeats format inference.
+
+    `duration` is only used to scale the progress fraction. Pass it if you
+    already know it — the caller usually does, since it is stored on the
+    library row — and save a whole ffprobe fork+exec+parse, which is a few
+    hundred milliseconds on a Pi Zero and is otherwise paid once per track on
+    every multi-file drop. Left at 0 it is probed here as before.
     """
     dest = staged_path(source_hash, spec)
     if dest.exists() and dest.stat().st_size > 44:
@@ -104,10 +110,11 @@ def convert(src: Path, source_hash: str, spec: Dict,
         str(tmp),
     ]
 
-    total = 0.0
-    info = probe(src)
-    if info:
-        total = info.duration
+    total = duration
+    if total <= 0:
+        info = probe(src)
+        if info:
+            total = info.duration
 
     # stderr goes to a file, not a pipe: we only read stdout, and a chatty
     # ffmpeg filling the stderr pipe buffer would deadlock the progress loop.
