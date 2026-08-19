@@ -286,12 +286,19 @@ def test_the_worker_claims_in_flight_before_its_final_gate_check(service,
                         lambda: (events.append("claim"), real_claim())[1])
 
     ran = threading.Event()
-    monkeypatch.setattr(core.Service, "_do_erase",
-                        lambda self, slot: ran.set())
+    captured = []
+
+    def record_then_signal(self, slot):
+        # Snapshot inside the job, not after the wait: once the worker is
+        # released it loops round and checks the gate again, which would
+        # rewrite the tail to ["gate", "gate"] before the assertion reads it.
+        captured.append(events[-2:])
+        ran.set()
+
+    monkeypatch.setattr(core.Service, "_do_erase", record_then_signal)
     service._work.put(("erase", 5))
     assert ran.wait(timeout=5), "the worker never ran the job"
 
-    # Everything up to the moment the job ran. The claim must be the
-    # second-to-last step, with a gate check after it.
-    assert events[-2:] == ["claim", "gate"], (
-        f"the gate was checked before the claim: {events[-4:]}")
+    # The claim must be the second-to-last step, with a gate check after it.
+    assert captured[0] == ["claim", "gate"], (
+        f"the gate was checked before the claim: {captured[0]}")
