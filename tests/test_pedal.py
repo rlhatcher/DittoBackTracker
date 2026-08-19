@@ -92,3 +92,93 @@ def test_run_still_maps_a_timeout(monkeypatch):
     monkeypatch.setattr(pedal.subprocess, "run", too_slow)
     with pytest.raises(pedal.PedalError, match="timed out"):
         pedal._run(["mount", "/media/ditto"], "mount")
+
+
+# --- the atomic copy both directions share ----------------------------------
+
+def test_write_track_lands_the_bytes_and_leaves_no_temp(mount, tmp_path):
+    wav = tmp_path / "staged.wav"
+    wav.write_bytes(b"RIFF" + b"\x00" * 4096)
+
+    pedal.write_track(5, wav)
+
+    dest = pedal.track_path(5)
+    assert dest.read_bytes() == wav.read_bytes()
+    assert list(dest.parent.glob("~bt*.tmp")) == [], "a temp file was left behind"
+    assert dest.stat().st_mode & 0o777 == 0o644
+
+
+def test_write_track_creates_the_slot_directory(mount, tmp_path):
+    wav = tmp_path / "staged.wav"
+    wav.write_bytes(b"RIFF")
+
+    pedal.write_track(42, wav)
+
+    assert pedal.track_path(42).is_file()
+
+
+def test_write_track_cleans_up_when_the_source_vanishes(mount, tmp_path):
+    """A staged file can disappear between the caller's check and the copy.
+    The half-written temp must not be left on the pedal's limited capacity."""
+    missing = tmp_path / "gone.wav"
+
+    with pytest.raises(OSError):
+        pedal.write_track(6, missing)
+
+    slot = mount / config.SLOT_DIR.format(6)
+    assert list(slot.glob("~bt*.tmp")) == [], "a temp file survived the failure"
+    assert not pedal.track_path(6).exists()
+
+
+def test_write_track_replaces_an_existing_track_atomically(mount, tmp_path):
+    old = tmp_path / "old.wav"
+    old.write_bytes(b"OLD" * 100)
+    new = tmp_path / "new.wav"
+    new.write_bytes(b"NEW" * 200)
+    pedal.write_track(7, old)
+
+    pedal.write_track(7, new)
+
+    assert pedal.track_path(7).read_bytes() == new.read_bytes()
+    assert list(pedal.track_path(7).parent.glob("~bt*.tmp")) == []
+
+
+def test_copy_loop_lands_the_bytes_locally(mount, tmp_path):
+    d = _slot_dir(mount, 8)
+    (d / config.LOOP_FILENAME).write_bytes(b"LOOP" + b"\x00" * 2048)
+    dest = tmp_path / "staged-loop.wav"
+
+    pedal.copy_loop(8, dest)
+
+    assert dest.read_bytes() == (d / config.LOOP_FILENAME).read_bytes()
+    assert list(dest.parent.glob("~loop*.tmp")) == []
+
+
+def test_copy_loop_raises_when_the_loop_has_gone(mount, tmp_path):
+    """It can be deleted on the pedal between has_loop() and here."""
+    _slot_dir(mount, 9)
+    dest = tmp_path / "staged-loop.wav"
+
+    with pytest.raises(FileNotFoundError):
+        pedal.copy_loop(9, dest)
+
+    assert not dest.exists()
+    assert list(dest.parent.glob("~loop*.tmp")) == [], "a temp file survived"
+
+
+def test_clean_temp_files_removes_interrupted_writes(mount, monkeypatch):
+    """~bt*.tmp is invisible to the pedal but eats its very limited capacity."""
+    # The temp dir standing in for the mount is not a real mount point, and
+    # clean_temp_files refuses to touch anything unless it believes one is up.
+    monkeypatch.setattr(pedal, "mounted", lambda: True)
+    d = _slot_dir(mount, 3)
+    (d / "~btabc.tmp").write_bytes(b"half a wav")
+    (d / config.TRACK_FILENAME).write_bytes(b"a real track")
+    (d / config.LOOP_FILENAME).write_bytes(b"a real loop")
+
+    removed = pedal.clean_temp_files()
+
+    assert removed == 1
+    assert list(d.glob("~bt*.tmp")) == []
+    assert (d / config.TRACK_FILENAME).exists(), "a real track was deleted"
+    assert (d / config.LOOP_FILENAME).exists(), "a recorded loop was deleted"
