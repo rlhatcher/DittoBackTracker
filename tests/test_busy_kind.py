@@ -257,3 +257,41 @@ def test_the_update_gate_holds_a_job_that_arrives_after_it_closes(service):
     while not ran and time.monotonic() < deadline:
         time.sleep(0.05)
     assert ran == [42], "the held job was dropped instead of resumed"
+
+
+def test_the_worker_claims_in_flight_before_its_final_gate_check(service,
+                                                                monkeypatch):
+    """update() and the worker must not both admit.
+
+    update() sets _updating and then reads _in_flight; the worker reads
+    _updating and then sets _in_flight. Ordered that way the two can pass each
+    other: the job is dequeued and held, so the queue reads empty, busy is
+    still None and _in_flight is not yet set — and a redeploy is admitted
+    alongside a write that is about to start.
+
+    The window is a couple of bytecodes wide, so racing it would be flaky in
+    both directions. Assert the ordering instead: the claim has to land before
+    the last gate check, which is what makes whichever side runs second see
+    what the first did.
+    """
+    service._drain(timeout=5.0)
+    events = []
+
+    real_gate_is_set = service._updating.is_set
+    real_claim = service._in_flight.set
+
+    monkeypatch.setattr(service._updating, "is_set",
+                        lambda: (events.append("gate"), real_gate_is_set())[1])
+    monkeypatch.setattr(service._in_flight, "set",
+                        lambda: (events.append("claim"), real_claim())[1])
+
+    ran = threading.Event()
+    monkeypatch.setattr(core.Service, "_do_erase",
+                        lambda self, slot: ran.set())
+    service._work.put(("erase", 5))
+    assert ran.wait(timeout=5), "the worker never ran the job"
+
+    # Everything up to the moment the job ran. The claim must be the
+    # second-to-last step, with a gate check after it.
+    assert events[-2:] == ["claim", "gate"], (
+        f"the gate was checked before the claim: {events[-4:]}")

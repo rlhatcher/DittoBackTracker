@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import re
@@ -10,12 +11,15 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from flask import (Flask, Response, abort, jsonify, request, send_file,
                    send_from_directory, stream_with_context)
 
 from . import config, db, pedal
 from .core import Service, ShuttingDown
+
+log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
@@ -75,6 +79,52 @@ def _json_str(body, field: str):
         return None
     value = body.get(field)
     return value if isinstance(value, str) else None
+
+
+class IngestError(NamedTuple):
+    """Why one file could not be taken, and what that means over HTTP.
+
+    The distinction matters: a file ffprobe cannot read is the client's problem
+    (400), a card that will not accept the bytes is ours (500). A batch reports
+    either per file and still returns 201; a single-file route needs the code.
+    """
+    message: str
+    status: int
+
+
+def _ingest(f, name: str, store):
+    """Save an upload to a temp file and hand it to `store`.
+
+    The single place the three ingest routes spill a file to disk, so the
+    ownership rule lives once: on success `store` owns the temp path — it moves
+    it into sources/ or unlinks it there — and we must not touch it again.
+
+    Returns (row, IngestError|None). ShuttingDown is deliberately *not* caught:
+    the device is halting, no further file can land, and a batch has to stop and
+    report what already did rather than mark every remaining file failed.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(config.DATA),
+                               suffix=Path(name).suffix.lower())
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        f.save(str(tmp_path))
+        return (store(tmp_path, Path(name).stem), None)
+    except ValueError as e:
+        # Not audio, or ffprobe could not read it. The client's problem.
+        tmp_path.unlink(missing_ok=True)
+        return (None, IngestError(str(e), 400))
+    except OSError as e:
+        # The card is full, or the bytes could not be confirmed — _store_source
+        # raises rather than acknowledge an upload it cannot vouch for. This is
+        # the expected failure on this device, and in a batch it must not throw
+        # away the files that already landed.
+        tmp_path.unlink(missing_ok=True)
+        log.warning("could not store %s: %s", name, e)
+        return (None, IngestError(f"could not be saved: {e}", 500))
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def create_app(service: Service) -> Flask:
@@ -148,21 +198,9 @@ def create_app(service: Service) -> Flask:
         if Path(name).suffix.lower() not in config.AUDIO_SUFFIXES:
             return jsonify(error=f"{Path(name).suffix} is not an audio file"), 400
 
-        fd, tmp = tempfile.mkstemp(dir=str(config.DATA),
-                                   suffix=Path(name).suffix.lower())
-        os.close(fd)
-        tmp_path = Path(tmp)
-        try:
-            f.save(str(tmp_path))
-            # On success service.upload owns tmp_path — it is moved into
-            # sources/ or unlinked there, so we must not touch it again.
-            row = service.upload(slot, tmp_path, Path(name).stem)
-        except ValueError as e:
-            tmp_path.unlink(missing_ok=True)
-            return jsonify(error=str(e)), 400
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        row, err = _ingest(f, name, lambda p, stem: service.upload(slot, p, stem))
+        if err:
+            return jsonify(error=err.message), err.status
         return jsonify(row), 201
 
     @app.post("/api/upload")
@@ -236,19 +274,18 @@ def create_app(service: Service) -> Flask:
             if n is None:
                 errors.append({"name": name, "error": "no free slots"})
                 continue
-            fd, tmp = tempfile.mkstemp(dir=str(config.DATA),
-                                       suffix=Path(name).suffix.lower())
-            os.close(fd)
-            tmp_path = Path(tmp)
             try:
-                f.save(str(tmp_path))
-                results.append(service.upload(n, tmp_path, Path(name).stem))
-            except ValueError as e:
-                tmp_path.unlink(missing_ok=True)
+                row, err = _ingest(f, name,
+                                   lambda p, stem, n=n: service.upload(n, p, stem))
+            except ShuttingDown as e:
+                # Nothing further can land. Report what did rather than losing
+                # the whole batch — those files are already committed and queued.
                 errors.append({"name": name, "error": str(e)})
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
+                return jsonify(added=results, errors=errors), 503
+            if err:
+                errors.append({"name": name, "error": err.message})
+            else:
+                results.append(row)
 
         return jsonify(added=results, errors=errors), 201
 
@@ -370,20 +407,15 @@ def create_app(service: Service) -> Flask:
             if suffix not in config.AUDIO_SUFFIXES:
                 errors.append({"name": name, "error": "not an audio file"})
                 continue
-            fd, tmp = tempfile.mkstemp(dir=str(config.DATA), suffix=suffix)
-            os.close(fd)
-            tmp_path = Path(tmp)
             try:
-                f.save(str(tmp_path))
-                # On success the service owns tmp_path — it is moved into
-                # sources/ or unlinked there, so we must not touch it again.
-                added.append(service.add_to_library(tmp_path, Path(name).stem))
-            except ValueError as e:
-                tmp_path.unlink(missing_ok=True)
+                row, err = _ingest(f, name, service.add_to_library)
+            except ShuttingDown as e:
                 errors.append({"name": name, "error": str(e)})
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
+                return jsonify(added=added, errors=errors), 503
+            if err:
+                errors.append({"name": name, "error": err.message})
+            else:
+                added.append(row)
         return jsonify(added=added, errors=errors), 201
 
     @app.patch("/api/library/<h>")

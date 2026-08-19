@@ -416,7 +416,7 @@ curl -N http://dittobacktracker.local/api/events
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
-| `500` | `GET /api/loops/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error). Body is `{"error": "..."}` |
+| `500` | `GET /api/loops/<n>`, `POST /api/slots/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error); or the upload could not be stored — a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
 | `503` | `GET /api/loops/<n>`, `POST /api/update` | No pedal mounted / loop staging timed out; or, for update, the device is shutting down. Body is `{"error": "..."}` |
 
@@ -426,5 +426,11 @@ and report those per file in `errors`. A `400` from either means the whole
 request was unusable (no `file` part at all, or a `start` outside
 1–`slot_count`). Check `errors` on a `201`; don't treat `201` as "everything
 landed".
+
+A batch also reports per file when the device could not *store* a file — a full
+card, or bytes it could not confirm — rather than failing the whole request, so
+the files that did land are never silently lost. The one case that stops a batch
+early is the device beginning to shut down: that returns `503`, and the body
+still carries the `added` and `errors` accumulated so far.
 
 Anything else is a bug.

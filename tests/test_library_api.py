@@ -6,6 +6,7 @@ duck-typed FakeService in test_web_loops, because the interesting behaviour
 still referenced) lives in the service, not the route.
 """
 
+import io
 import threading
 
 import pytest
@@ -554,3 +555,99 @@ def test_assign_reads_the_row_back_under_the_admission(app, monkeypatch):
     assert row is not None and row["source_hash"] == H1
     assert observed and observed[-1] is True, \
         "the slot row was read after the admission was released"
+
+
+# --- a batch must not lose what already landed -------------------------------
+
+def _audio(name="track.mp3", body=b"pretend audio"):
+    return (io.BytesIO(body), name)
+
+
+def test_a_batch_reports_the_files_that_landed_when_one_cannot_be_stored(
+        app, client, monkeypatch):
+    """_store_source raises when it cannot confirm bytes on the card — the
+    expected failure on this device, and a set-list drop is exactly when it
+    happens. The files already committed and queued must still be reported, or
+    the UI cannot tell what landed."""
+    svc = _service_of(app)
+    monkeypatch.setattr(core.media, "probe",
+                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
+    hashes = iter([f"{i:020d}" for i in range(10)])
+    monkeypatch.setattr(core.media, "file_hash", lambda p: next(hashes))
+
+    calls = {"n": 0}
+    real_store = core.Service._store_source
+
+    def fail_on_the_third(tmp_path, stored):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            tmp_path.unlink(missing_ok=True)
+            raise OSError("no space left on device")
+        return real_store(tmp_path, stored)
+
+    monkeypatch.setattr(core.Service, "_store_source",
+                        staticmethod(fail_on_the_third))
+
+    rv = client.post("/api/library", content_type="multipart/form-data", data={
+        "file": [_audio("a.mp3"), _audio("b.mp3"), _audio("c.mp3"),
+                 _audio("d.mp3")]})
+
+    assert rv.status_code == 201
+    body = rv.get_json()
+    assert len(body["added"]) == 3, "files that landed were thrown away"
+    assert len(body["errors"]) == 1
+    assert body["errors"][0]["name"] == "c.mp3"
+    assert "could not be saved" in body["errors"][0]["error"]
+
+
+def test_a_batch_stops_and_reports_partials_when_the_device_starts_halting(
+        app, client, monkeypatch):
+    """ShuttingDown is different from a per-file failure: nothing further can
+    land, so the batch stops — but what already landed is still reported."""
+    svc = _service_of(app)
+    monkeypatch.setattr(core.media, "probe",
+                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
+    hashes = iter([f"{i:020d}" for i in range(10)])
+    monkeypatch.setattr(core.media, "file_hash", lambda p: next(hashes))
+
+    seen = {"n": 0}
+    real_add = core.Service.add_to_library
+
+    def halt_after_two(self, tmp_path, display_name):
+        seen["n"] += 1
+        if seen["n"] > 2:
+            self.ending = True
+        return real_add(self, tmp_path, display_name)
+
+    monkeypatch.setattr(core.Service, "add_to_library", halt_after_two)
+    try:
+        rv = client.post("/api/library", content_type="multipart/form-data",
+                         data={"file": [_audio("a.mp3"), _audio("b.mp3"),
+                                        _audio("c.mp3"), _audio("d.mp3")]})
+        assert rv.status_code == 503
+        assert len(rv.get_json()["added"]) == 2, "partials were discarded"
+    finally:
+        svc.ending = False
+
+
+def test_a_single_upload_that_cannot_be_stored_is_a_500_not_a_400(
+        app, client, monkeypatch):
+    """A card that will not take the bytes is our failure, not the client's."""
+    monkeypatch.setattr(core.media, "probe",
+                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
+    monkeypatch.setattr(core.media, "file_hash", lambda p: H1)
+    monkeypatch.setattr(core.Service, "_store_source", staticmethod(
+        lambda t, s: (_ for _ in ()).throw(OSError("no space left on device"))))
+
+    rv = client.post("/api/slots/4", content_type="multipart/form-data",
+                     data={"file": _audio()})
+
+    assert rv.status_code == 500
+    assert "could not be saved" in rv.get_json()["error"]
+
+
+def test_a_single_upload_of_a_bad_file_is_still_a_400(app, client, monkeypatch):
+    monkeypatch.setattr(core.media, "probe", lambda p: None)
+    rv = client.post("/api/slots/4", content_type="multipart/form-data",
+                     data={"file": _audio()})
+    assert rv.status_code == 400
