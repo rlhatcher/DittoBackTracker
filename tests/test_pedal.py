@@ -251,3 +251,24 @@ def test_a_failing_card_is_reported_but_does_not_fail_the_write(
     assert pedal.track_path(12).read_bytes() == b"RIFF", "the write was lost"
     assert any("may not survive a power cut" in r.getMessage()
                for r in caplog.records), "a failing card went unreported"
+
+
+def test_the_mode_is_set_before_the_sync_that_makes_it_durable(mount, tmp_path,
+                                                               monkeypatch):
+    """fsync covers this inode's metadata as well as its data. Setting the mode
+    after it would leave a window where a power cut lands the rename but not
+    the mode, and the file appears with mkstemp's private 0600."""
+    order = []
+    real_fchmod, real_fsync = pedal.os.fchmod, pedal.os.fsync
+    monkeypatch.setattr(pedal.os, "fchmod",
+                        lambda fd, m: (order.append("chmod"), real_fchmod(fd, m))[1])
+    monkeypatch.setattr(pedal.os, "fsync",
+                        lambda fd: (order.append("fsync"), real_fsync(fd))[1])
+
+    wav = tmp_path / "staged.wav"
+    wav.write_bytes(b"RIFF")
+    pedal.write_track(30, wav)
+
+    assert order[:2] == ["chmod", "fsync"], (
+        f"the mode was not covered by the sync: {order}")
+    assert pedal.track_path(30).stat().st_mode & 0o777 == 0o644

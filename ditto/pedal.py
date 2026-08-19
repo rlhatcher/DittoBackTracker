@@ -197,9 +197,14 @@ def _atomic_copy(src: Path, dest: Path, prefix: str) -> None:
         # raises — a staged file, or a loop, can vanish between check and copy.
         with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
             shutil.copyfileobj(fsrc, fdst, length=1 << 19)
+            # Mode before the sync, not after the close: fsync covers this
+            # inode's metadata as well as its data, so doing it here makes the
+            # permissions as durable as the bytes. chmod after the fsync would
+            # leave a window where a power cut lands the rename but not the
+            # mode, and the file appears with mkstemp's private 0600.
+            os.fchmod(fdst.fileno(), 0o644)
             fdst.flush()
             os.fsync(fdst.fileno())
-        os.chmod(tmp, 0o644)
         tmp.replace(dest)
         try:
             dirfd = os.open(str(dest.parent), os.O_RDONLY)
