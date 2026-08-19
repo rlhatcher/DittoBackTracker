@@ -241,8 +241,13 @@ stream rotation.
 
 ## POST /api/library
 
-Add files without assigning slots. Multipart, one or more `file` parts. Same
-shape as `/api/upload`:
+Add files to the library without assigning slots. Multipart, one or more `file`
+parts.
+
+`201` with per-file results, in the same shape as `POST /api/upload` — and with
+the same caveat: it is a batch, so it returns `201` even when every file was
+rejected. Check `errors`; don't read `201` as "everything landed". A `400` means
+the whole request was unusable (no `file` part at all).
 
 ```json
 {
@@ -251,7 +256,6 @@ shape as `/api/upload`:
   "errors": [ { "name": "notes.txt", "error": "not an audio file" } ]
 }
 ```
-
 ---
 
 ## PATCH /api/library/&lt;hash&gt;
@@ -280,6 +284,15 @@ Add `?force` to clear those slots first. On success:
 
 ```json
 { "ok": true, "cleared": [3, 7] }
+```
+
+A `404` means there was no such track — but it can still have changed the
+device, so it carries `cleared` too. That happens when the library row had
+already gone (a concurrent delete, say) while slots still pointed at it: those
+slots are cleared regardless, and reporting an empty result would hide it.
+
+```json
+{ "error": "not found", "cleared": [3] }
 ```
 
 ---
@@ -407,10 +420,11 @@ curl -N http://dittobacktracker.local/api/events
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
 | `503` | `GET /api/loops/<n>`, `POST /api/update` | No pedal mounted / loop staging timed out; or, for update, the device is shutting down. Body is `{"error": "..."}` |
 
-`POST /api/upload` is the exception to the rule. It is a batch, so it returns
-`201` even when some files were rejected, and reports those per file in
-`errors` — a `400` from it means the whole request was unusable (no `file`
-part at all, or a `start` outside 1–`slot_count`). Check `errors` on a `201`;
-don't treat `201` as "everything landed".
+`POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both
+are batches, so they return `201` even when some — or all — files were rejected,
+and report those per file in `errors`. A `400` from either means the whole
+request was unusable (no `file` part at all, or a `start` outside
+1–`slot_count`). Check `errors` on a `201`; don't treat `201` as "everything
+landed".
 
 Anything else is a bug.

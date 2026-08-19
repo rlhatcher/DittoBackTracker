@@ -838,7 +838,15 @@ async function forget(r, force){
     }
     return;
   }
-  if (!resp.ok){ fail(j.error || "Delete failed"); return; }
+  if (!resp.ok){
+    fail(j.error || "Delete failed");
+    // A 404 here means the row had already gone — and the server may still
+    // have cleared slots that pointed at it. Refresh either way, or the list
+    // keeps offering a track the device no longer has and every retry repeats
+    // the same 404 until the next reconnect.
+    loadLibrary();
+    return;
+  }
   if (nowPlaying === r.source_hash){ player.pause(); nowPlaying = null; }
   loadLibrary();
 }

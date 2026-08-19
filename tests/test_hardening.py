@@ -144,7 +144,7 @@ def test_gc_spares_a_freshly_written_source(service):
     """upload() writes the file, then the slot row. A collector run landing in
     that window must not delete an upload that is moments from being
     referenced."""
-    fresh = config.SOURCES / "0123456789abcdef0123.mp3"
+    fresh = config.SOURCES / "abcabcabcabc00000002.mp3"
     fresh.write_bytes(b"just uploaded, no row yet")
 
     service._gc()
@@ -166,7 +166,7 @@ def test_gc_takes_an_old_unreferenced_source(service):
 
 def test_gc_takes_an_interrupted_transcode_at_any_age(service):
     """A .part file is never referenced by anything, however new it is."""
-    part = config.STAGED / "0123456789abcdef0123-pcm_s24le-44100-1.wav.part"
+    part = config.STAGED / "abcabcabcabc00000003-pcm_s24le-44100-1.wav.part"
     part.write_bytes(b"half a wav")
 
     service._gc()
@@ -326,7 +326,11 @@ def test_gc_still_drops_staged_files_for_unassigned_tracks(service):
     """The reason the predicate is per-slot and not per-library-track: mono
     24-bit at 44.1 kHz is 132 kB/s, so caching one per library track would be
     gigabytes behind a few hundred MB of music."""
-    h = "fedcba98765432100000"
+    # A hash unique to this test. The service fixture shares one database
+    # across the module and nothing clears library rows between tests, so
+    # reusing another test's hash would leave a row behind that stops its
+    # orphan being collected — an order-dependent failure.
+    h = "abcabcabcabc00000001"
     db.library_add(h, "In the library, not on the pedal", 120.0)
     stale = config.STAGED / f"{h}-pcm_s24le-44100-1.wav"
     stale.write_bytes(b"cache for a track no slot wants")
