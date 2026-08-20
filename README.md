@@ -139,6 +139,7 @@ carries is an assign, not another upload.
 | `db.py`     | SQLite storage                         |
 | `media.py`  | ffprobe and ffmpeg                     |
 | `pedal.py`  | Detect, mount, write `BT.WAV`, unmount |
+| `update.py` | Over-the-air self-update: git, systemd |
 | `core.py`   | Session lifecycle and work queue       |
 | `web.py`    | Flask routes and server-sent events    |
 

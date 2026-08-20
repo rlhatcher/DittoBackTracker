@@ -219,11 +219,11 @@ def test_work_queued_behind_the_marker_still_runs(service, fake_pedal, monkeypat
                         lambda self, slot: ran.append(slot))
     monkeypatch.setattr(core.Service, "_halt", lambda self: ran.append("halt"))
 
-    service._updating.set()                 # hold the worker while we load up
+    service.updater.admitted.set()                 # hold the worker while we load up
     service._work.put(("end",))
     service._work.put(("erase", 5))
     service._work.put(("erase", 6))
-    service._updating.clear()
+    service.updater.admitted.clear()
 
     deadline = time.monotonic() + 10
     while "halt" not in ran and time.monotonic() < deadline:
@@ -247,12 +247,12 @@ def test_the_update_gate_holds_a_job_that_arrives_after_it_closes(service):
     service._drain(timeout=5.0)
     time.sleep(0.6)
 
-    service._updating.set()
+    service.updater.admitted.set()
     service._work.put(("erase", 42))
     time.sleep(1.0)
     assert ran == [], "a job started while an update was admitted"
 
-    service._updating.clear()           # the update bailed; work resumes
+    service.updater.admitted.clear()           # the update bailed; work resumes
     deadline = time.monotonic() + 5
     while not ran and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -277,10 +277,10 @@ def test_the_worker_claims_in_flight_before_its_final_gate_check(service,
     service._drain(timeout=5.0)
     events = []
 
-    real_gate_is_set = service._updating.is_set
+    real_gate_is_set = service.updater.admitted.is_set
     real_claim = service._in_flight.set
 
-    monkeypatch.setattr(service._updating, "is_set",
+    monkeypatch.setattr(service.updater.admitted, "is_set",
                         lambda: (events.append("gate"), real_gate_is_set())[1])
     monkeypatch.setattr(service._in_flight, "set",
                         lambda: (events.append("claim"), real_claim())[1])

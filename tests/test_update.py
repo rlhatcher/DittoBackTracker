@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from ditto import config, core, web
+from ditto import config, core, web, update
 
 
 # --- endpoint status mapping ----------------------------------------------
@@ -121,7 +121,7 @@ def test_update_refused_while_job_in_flight(service):
     finally:
         service._in_flight.clear()
     assert ok is False and "busy" in msg
-    assert not service._updating.is_set()
+    assert not service.updater.admitted.is_set()
 
 
 def test_update_no_git_checkout(service, tmp_path, monkeypatch):
@@ -173,27 +173,27 @@ def test_update_available_when_remote_ahead(service, repos, monkeypatch):
     src, work = repos["src"], repos["work"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    service._current_sha = _head(src)
-    service._update_available, service._remote_revision = False, None
+    service.updater._current_sha = _head(src)
+    service.updater.available, service.updater.remote_revision = False, None
 
     # Advance the remote past what the checkout has.
     (work / "ditto" / "__init__.py").write_text("# b\n")
     _git("-C", str(work), "commit", "-am", "B")
     _git("-C", str(work), "push", "origin", "main")
 
-    service._check_for_update()
-    assert service._update_available is True
-    assert service._remote_revision
+    service.updater._check_for_update()
+    assert service.updater.available is True
+    assert service.updater.remote_revision
 
 
 def test_no_update_when_current(service, repos, monkeypatch):
     src = repos["src"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    service._current_sha = _head(src)
-    service._check_for_update()
-    assert service._update_available is False
-    assert service._remote_revision is None      # null unless an update exists
+    service.updater._current_sha = _head(src)
+    service.updater._check_for_update()
+    assert service.updater.available is False
+    assert service.updater.remote_revision is None      # null unless an update exists
 
 
 def test_check_skipped_during_deploy(service, repos, monkeypatch):
@@ -202,30 +202,30 @@ def test_check_skipped_during_deploy(service, repos, monkeypatch):
     src = repos["src"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    service._current_sha = _head(src)
-    service._update_available, service._remote_revision = False, None
-    assert service._update_lock.acquire(blocking=False)
+    service.updater._current_sha = _head(src)
+    service.updater.available, service.updater.remote_revision = False, None
+    assert service.updater._lock.acquire(blocking=False)
     try:
-        service._check_for_update()
+        service.updater._check_for_update()
     finally:
-        service._update_lock.release()
-    assert service._update_available is False
-    assert service._remote_revision is None      # skipped entirely
+        service.updater._lock.release()
+    assert service.updater.available is False
+    assert service.updater.remote_revision is None      # skipped entirely
 
 
 def test_startup_update_check_noops_without_checkout(service):
     # SRC has no checkout in the temp data dir, so the startup check is a fast
     # no-op that leaves the state untouched (and never raises).
-    service._startup_update_check()
-    assert service._update_available is False
-    assert service._remote_revision is None
+    service.updater.startup_check()
+    assert service.updater.available is False
+    assert service.updater.remote_revision is None
 
 
 def test_check_now_reports_available(service, repos, monkeypatch):
     src, work = repos["src"], repos["work"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    service._current_sha = _head(src)
+    service.updater._current_sha = _head(src)
 
     (work / "ditto" / "__init__.py").write_text("# b\n")
     _git("-C", str(work), "commit", "-am", "B")
@@ -280,7 +280,7 @@ def test_update_rolls_back_when_revision_unwritable(service, repos, tmp_path,
     (app / "REVISION").mkdir()
     monkeypatch.setattr(config, "REVISION_FILE", app / "REVISION")
     # Pretend the deployed code imports cleanly.
-    monkeypatch.setattr(core.Service, "_import_check",
+    monkeypatch.setattr(update.Updater, "_import_check",
                         staticmethod(lambda app: None))
 
     ok, msg = service.update()
