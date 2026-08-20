@@ -66,7 +66,7 @@ function drawTrackList(list, s, byslot, loops){
         const x = document.createElement("button");
         x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
         x.dataset.fk = "slot:" + r.slot + ":clear";
-      x.onclick = () => removeSlot(r.slot, r.display_name);
+        x.onclick = () => removeSlot(r.slot, r.display_name);
         el.appendChild(x);
       } else {
         // Loop-only slot: no backing track, so no name/duration/clear control.
@@ -312,6 +312,11 @@ function setText(el, text){
   if (el.textContent !== text) el.textContent = text;
 }
 
+/* Every write to #msg goes through setText, including the one-shot ones that
+   could not spam on their own. A reader should not have to work out which
+   messages are safe to write directly, and the next message put on a timer
+   inherits the guard rather than rediscovering the problem. */
+
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 
 // Build a concise, self-contained printable document: a bare list of slot number
@@ -374,7 +379,7 @@ function updateBtnState(s){
   }
 }
 
-function fail(text){ $("#msg").textContent = text; $("#msg").className = "msg err"; }
+function fail(text){ setText($("#msg"), text); $("#msg").className = "msg err"; }
 
 function moveTo(src, dst){
   fetch(`/api/slots/${src}/move`, {
@@ -390,8 +395,8 @@ async function send(files, start){
   const fd = new FormData();
   [...files].forEach(f => fd.append("file", f));
   if (start != null) fd.append("start", start);
-  $("#msg").textContent = start != null
-    ? `Uploading to slot ${String(start).padStart(2,"0")}…` : "Uploading…";
+  setText($("#msg"), start != null
+    ? `Uploading to slot ${String(start).padStart(2,"0")}…` : "Uploading…");
   let r;
   try {
     r = await fetch("/api/upload", {method:"POST", body:fd});
@@ -580,7 +585,7 @@ async function doCheck(){
   }
   updateBtnState(state);
   if (!j.update_available){
-    $("#msg").textContent = "Up to date"; $("#msg").className = "msg";
+    setText($("#msg"), "Up to date"); $("#msg").className = "msg";
   }
 }
 
@@ -627,7 +632,7 @@ async function doUpdate(){
   // Success: the service is restarting. `updating` stays set until a snapshot
   // shows the new revision (see render), keeping the button locked so a second
   // update can't start while the restart is pending.
-  $("#msg").textContent = "Updating… the page will reconnect"; $("#msg").className = "msg";
+  setText($("#msg"), "Updating… the page will reconnect"); $("#msg").className = "msg";
 }
 
 const es = new EventSource("/api/events");
@@ -650,11 +655,11 @@ es.onerror = () => {
   // within the grace window (onopen clears the timer, the next snapshot
   // overwrites the message).
   if (es.readyState === EventSource.CLOSED){
-    $("#msg").textContent = "Disconnected"; $("#msg").className = "msg err";
+    setText($("#msg"), "Disconnected"); $("#msg").className = "msg err";
   } else if (es.readyState === EventSource.CONNECTING && reconnectTimer === null){
     reconnectTimer = setTimeout(() => {
       if (es.readyState !== EventSource.OPEN){
-        $("#msg").textContent = "Reconnecting…"; $("#msg").className = "msg err";
+        setText($("#msg"), "Reconnecting…"); $("#msg").className = "msg err";
       }
     }, 8000);
   }
@@ -1006,7 +1011,7 @@ async function sendToLibrary(files){
   if (!files || !files.length) return;
   const fd = new FormData();
   [...files].forEach(f => fd.append("file", f));
-  $("#msg").textContent = "Adding to the library…";
+  setText($("#msg"), "Adding to the library…");
   let r, j;
   try {
     r = await fetch("/api/library", {method:"POST", body:fd});
