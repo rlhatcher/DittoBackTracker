@@ -31,6 +31,12 @@ let nowPlaying = null;     // hash being auditioned, for the row's play button
    row is edited in place. */
 let libRev = 0;
 let lastListKey = null, lastLibKey = null;
+/* Which slot cell currently holds the grid's single tab stop. It has to live
+   here rather than only on the element: render() rewrites every cell's
+   tabIndex, so a position the user arrowed to would be reset to the selected
+   slot by the next SSE frame — which arrives 5 times a second mid-conversion.
+   null means "follow the selection, else the first cell". */
+let rovingSlot = null;
 
 function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
 
@@ -157,6 +163,7 @@ function render(s){
           return;
         }
         selected = selected===i?null:i;
+        rovingSlot = i;             // clicking here also moves the tab stop
         render(state);
       };
       d.addEventListener("dragstart", e => {
@@ -203,8 +210,11 @@ function render(s){
     d.setAttribute("aria-label", row
       ? `Slot ${n}, ${row.display_name}, ${row.state}${loopNote}`
       : hasLoop ? `Slot ${n}, recorded loop only` : `Slot ${n}, empty`);
-    // Exactly one cell is tabbable: the selected one, else the first.
-    d.tabIndex = (selected === null ? n === 1 : selected === n) ? 0 : -1;
+    // Exactly one cell is tabbable: wherever the user last arrowed to, else
+    // the selected slot, else the first.
+    const roving = rovingSlot !== null ? rovingSlot
+                 : selected !== null ? selected : 1;
+    d.tabIndex = n === roving ? 0 : -1;
   });
 
   // Print applies to loaded backing tracks; hide it when there's nothing to print.
@@ -214,9 +224,13 @@ function render(s){
   // Everything this list draws, and nothing else. Progress is absent on
   // purpose: it is what changes 5 times a second during a conversion, and it
   // does not appear here.
-  const listKey = s.slots.map(x => [x.slot, x.display_name, x.duration,
-                                    x.state, x.error].join(":")).join("|")
-                  + "\u0000" + [...loops].join(",");
+  // JSON, not delimiter joins: a display_name or an error is arbitrary user
+  // text and can contain whatever separator we picked, so two different lists
+  // could hash the same and a required redraw would be skipped.
+  const listKey = JSON.stringify([
+    s.slots.map(x => [x.slot, x.display_name, x.duration, x.state, x.error]),
+    [...loops],
+  ]);
   if (listKey !== lastListKey){
     lastListKey = listKey;
     rebuild(list, () => drawTrackList(list, s, byslot, loops));
@@ -404,6 +418,14 @@ async function send(files, start){
    With a roving tabindex the grid is a single tab stop, so the arrows have to
    provide movement within it. GRID_COLS mirrors the CSS
    `grid-template-columns: repeat(20, 1fr)`; if that changes, change this.
+
+   Movement is linear over slot order, not bounded by the row. Left and Right
+   step one slot and will cross a row edge, because slot 21 genuinely does
+   follow slot 20 — the rows are how 99 slots are made to fit on a phone, not a
+   structure the user is navigating. Stopping at column 20 would leave slot 21
+   unreachable from slot 20 except by Down then nineteen Lefts. Up and Down
+   step a whole row, so both traversals are available. Only the real ends, slot
+   1 and slot 99, stop.
 */
 const GRID_COLS = 20;
 $("#grid").addEventListener("keydown", e => {
@@ -417,10 +439,11 @@ $("#grid").addEventListener("keydown", e => {
   else if (e.key === "Home") to = 0;
   else if (e.key === "End") to = cells.length - 1;
   else return;
-  if (to < 0 || to >= cells.length) return;   // stop at the edges, don't wrap
+  if (to < 0 || to >= cells.length) return;   // slot 1 and slot 99 are the ends
   e.preventDefault();
   cells[here].tabIndex = -1;
   cells[to].tabIndex = 0;
+  rovingSlot = to + 1;              // survive the next render
   cells[to].focus();
 });
 
@@ -743,12 +766,13 @@ function _renderLibrary(){
   // so this stays cheap with a large library; the rest is what the snapshot
   // contributes (which slots hold what, and what the assign target would be)
   // plus the two uncontrolled inputs. Progress is deliberately absent.
-  const libKey = [libRev, selected, nowPlaying,
-                  ((state && state.slots) || [])
-                    .map(s => s.slot + ":" + s.source_hash).join(","),
-                  ((state && state.loops) || []).join(","),
-                  state && state.slot_count,
-                  $("#libq").value, $("#libsort").value].join("\u0000");
+  const libKey = JSON.stringify([
+    libRev, selected, nowPlaying,
+    ((state && state.slots) || []).map(s => [s.slot, s.source_hash]),
+    (state && state.loops) || [],
+    state && state.slot_count,
+    $("#libq").value, $("#libsort").value,
+  ]);
   if (libKey === lastLibKey) return;
   lastLibKey = libKey;
 
