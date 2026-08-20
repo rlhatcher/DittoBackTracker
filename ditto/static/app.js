@@ -106,7 +106,7 @@ function render(s){
   pd.innerHTML = `<span class="dot" style="background:${c}"></span>${t}`;
 
   if (s.version){
-    $("#ver").textContent = "v" + s.version + (s.revision ? " · " + s.revision : "");
+      setText($("#ver"), "v" + s.version + (s.revision ? " · " + s.revision : ""));
   }
   // The update completes when a snapshot shows the deployed revision has changed
   // (the restart brought up the new build). Gate on that, not on the SSE
@@ -119,13 +119,13 @@ function render(s){
 
   const cap = s.capacity;
   const frac = cap.total_seconds ? cap.used_seconds/cap.total_seconds : 0;
-  $("#captxt").textContent = cap.used_label + " of " + cap.total_label;
+  setText($("#captxt"), cap.used_label + " of " + cap.total_label);
   const fill = $("#capfill");
   fill.style.width = Math.min(100, frac*100) + "%";
   fill.className = "capfill" + (frac>0.95?" err":frac>0.8?" warn":"");
-  $("#capnote").textContent = cap.total_seconds
+  setText($("#capnote"), cap.total_seconds
     ? mmss(Math.max(0,cap.total_seconds-cap.used_seconds)) + " remaining"
-    : "connect the pedal to see capacity";
+    : "connect the pedal to see capacity");
 
   const byslot = {};
   s.slots.forEach(x => byslot[x.slot] = x);
@@ -140,6 +140,9 @@ function render(s){
       d.type = "button";
       d.className = "cell"; d.title = "Slot "+i; d.dataset.slot = i;
       d.setAttribute("aria-pressed", "false");
+      // Roving tabindex: the grid is one stop, not 99. Reaching slot 50 used
+      // to cost 50 tabs, and the grid sits above everything else in the order.
+      d.tabIndex = -1;
       d.onclick = () => {
         // Pick-up-then-place reorder — the keyboard equivalent of the mouse
         // drag: with an occupied slot already selected, activating a different
@@ -196,6 +199,12 @@ function render(s){
     d.title = row
       ? `Slot ${n}: ${row.display_name} — drag to another slot to move or swap${loopNote}`
       : hasLoop ? `Slot ${n}: recorded loop only` : `Slot ${n} (empty)`;
+    // title is a tooltip, not a name — spell the name out for a screen reader.
+    d.setAttribute("aria-label", row
+      ? `Slot ${n}, ${row.display_name}, ${row.state}${loopNote}`
+      : hasLoop ? `Slot ${n}, recorded loop only` : `Slot ${n}, empty`);
+    // Exactly one cell is tabbable: the selected one, else the first.
+    d.tabIndex = (selected === null ? n === 1 : selected === n) ? 0 : -1;
   });
 
   // Print applies to loaded backing tracks; hide it when there's nothing to print.
@@ -234,17 +243,22 @@ function render(s){
 
   const busy = !!s.busy;
   $("#progwrap").classList.toggle("hide", !busy || s.progress==null);
-  if (s.progress!=null) $("#progfill").style.width = (s.progress*100)+"%";
+  if (s.progress!=null){
+    const pct = Math.round(s.progress*100);
+    $("#progfill").style.width = pct + "%";
+    // The bar is decorative on its own; this is what a screen reader reads.
+    $("#progwrap").setAttribute("aria-valuenow", pct);
+  }
   const m = $("#msg");
   // This page is the only status surface — there is no panel light or display —
   // so the mid-write warning has to be unmissable here or nowhere.
-  if (s.ending)            { m.textContent = "Shutting down — leave everything plugged in until this page disconnects"; m.className="msg warn"; }
+  if (s.ending)            { setText(m, "Shutting down — leave everything plugged in until this page disconnects"); m.className="msg warn"; }
   else if (s.busy && s.busy_kind === "write")
-                           { m.textContent = s.busy + " — don't unplug"; m.className="msg warn"; }
-  else if (s.busy)         { m.textContent = s.busy; m.className="msg"; }
-  else if (s.error)        { m.textContent = s.error; m.className="msg err"; }
-  else if (s.pedal==="mounted") { m.textContent = "Ready"; m.className="msg"; }
-  else                     { m.textContent = "Plug in the pedal"; m.className="msg"; }
+                           { setText(m, s.busy + " — don't unplug"); m.className="msg warn"; }
+  else if (s.busy)         { setText(m, s.busy); m.className="msg"; }
+  else if (s.error)        { setText(m, s.error); m.className="msg err"; }
+  else if (s.pedal==="mounted") { setText(m, "Ready"); m.className="msg"; }
+  else                     { setText(m, "Plug in the pedal"); m.className="msg"; }
 
   $("#done").disabled = s.ending;
 
@@ -267,6 +281,17 @@ function rebuild(host, draw){
     const again = host.querySelector(`[data-fk="${CSS.escape(key)}"]`);
     if (again) again.focus();
   }
+}
+
+/* Write only when the text actually differs.
+
+   #msg is an aria-live region, and replacing its text node is what makes a
+   screen reader announce. During a conversion the same string is assigned 5
+   times a second, so without this the reader repeats "Converting…" over and
+   over. The others are plain text, but the same reasoning makes them free.
+*/
+function setText(el, text){
+  if (el.textContent !== text) el.textContent = text;
 }
 
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
@@ -373,6 +398,31 @@ async function send(files, start){
   // case the five-minute stream rotation.
   loadLibrary();
 }
+
+/* Arrow-key movement inside the slot grid.
+
+   With a roving tabindex the grid is a single tab stop, so the arrows have to
+   provide movement within it. GRID_COLS mirrors the CSS
+   `grid-template-columns: repeat(20, 1fr)`; if that changes, change this.
+*/
+const GRID_COLS = 20;
+$("#grid").addEventListener("keydown", e => {
+  const step = {ArrowRight: 1, ArrowLeft: -1,
+                ArrowDown: GRID_COLS, ArrowUp: -GRID_COLS}[e.key];
+  const cells = [...$("#grid").children];
+  const here = cells.indexOf(document.activeElement);
+  if (here < 0) return;
+  let to = null;
+  if (step !== undefined) to = here + step;
+  else if (e.key === "Home") to = 0;
+  else if (e.key === "End") to = cells.length - 1;
+  else return;
+  if (to < 0 || to >= cells.length) return;   // stop at the edges, don't wrap
+  e.preventDefault();
+  cells[here].tabIndex = -1;
+  cells[to].tabIndex = 0;
+  cells[to].focus();
+});
 
 const drop = $("#drop");
 
