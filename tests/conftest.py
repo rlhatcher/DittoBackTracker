@@ -8,6 +8,7 @@ or is writable on CI.
 
 import os
 import tempfile
+import time
 
 import pytest
 
@@ -53,16 +54,36 @@ def data_tree(tmp_path, monkeypatch):
     _forget_connection()
 
 
+def _settled(svc, timeout=10.0):
+    """Wait until the boot sweep has genuinely finished.
+
+    _drain returns as soon as the queue looks empty and nothing is flagged in
+    flight — but the worker takes a job off the queue a few statements before it
+    raises that flag, so a single observation can land in the gap and call a
+    job that is about to start "idle". That is a real property of _drain, not a
+    bug in it: shutdown covers the same gap by joining the worker afterwards.
+
+    Two observations with a pause between them cannot both land in a gap that
+    short. Timing-dependent by nature, which is why it is a bounded retry rather
+    than an assertion on one reading — the original assertion passed on every
+    developer machine and failed on CI's shared CPU.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        svc._drain(timeout=max(0.0, deadline - time.monotonic()))
+        time.sleep(0.02)
+        if svc._work.empty() and not svc._in_flight.is_set():
+            return True
+    return False
+
+
 @pytest.fixture
 def service(data_tree):
     """A running Service on its own data tree, settled after the boot sweep."""
     svc = core.Service()
-    # Startup queues a collector job. _drain returns silently when its timeout
-    # lapses, so assert the device really did settle — otherwise a test about a
-    # guard would be asserting on a refusal that came from the boot sweep.
-    svc._drain(timeout=5.0)
-    assert svc._work.empty() and not svc._in_flight.is_set(), \
-        "startup work did not finish; tests would assert on the wrong state"
+    # Startup queues a collector job. A test about a guard must not end up
+    # asserting on a refusal that came from the boot sweep instead.
+    assert _settled(svc), "startup work did not finish in time"
     yield svc
     svc.shutdown(timeout=2.0)
 
