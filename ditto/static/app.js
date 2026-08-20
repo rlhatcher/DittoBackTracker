@@ -31,6 +31,16 @@ let nowPlaying = null;     // hash being auditioned, for the row's play button
    row is edited in place. */
 let libRev = 0;
 let lastListKey = null, lastLibKey = null;
+
+/* Say that the library's DOM no longer matches its key, so the next render
+   redraws even though the data has not moved.
+
+   The dirty check compares what the rows are *derived from*. That is wrong
+   whenever something has changed the DOM directly — an inline rename replaces a
+   row's name span with an input, and cancelling it, or committing it unchanged,
+   leaves the key exactly where it was. Without this the input stays on screen
+   for good. */
+function libraryDomDirty(){ lastLibKey = null; }
 /* Which slot cell currently holds the grid's single tab stop. It has to live
    here rather than only on the element: render() rewrites every cell's
    tabIndex, so a position the user arrowed to would be reset to the selected
@@ -703,8 +713,13 @@ async function loadLibrary(){
     if (!r.ok) return;
     const rows = await r.json();
     if (mine !== libSeq) return;      // a newer request has already answered
+    // es.onopen refetches on every reconnect, including the routine five-minute
+    // stream rotation, and the answer is usually identical. Only move the
+    // revision when something actually changed, or each rotation costs a full
+    // redraw for nothing.
+    const changed = JSON.stringify(rows) !== JSON.stringify(library);
     library = rows;
-    libRev++;                         // contents may differ; force a redraw
+    if (changed) libRev++;
   } catch {
     return;             // a snapshot or a later refetch will put it right
   }
@@ -893,6 +908,9 @@ function startRename(row, nm, r){
     settled = true;
     const name = input.value.trim();
     editingHash = null;
+    // This function replaced a span with an input, so the DOM is dirty on every
+    // path out of here — including the two that change no data at all.
+    libraryDomDirty();
     if (!save || !name || name === r.name){ renderLibrary(); return; }
     // Optimistic: the row already reads the new name, and a failure re-reads
     // the server's version rather than leaving a lie on screen.
