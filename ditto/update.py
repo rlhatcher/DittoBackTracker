@@ -81,9 +81,14 @@ class Updater:
             else:
                 result = self._do_update()
         finally:
-            self._lock.release()
+            # Clear before releasing, never after. Releasing first lets a second
+            # update take the lock and set the gate, and this clear would then
+            # reopen it with that deploy already running — the worker free to
+            # touch the pedal during a git reset and a restart, which is the one
+            # thing the gate exists to prevent.
             if not result[0]:
                 self.admitted.clear()      # no restart pending — resume work
+            self._lock.release()
         return result
 
     def _do_update(self) -> "tuple[bool, str]":

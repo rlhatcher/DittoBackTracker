@@ -3,6 +3,7 @@ core guard/redeploy/update-check branches, using local git repos (no network).""
 
 import shutil
 import subprocess
+import threading
 
 import pytest
 
@@ -334,3 +335,42 @@ def test_a_successful_deploy_clears_the_remote_revision(service, repos,
     assert snap["update_available"] is False
     assert snap["remote_revision"] is None, \
         "reported up to date while still naming a commit to update to"
+
+
+def test_the_gate_is_cleared_before_the_lock_is_released(service, monkeypatch):
+    """A failed update must not reopen the gate under a second one.
+
+    Releasing the lock first lets another update acquire it and set the gate;
+    this one's clear would then reopen it with that deploy already running,
+    leaving the worker free to touch the pedal during a git reset and a
+    restart. The window is a couple of bytecodes, so assert the ordering
+    rather than racing it.
+    """
+    order = []
+    upd = service.updater
+
+    class RecordingLock:
+        """A stand-in for the lock itself — _thread.lock's methods are
+        read-only, so the attribute is replaced rather than patched."""
+
+        def __init__(self):
+            self._real = threading.Lock()
+
+        def acquire(self, blocking=True):
+            return self._real.acquire(blocking)
+
+        def release(self):
+            order.append("release")
+            self._real.release()
+
+    monkeypatch.setattr(upd, "_lock", RecordingLock())
+    real_clear = upd.admitted.clear
+    monkeypatch.setattr(upd.admitted, "clear",
+                        lambda: (order.append("clear"), real_clear())[1])
+
+    service.busy = "Writing something"          # forces the refusal path
+    ok, _ = service.update()
+
+    assert ok is False
+    assert order == ["clear", "release"], (
+        f"the gate outlived the lock: {order}")
