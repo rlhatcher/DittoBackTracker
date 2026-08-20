@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from ditto import config, core, web, update
+from ditto import config, web, update
 
 
 # --- endpoint status mapping ----------------------------------------------

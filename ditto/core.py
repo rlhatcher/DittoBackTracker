@@ -21,15 +21,11 @@ from .update import Updater
 log = logging.getLogger(__name__)
 
 
-# Queued by shutdown() purely to unblock the worker's get(). Identity, not
-# equality, so it can never collide with a real job.
+# Queued by shutdown() to unblock the worker's get(). Matched by identity, so it
+# can never collide with a real job.
 _STOP = ("stop",)
 
-# How often a drain re-checks whether the queue has emptied. A drain runs while
-# the device is finishing writes and is waiting on USB, so the check costs
-# nothing next to the work it is waiting for; the interval only decides how long
-# a finished drain sits there before noticing. Short enough that ending a
-# session feels immediate.
+# How often a drain re-checks whether the queue has emptied.
 _DRAIN_POLL = 0.05
 
 
@@ -601,11 +597,8 @@ class Service:
             return
         self._drain(timeout=timeout)
         self._stop.set()
-        # Wake the worker. It spends nearly all its idle time blocked in a
-        # 0.5 s queue.get, and _stop is only tested at the top of the loop, so
-        # without this the join waits out that timeout every time. systemd
-        # gives a bounded window on SIGTERM, and this is time spent doing
-        # nothing.
+        # Wake the worker: it is blocked in a 0.5 s get and only tests _stop at
+        # the top of the loop, so the join would wait out that timeout.
         self._work.put(_STOP)
         for t in self._threads:
             t.join(timeout=5.0)

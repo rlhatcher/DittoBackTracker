@@ -392,21 +392,10 @@ function updateBtnState(s){
   }
 }
 
-/* One shape for the calls that share one.
-
-   Seven of the thirteen call sites want exactly this: send it, parse whatever
-   came back, say whether it worked. They were a dozen lines each of
-   try/catch/json/ok, and what actually differed between them was invisible in
-   the noise.
-
-   `status` is 0 when the request never reached the device. That is the one
-   distinction the messages need: the device's own error is worth showing, a
-   network failure is not. The four sites that genuinely differ — the two batch
-   uploads with their per-file errors, the delete with its 409, the
-   fire-and-forget session end — stay written out, so they read as the
-   exceptions they are. So do the update and the library refetch, which carry
-   their own control flow around the request.
-*/
+/* Send it, parse whatever came back, say whether it worked — the shape seven of
+   the thirteen call sites want. `status` is 0 when the request never reached the
+   device: the device's own error is worth showing, a network failure is not. The
+   six sites with their own control flow stay written out. */
 async function api(url, opts){
   try {
     const r = await fetch(url, opts);

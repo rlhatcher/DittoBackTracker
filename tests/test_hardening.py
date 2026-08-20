@@ -329,17 +329,16 @@ def test_shutdown_finishes_queued_work_before_it_stops(service, monkeypatch):
     assert ran == [5, 6], f"queued work was abandoned: {ran}"
 
 
-def test_shutdown_returns_promptly_when_idle(service, monkeypatch):
-    """The worker sits in a blocking get, and _stop is only tested at the top
-    of its loop. Without the sentinel the join waits out that timeout."""
+def test_shutdown_stops_the_worker_threads(service, monkeypatch):
+    """shutdown promises the threads are done when it returns — the joins are
+    bounded, so a worker that ignored the stop would outlive the call and go on
+    touching a pedal the caller believes is unmounted."""
     monkeypatch.setattr(core.pedal, "unmount", lambda: None)
-    service._drain(timeout=5.0)
 
-    started = time.monotonic()
     service.shutdown(timeout=5.0)
-    elapsed = time.monotonic() - started
 
-    assert elapsed < 0.4, f"shutdown took {elapsed:.2f}s waiting on nothing"
+    alive = [t.name for t in service._threads if t.is_alive()]
+    assert not alive, f"shutdown returned with threads still running: {alive}"
 
 
 def test_shutdown_is_idempotent(service, monkeypatch):

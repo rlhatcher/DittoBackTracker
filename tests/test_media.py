@@ -66,7 +66,8 @@ def test_the_hash_is_shaped_the_way_the_routes_demand(tmp_path):
 def test_identical_content_hashes_identically(tmp_path):
     """Content addressing is what makes a re-upload free."""
     a, b = tmp_path / "a.mp3", tmp_path / "b.mp3"
-    a.write_bytes(b"same"); b.write_bytes(b"same")
+    a.write_bytes(b"same")
+    b.write_bytes(b"same")
     assert media.file_hash(a) == media.file_hash(b)
 
 
