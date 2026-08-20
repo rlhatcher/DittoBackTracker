@@ -1,4 +1,4 @@
-"""Shared fixtures, and the one piece of setup that has to run at import.
+"""Shared fixtures, and the two pieces of setup that have to run at import.
 
 Point the app's data/mount paths at throwaway temp dirs before anything in the
 ditto package imports config (which resolves them at import time). This keeps a
@@ -7,6 +7,7 @@ or is writable on CI.
 """
 
 import os
+import subprocess
 import tempfile
 
 import pytest
@@ -19,7 +20,41 @@ os.environ["DITTO_DATA"] = os.path.join(_tmp, "data")
 os.environ["DITTO_MOUNT"] = os.path.join(_tmp, "mount")
 
 # Imported after the environment is set, or config resolves the real paths.
-from ditto import config, core, db, web       # noqa: E402
+from ditto import config, core, db, update, web       # noqa: E402
+
+
+# Every sudo the app runs, recorded instead of executed. Read it in a test if
+# you want to assert one was attempted.
+sudo_attempts: list[list[str]] = []
+
+
+def _block_sudo() -> None:
+    """Stop the suite from powering off the machine it is running on.
+
+    _halt ends with `sudo -n /sbin/poweroff`, and install.sh grants the ditto
+    user a NOPASSWD rule for exactly that command. So a test that reaches _halt
+    — by leaving an end marker queued, say — powers off a provisioned device
+    part-way through the run. On a laptop the sudo call simply fails, which is
+    why this stayed invisible.
+
+    Replaced at import rather than per-test, because the reach can happen during
+    fixture teardown, after a test's own monkeypatches have been undone. A test
+    that wants the real call recorded can still stub subprocess.run itself.
+    """
+    for mod in (core, update):
+        real = mod.subprocess.run
+
+        def guard(*args, _real=real, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, (list, tuple)) and cmd and str(cmd[0]) == "sudo":
+                sudo_attempts.append([str(c) for c in cmd])
+                return subprocess.CompletedProcess(list(cmd), 0, "", "")
+            return _real(*args, **kwargs)
+
+        mod.subprocess.run = guard
+
+
+_block_sudo()
 
 
 def _forget_connection():
