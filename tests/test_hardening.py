@@ -340,3 +340,39 @@ def test_gc_still_drops_staged_files_for_unassigned_tracks(service):
     service._gc()
 
     assert not stale.exists()
+
+
+# --- shutdown ---------------------------------------------------------------
+
+def test_shutdown_finishes_queued_work_before_it_stops(service, monkeypatch):
+    """The wake-up sentinel must not become a way to abandon real work.
+    shutdown drains first, and only then unblocks the worker."""
+    ran = []
+    monkeypatch.setattr(core.Service, "_do_erase",
+                        lambda self, slot: ran.append(slot))
+    monkeypatch.setattr(core.pedal, "unmount", lambda: None)
+    service._work.put(("erase", 5))
+    service._work.put(("erase", 6))
+
+    service.shutdown(timeout=5.0)
+
+    assert ran == [5, 6], f"queued work was abandoned: {ran}"
+
+
+def test_shutdown_returns_promptly_when_idle(service, monkeypatch):
+    """The worker sits in a blocking get, and _stop is only tested at the top
+    of its loop. Without the sentinel the join waits out that timeout."""
+    monkeypatch.setattr(core.pedal, "unmount", lambda: None)
+    service._drain(timeout=5.0)
+
+    started = time.monotonic()
+    service.shutdown(timeout=5.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.4, f"shutdown took {elapsed:.2f}s waiting on nothing"
+
+
+def test_shutdown_is_idempotent(service, monkeypatch):
+    monkeypatch.setattr(core.pedal, "unmount", lambda: None)
+    service.shutdown(timeout=5.0)
+    service.shutdown(timeout=5.0)      # must not raise or hang
