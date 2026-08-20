@@ -334,11 +334,24 @@ def test_the_page_itself_must_revalidate(client):
     assert client.get("/").headers["Cache-Control"] == "no-cache"
 
 
-@pytest.mark.parametrize("name", ["db.py", "../web.py", "app.js.map", ""])
+@pytest.mark.parametrize("name", ["index.html", "db.py", "app.js.map"])
 def test_only_the_named_assets_are_reachable(client, name):
     """An allowlist, not a directory route: a stray file in static/ is never
-    served."""
-    assert client.get(f"/static/{name}").status_code in (404, 308)
+    served from here.
+
+    index.html is the case that actually exercises the allowlist — it is a real
+    file sitting in static/, deliberately absent from ASSETS because it is
+    served from "/" instead. The others never reach the check; routing rejects
+    them first, which is why this asserts 404 exactly rather than accepting a
+    redirect and calling it proof.
+    """
+    assert client.get(f"/static/{name}").status_code == 404
+
+
+def test_the_allowlisted_assets_really_are_served(client):
+    """The other half: a 404 for everything would satisfy the test above."""
+    for name in ("app.js", "app.css"):
+        assert client.get(f"/static/{name}").status_code == 200
 
 
 def test_audition_is_a_safe_method_and_needs_no_guard(client):

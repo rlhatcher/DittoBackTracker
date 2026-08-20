@@ -214,12 +214,24 @@ def test_check_skipped_during_deploy(service, repos, monkeypatch):
     assert service.updater.remote_revision is None      # skipped entirely
 
 
-def test_startup_update_check_noops_without_checkout(service):
-    # SRC has no checkout in the temp data dir, so the startup check is a fast
-    # no-op that leaves the state untouched (and never raises).
+def test_startup_update_check_noops_without_checkout(service, monkeypatch,
+                                                     tmp_path):
+    """Without a checkout the startup check must give up before running git.
+
+    Asserting that the state is unchanged would pass if the method body were
+    `pass`, and would not distinguish "declined" from "never ran" — the fixture
+    leaves those fields at their initial values anyway. Assert the outcome it
+    reports, and that it did not reach out.
+    """
+    monkeypatch.setattr(config, "SRC", tmp_path / "no-checkout")
+    ran = []
+    monkeypatch.setattr(update.Updater, "_git",
+                        staticmethod(lambda *a, **k: ran.append(a)))
+
     service.updater.startup_check()
-    assert service.updater.available is False
-    assert service.updater.remote_revision is None
+
+    assert ran == [], "it ran git against a directory with no checkout"
+    assert service.updater._check_for_update() == "no deployment to check"
 
 
 def test_check_now_reports_available(service, repos, monkeypatch):

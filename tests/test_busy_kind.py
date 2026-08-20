@@ -86,12 +86,30 @@ def test_the_worker_clears_the_warning_when_the_job_ends(service, fake_pedal):
     assert snap["busy"] is None
 
 
-def test_a_read_does_not_warn(service):
+def test_a_read_does_not_warn(service, fake_pedal, monkeypatch):
     """Unplugging mid-read costs only the download, so a read must not cry
-    wolf — that distinction is the whole reason busy_kind isn't a boolean."""
-    service.busy = "Reading loop"
-    service.busy_kind = "read"
-    assert service.snapshot()["busy_kind"] == "read"
+    wolf — that distinction is the whole reason busy_kind isn't a boolean.
+
+    Sampled while the pedal is actually being read, the same way the write case
+    is. Setting busy_kind here and reading it back out of snapshot() would only
+    prove that snapshot copies a field.
+    """
+    (fake_pedal / config.LOOP_FILENAME).write_bytes(b"RIFF" + b"\0" * 64)
+    seen = []
+    real_copy = pedal.copy_loop
+
+    def watch(slot, dest):
+        seen.append((service.busy, service.busy_kind))
+        return real_copy(slot, dest)
+
+    monkeypatch.setattr(pedal, "copy_loop", watch)
+    stage = core.LoopStage()
+    service._do_stage_loop(5, service._mount_gen, stage)
+
+    assert seen, "copy_loop was never reached"
+    busy, kind = seen[0]
+    assert kind == "read", f"a read raised the write warning: {kind!r}"
+    assert busy, "a read should still say what it is doing"
 
 
 # --- shutdown --------------------------------------------------------------
