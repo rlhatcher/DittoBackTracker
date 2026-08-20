@@ -9,6 +9,8 @@ effect of anything else.
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import shutil
 import subprocess
@@ -18,6 +20,8 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 from . import config, media
+
+log = logging.getLogger(__name__)
 
 # A wedged or half-unplugged USB device makes mount(8) block indefinitely.
 # The monitor thread calls mount() and the shutdown path calls umount(), so an
@@ -153,6 +157,97 @@ def capacity() -> Tuple[int, int]:
     return (st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize)
 
 
+# errnos that mean "this filesystem has no directory fsync", as opposed to
+# "this write is in trouble". EINVAL is what vfat returns; ENOTSUP/EOPNOTSUPP
+# cover drivers that refuse the operation outright.
+#
+# Kept deliberately narrow. The same handler covers the open, the fsync and the
+# close, so anything wider starts absorbing failures that have nothing to do
+# with an unsupported operation — EACCES and EPERM are access or policy
+# problems, EBADF is a descriptor bug — and silence there would recreate exactly
+# the ambiguity this set exists to remove.
+_DIR_FSYNC_UNSUPPORTED = frozenset({
+    errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP,
+})
+
+
+def _atomic_copy(src: Path, dest: Path, prefix: str) -> None:
+    """Copy `src` over `dest` so `dest` is never seen half-written.
+
+    Temp file in the destination directory, fsync, chmod, rename, then fsync
+    the directory. Both directions of the pedal transfer use this — writing a
+    staged WAV into a slot, and copying a recorded loop back off — because both
+    have a reader that must never see a truncated file: the pedal's firmware in
+    one direction, the browser in the other.
+
+    Kept in one place deliberately. This is the durability-critical path on a
+    device whose whole threat model is a pulled plug, and it was previously two
+    byte-identical copies, so a correction had to land twice or land wrong.
+
+    `prefix` names the temp file. Interrupted writes are collected by name:
+    `~bt` on the pedal by clean_temp_files, `~loop` locally when the staging
+    directory is purged at startup.
+
+    What this does *not* make durable, and why that is fine:
+
+    - The slot directory itself, when mkdir has just created one. The entry for
+      it lives in the volume root, which is not fsynced here.
+    - Anything at all, for the loop direction.
+
+    Both are closed by the caller rather than here. `_do_write` runs `os.sync()`
+    between this returning and `db.mark_synced()`, so the database never records
+    a track as written until every filesystem is flushed — directory entry,
+    rename and mode together. The loop direction copies into the local staging
+    directory, which is emptied at startup by design, so durability there would
+    be work for something deliberately transient.
+
+    Syncing the volume root here instead would add a round trip to a ~1 MB/s USB
+    link on every track written, to guarantee something that is already
+    guaranteed a line later.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent),
+                                    prefix=prefix, suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        # os.fdopen first so it owns and closes fd even if opening the source
+        # raises — a staged file, or a loop, can vanish between check and copy.
+        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
+            shutil.copyfileobj(fsrc, fdst, length=1 << 19)
+            # Mode before the sync, not after the close: fsync covers this
+            # inode's metadata as well as its data, so doing it here makes the
+            # permissions as durable as the bytes. chmod after the fsync would
+            # leave a window where a power cut lands the rename but not the
+            # mode, and the file appears with mkstemp's private 0600.
+            os.fchmod(fdst.fileno(), 0o644)
+            fdst.flush()
+            os.fsync(fdst.fileno())
+        tmp.replace(dest)
+        try:
+            dirfd = os.open(str(dest.parent), os.O_RDONLY)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
+        except OSError as e:
+            # Plenty of FAT drivers simply do not implement fsync on a
+            # directory. That is the expected case here, it is harmless, and
+            # the os.sync() the caller does covers it — so it stays silent.
+            #
+            # A failing card is not that, and the two must not look alike. Say
+            # so, but do not raise: the rename has already happened, the file
+            # is in place and readable, and only its directory entry is
+            # unconfirmed. Failing the write here would report a loss that did
+            # not occur and would leave the caller retrying a copy that landed.
+            if e.errno not in _DIR_FSYNC_UNSUPPORTED:
+                log.warning("could not flush the directory entry for %s: %s. "
+                            "The file is written, but may not survive a power "
+                            "cut before the next sync.", dest, e)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def write_track(slot: int, wav: Path) -> None:
     """Copy a staged WAV into the slot as BT.WAV.
 
@@ -160,69 +255,17 @@ def write_track(slot: int, wav: Path) -> None:
     rename is exactly the operation that fails to stick without a flush, so
     the caller must unmount cleanly afterwards.
     """
-    dest = track_path(slot)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent),
-                                    prefix="~bt", suffix=".tmp")
-    tmp = Path(tmp_name)
-    try:
-        # os.fdopen first so it owns and closes fd even if opening the source
-        # WAV raises (a staged file can vanish between check and copy).
-        with os.fdopen(fd, "wb") as fdst, open(wav, "rb") as fsrc:
-            shutil.copyfileobj(fsrc, fdst, length=1 << 19)
-            fdst.flush()
-            os.fsync(fdst.fileno())
-        os.chmod(tmp, 0o644)
-        tmp.replace(dest)
-        try:
-            dirfd = os.open(str(dest.parent), os.O_RDONLY)
-            try:
-                os.fsync(dirfd)
-            finally:
-                os.close(dirfd)
-        except OSError:
-            pass    # not supported on all FAT drivers; os.sync() covers it
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    _atomic_copy(wav, track_path(slot), "~bt")
 
 
 def copy_loop(slot: int, dest: Path) -> None:
     """Copy a slot's LOOP.WAV off the pedal into a local `dest`.
 
     The reverse direction of write_track: the pedal is the source, `dest` is a
-    local staging file. Same temp + fsync + rename discipline so a truncated
-    copy never appears under `dest`, which matters because the web thread streams
-    `dest` straight to the browser. Raises FileNotFoundError if the loop is gone
-    (e.g. deleted on the pedal between has_loop() and here).
+    local staging file. Raises FileNotFoundError if the loop is gone (e.g.
+    deleted on the pedal between has_loop() and here).
     """
-    src = loop_path(slot)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent),
-                                    prefix="~loop", suffix=".tmp")
-    tmp = Path(tmp_name)
-    try:
-        # os.fdopen first so it owns and closes fd even if opening the source
-        # raises (the loop can vanish between check and copy).
-        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
-            shutil.copyfileobj(fsrc, fdst, length=1 << 19)
-            fdst.flush()
-            os.fsync(fdst.fileno())
-        os.chmod(tmp, 0o644)
-        tmp.replace(dest)
-        try:
-            dirfd = os.open(str(dest.parent), os.O_RDONLY)
-            try:
-                os.fsync(dirfd)
-            finally:
-                os.close(dirfd)
-        except OSError:
-            pass    # not supported on all filesystems; os.sync() covers it
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    _atomic_copy(loop_path(slot), dest, "~loop")
 
 
 def remove_track(slot: int) -> None:
