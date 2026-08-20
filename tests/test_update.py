@@ -91,22 +91,6 @@ def test_update_check_cross_site_403():
 
 # --- core guards / redeploy -------------------------------------------------
 
-@pytest.fixture
-def service():
-    svc = core.Service()
-    # Startup queues a collector job, and update() refuses while any job is in
-    # flight. These tests are about update()'s own guards, so wait for the
-    # device to reach idle first rather than racing the boot sweep. _drain
-    # returns silently when its timeout expires, so assert the device really
-    # did settle — otherwise a slow sweep would have these tests assert on a
-    # refusal that came from startup rather than from the guard under test.
-    svc._drain(timeout=5.0)
-    assert svc._work.empty() and not svc._in_flight.is_set(), \
-        "startup work did not finish; these tests would assert on the wrong refusal"
-    yield svc
-    svc.shutdown(timeout=2.0)
-
-
 def test_update_refused_while_busy(service):
     service.busy = "Writing something"
     ok, msg = service.update()

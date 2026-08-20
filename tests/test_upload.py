@@ -19,18 +19,12 @@ def app_service():
 
 
 @pytest.fixture
-def client(app_service, tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DATA", tmp_path)
-    monkeypatch.setattr(config, "DB_PATH", tmp_path / "state.db")
-    for attr in ("conn", "path"):
-        if hasattr(db._local, attr):
-            delattr(db._local, attr)
+def client(app_service, data_tree):
+    """A real database, but a fake service: the route reads db.all_slots()
+    directly to decide what is taken, and never needs the worker."""
     app = web.create_app(app_service)
     app.config.update(TESTING=True)
-    yield app.test_client()
-    for attr in ("conn", "path"):
-        if hasattr(db._local, attr):
-            delattr(db._local, attr)
+    return app.test_client()
 
 
 class FakeService:

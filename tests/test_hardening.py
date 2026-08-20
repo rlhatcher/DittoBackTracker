@@ -3,11 +3,9 @@
 There is no battery any more, so the plug can come out at any instant. These
 cover the three places that assumption changed something.
 
-Note the two fixtures. `paths` repoints the file-tree constants for tests that
-only touch files; the tests that build a real Service deliberately use the
-conftest temp tree instead, because db.conn() caches one connection per thread
-against config.DB_PATH and repointing DATA underneath it would strand that
-connection on a path the next test can't reach.
+Fixtures come from conftest: `data_tree` for the tests that only touch files,
+`service` for the ones that need the worker. Both give each test its own
+database and file tree, so no test has to pick a hash nobody else is using.
 """
 
 import json
@@ -22,34 +20,10 @@ import pytest
 from ditto import config, core, db
 
 
-@pytest.fixture
-def paths(tmp_path, monkeypatch):
-    """Repoint the file-tree constants at a throwaway tree.
-
-    Each is derived from DATA at import time, so each has to be patched
-    individually — patching DATA alone would leave the rest pointing at the
-    conftest tree.
-    """
-    monkeypatch.setattr(config, "DATA", tmp_path)
-    for name in ("SOURCES", "STAGED", "TRASH", "LOOPS"):
-        d = tmp_path / name.lower()
-        monkeypatch.setattr(config, name, d)
-        d.mkdir(parents=True, exist_ok=True)
-    return tmp_path
-
-
-@pytest.fixture
-def service():
-    config.ensure_dirs()
-    svc = core.Service()
-    yield svc
-    svc.shutdown(timeout=2.0)
-
-
 # --- durable ingest ---------------------------------------------------------
 
-def test_store_source_moves_the_file_intact(paths):
-    tmp = paths / "tmpupload"
+def test_store_source_moves_the_file_intact(data_tree):
+    tmp = data_tree / "tmpupload"
     tmp.write_bytes(b"audio bytes")
     stored = config.SOURCES / "abc123.mp3"
 
@@ -59,11 +33,11 @@ def test_store_source_moves_the_file_intact(paths):
     assert not tmp.exists()
 
 
-def test_store_source_survives_an_unfsyncable_directory(paths, monkeypatch):
+def test_store_source_survives_an_unfsyncable_directory(data_tree, monkeypatch):
     """A filesystem that refuses to fsync a *directory* must not fail the
     upload: the bytes are already durable by then, and only the name is at
     stake."""
-    tmp = paths / "tmpupload"
+    tmp = data_tree / "tmpupload"
     tmp.write_bytes(b"audio bytes")
     stored = config.SOURCES / "abc123.mp3"
 
@@ -89,11 +63,11 @@ def test_store_source_survives_an_unfsyncable_directory(paths, monkeypatch):
     assert refused, "the directory fsync was never attempted"
 
 
-def test_store_source_refuses_to_claim_an_unsyncable_file(paths, monkeypatch):
+def test_store_source_refuses_to_claim_an_unsyncable_file(data_tree, monkeypatch):
     """The file's own fsync is the whole guarantee. If it fails, the caller
     must not go on to record a row pointing at bytes that were never confirmed
     on the card."""
-    tmp = paths / "tmpupload"
+    tmp = data_tree / "tmpupload"
     tmp.write_bytes(b"audio bytes")
     stored = config.SOURCES / "abc123.mp3"
 
@@ -111,10 +85,10 @@ def test_store_source_refuses_to_claim_an_unsyncable_file(paths, monkeypatch):
 
 # --- the upload-temp sweep --------------------------------------------------
 
-def test_sweep_takes_stale_upload_temps_and_leaves_fresh_ones(paths):
-    stale = paths / "tmpstale"
-    fresh = paths / "tmpfresh"
-    other = paths / "state.db"
+def test_sweep_takes_stale_upload_temps_and_leaves_fresh_ones(data_tree):
+    stale = data_tree / "tmpstale"
+    fresh = data_tree / "tmpfresh"
+    other = data_tree / "state.db"
     for p in (stale, fresh, other):
         p.write_bytes(b"x")
     old = time.time() - config.UPLOAD_TEMP_KEEP_SECS - 60
@@ -127,8 +101,8 @@ def test_sweep_takes_stale_upload_temps_and_leaves_fresh_ones(paths):
     assert other.exists(), "only tmp* is ours to delete"
 
 
-def test_sweep_ignores_directories(paths):
-    d = paths / "tmpdir"
+def test_sweep_ignores_directories(data_tree):
+    d = data_tree / "tmpdir"
     d.mkdir()
     old = time.time() - config.UPLOAD_TEMP_KEEP_SECS - 60
     os.utime(d, (old, old))
@@ -144,7 +118,7 @@ def test_gc_spares_a_freshly_written_source(service):
     """upload() writes the file, then the slot row. A collector run landing in
     that window must not delete an upload that is moments from being
     referenced."""
-    fresh = config.SOURCES / "abcabcabcabc00000002.mp3"
+    fresh = config.SOURCES / f"{'b' * 20}.mp3"
     fresh.write_bytes(b"just uploaded, no row yet")
 
     service._gc()
@@ -166,7 +140,7 @@ def test_gc_takes_an_old_unreferenced_source(service):
 
 def test_gc_takes_an_interrupted_transcode_at_any_age(service):
     """A .part file is never referenced by anything, however new it is."""
-    part = config.STAGED / "abcabcabcabc00000003-pcm_s24le-44100-1.wav.part"
+    part = config.STAGED / f"{'c' * 20}-pcm_s24le-44100-1.wav.part"
     part.write_bytes(b"half a wav")
 
     service._gc()
@@ -263,12 +237,12 @@ def test_the_stream_never_sends_a_frame_older_than_the_one_before(service,
     assert second["seq"] > first["seq"]
 
 
-def test_store_source_syncs_before_it_publishes_the_name(paths, monkeypatch):
+def test_store_source_syncs_before_it_publishes_the_name(data_tree, monkeypatch):
     """Order matters, not just that both happen. sources/ is content-addressed,
     so a name published ahead of its confirmed bytes leaves a window where a
     power cut strands an unconfirmed file that the next upload of the same
     track would adopt — skipping the write on stored.exists()."""
-    tmp = paths / "tmpupload"
+    tmp = data_tree / "tmpupload"
     tmp.write_bytes(b"audio bytes")
     stored = config.SOURCES / "abc123.mp3"
 
@@ -326,11 +300,7 @@ def test_gc_still_drops_staged_files_for_unassigned_tracks(service):
     """The reason the predicate is per-slot and not per-library-track: mono
     24-bit at 44.1 kHz is 132 kB/s, so caching one per library track would be
     gigabytes behind a few hundred MB of music."""
-    # A hash unique to this test. The service fixture shares one database
-    # across the module and nothing clears library rows between tests, so
-    # reusing another test's hash would leave a row behind that stops its
-    # orphan being collected — an order-dependent failure.
-    h = "abcabcabcabc00000001"
+    h = "a" * 20
     db.library_add(h, "In the library, not on the pedal", 120.0)
     stale = config.STAGED / f"{h}-pcm_s24le-44100-1.wav"
     stale.write_bytes(b"cache for a track no slot wants")

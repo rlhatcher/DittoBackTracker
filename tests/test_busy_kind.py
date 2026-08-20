@@ -28,15 +28,6 @@ class SlowRead:
 
 
 @pytest.fixture
-def service():
-    config.ensure_dirs()
-    svc = core.Service()
-    svc._drain(timeout=5.0)
-    yield svc
-    svc.shutdown(timeout=2.0)
-
-
-@pytest.fixture
 def fake_pedal(tmp_path, monkeypatch):
     """A directory standing in for a mounted pedal, as test_pedal.py does."""
     monkeypatch.setattr(config, "MOUNT", tmp_path)

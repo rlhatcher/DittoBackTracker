@@ -16,18 +16,8 @@ from ditto import config, core, db, media, pedal
 
 
 @pytest.fixture
-def svc(tmp_path, monkeypatch):
+def svc(data_tree, monkeypatch):
     """A Service read path with no threads, on its own database."""
-    monkeypatch.setattr(config, "DATA", tmp_path)
-    monkeypatch.setattr(config, "DB_PATH", tmp_path / "state.db")
-    for name in ("SOURCES", "STAGED", "LOOPS"):
-        d = tmp_path / name.lower()
-        monkeypatch.setattr(config, name, d)
-        d.mkdir(parents=True, exist_ok=True)
-    for attr in ("conn", "path"):
-        if hasattr(db._local, attr):
-            delattr(db._local, attr)
-
     s = core.Service.__new__(core.Service)
     s.fmt = dict(config.DEFAULT_FORMAT)
     s.fmt_source = "default"
@@ -45,9 +35,6 @@ def svc(tmp_path, monkeypatch):
     s._work = queue.Queue()
     s._last_prog_emit = 0.0
     yield s
-    for attr in ("conn", "path"):
-        if hasattr(db._local, attr):
-            delattr(db._local, attr)
 
 
 def count_calls(monkeypatch, module, name):
