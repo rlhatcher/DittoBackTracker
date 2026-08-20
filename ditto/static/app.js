@@ -16,7 +16,86 @@ let library = null;
 let editingHash = null;    // a rename in progress; freezes renderLibrary
 let nowPlaying = null;     // hash being auditioned, for the row's play button
 
+/* Both lists rebuild from scratch, and render() runs on every SSE frame — up to
+   5 Hz while a conversion reports progress. Rebuilding then is not just wasted
+   work on a phone: it destroys focus, so a keyboard user is thrown back to the
+   document five times a second and the list becomes unusable while anything is
+   converting.
+
+   So each list computes a key from exactly what it draws and skips the rebuild
+   when that key is unchanged. Progress is not in either key, which is what
+   makes a conversion quiet.
+
+   libRev stands in for the library's contents: hashing 100 rows every frame
+   would just move the cost. It is bumped wherever `library` is replaced or a
+   row is edited in place. */
+let libRev = 0;
+let lastListKey = null, lastLibKey = null;
+
 function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
+
+/* The tracks list: what is on the pedal right now, plus any loop-only slots.
+   Split out of render() so a dirty check can skip it wholesale. */
+function drawTrackList(list, s, byslot, loops){
+  list.innerHTML = "";
+    // Union of backing-track slots and loop-bearing slots, in slot order: a slot
+    // that holds only a pedal-recorded loop (no backing track) still gets a row,
+    // so its download/remove controls are reachable.
+    const slotNums = [...new Set([...s.slots.map(x=>x.slot), ...loops])]
+      .sort((a,b)=>a-b);
+    if (!slotNums.length){
+      list.innerHTML = '<div style="color:var(--tx2);font-size:14px">Nothing loaded yet.</div>';
+    }
+    slotNums.forEach(n => {
+      const r = byslot[n], pad = String(n).padStart(2,"0");
+      const el = document.createElement("div");
+      el.className = "track";
+      if (r){
+        const label = {converting:"converting",staged:"staged",synced:"on pedal",error:"error"}[r.state]||r.state;
+        el.innerHTML = `
+          <span class="num">${pad}</span>
+          <span class="nm">${escapeHtml(r.display_name)}</span>
+          <span class="dur">${mmss(r.duration)}</span>
+          <span class="st ${r.state}">${label}</span>`;
+        const x = document.createElement("button");
+        x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
+        x.dataset.fk = "slot:" + r.slot + ":clear";
+      x.onclick = () => removeSlot(r.slot, r.display_name);
+        el.appendChild(x);
+      } else {
+        // Loop-only slot: no backing track, so no name/duration/clear control.
+        el.innerHTML = `
+          <span class="num">${pad}</span>
+          <span class="nm loop-only">Loop only</span>
+          <span class="st loop">loop</span>`;
+      }
+      list.appendChild(el);
+      if (loops.has(n)){
+        const lr = document.createElement("div");
+        lr.className = "looprow";
+        const dl = document.createElement("a");
+        dl.className = "loopbtn"; dl.href = `/api/loops/${n}`;
+        dl.setAttribute("download", `loop-${pad}.wav`);
+        dl.textContent = "Download loop";
+        dl.title = `Download the loop from slot ${pad} (leaves it on the pedal)`;
+        dl.dataset.fk = "slot:" + n + ":loopdl";
+        lr.appendChild(dl);
+        const rm = document.createElement("button");
+        rm.className = "loopbtn danger"; rm.textContent = "Remove loop";
+        rm.title = `Delete the loop in slot ${pad} from the pedal`;
+        rm.dataset.fk = "slot:" + n + ":looprm";
+        rm.onclick = () => removeLoop(n);
+        lr.appendChild(rm);
+        list.appendChild(lr);
+      }
+      if (r && r.state === "error" && r.error){
+        const e = document.createElement("div");
+        e.className = "err"; e.style.cssText = "font-size:12px;padding:0 0 8px 32px";
+        e.textContent = r.error;
+        list.appendChild(e);
+      }
+    });
+}
 
 function render(s){
   state = s;
@@ -123,61 +202,16 @@ function render(s){
   $("#print").hidden = !s.slots.length;
 
   const list = $("#list");
-  list.innerHTML = "";
-  // Union of backing-track slots and loop-bearing slots, in slot order: a slot
-  // that holds only a pedal-recorded loop (no backing track) still gets a row,
-  // so its download/remove controls are reachable.
-  const slotNums = [...new Set([...s.slots.map(x=>x.slot), ...loops])]
-    .sort((a,b)=>a-b);
-  if (!slotNums.length){
-    list.innerHTML = '<div style="color:var(--tx2);font-size:14px">Nothing loaded yet.</div>';
+  // Everything this list draws, and nothing else. Progress is absent on
+  // purpose: it is what changes 5 times a second during a conversion, and it
+  // does not appear here.
+  const listKey = s.slots.map(x => [x.slot, x.display_name, x.duration,
+                                    x.state, x.error].join(":")).join("|")
+                  + "\u0000" + [...loops].join(",");
+  if (listKey !== lastListKey){
+    lastListKey = listKey;
+    rebuild(list, () => drawTrackList(list, s, byslot, loops));
   }
-  slotNums.forEach(n => {
-    const r = byslot[n], pad = String(n).padStart(2,"0");
-    const el = document.createElement("div");
-    el.className = "track";
-    if (r){
-      const label = {converting:"converting",staged:"staged",synced:"on pedal",error:"error"}[r.state]||r.state;
-      el.innerHTML = `
-        <span class="num">${pad}</span>
-        <span class="nm">${escapeHtml(r.display_name)}</span>
-        <span class="dur">${mmss(r.duration)}</span>
-        <span class="st ${r.state}">${label}</span>`;
-      const x = document.createElement("button");
-      x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
-      x.onclick = () => removeSlot(r.slot, r.display_name);
-      el.appendChild(x);
-    } else {
-      // Loop-only slot: no backing track, so no name/duration/clear control.
-      el.innerHTML = `
-        <span class="num">${pad}</span>
-        <span class="nm loop-only">Loop only</span>
-        <span class="st loop">loop</span>`;
-    }
-    list.appendChild(el);
-    if (loops.has(n)){
-      const lr = document.createElement("div");
-      lr.className = "looprow";
-      const dl = document.createElement("a");
-      dl.className = "loopbtn"; dl.href = `/api/loops/${n}`;
-      dl.setAttribute("download", `loop-${pad}.wav`);
-      dl.textContent = "Download loop";
-      dl.title = `Download the loop from slot ${pad} (leaves it on the pedal)`;
-      lr.appendChild(dl);
-      const rm = document.createElement("button");
-      rm.className = "loopbtn danger"; rm.textContent = "Remove loop";
-      rm.title = `Delete the loop in slot ${pad} from the pedal`;
-      rm.onclick = () => removeLoop(n);
-      lr.appendChild(rm);
-      list.appendChild(lr);
-    }
-    if (r && r.state === "error" && r.error){
-      const e = document.createElement("div");
-      e.className = "err"; e.style.cssText = "font-size:12px;padding:0 0 8px 32px";
-      e.textContent = r.error;
-      list.appendChild(e);
-    }
-  });
 
   if (binMode){
     /* leave the bin prompt in place while a slot is being dragged */
@@ -217,6 +251,22 @@ function render(s){
   // The library's own rows come from /api/library, but its slot badges and its
   // assign targets come from the snapshot — so a new snapshot re-renders it.
   renderLibrary();
+}
+
+/* Rebuild `host` while keeping focus where the user put it.
+
+   A dirty check keeps most rebuilds from happening at all, but the ones that do
+   still happen — a track finishing its write, a rename landing — must not steal
+   focus. Nodes opt in by setting data-fk to something stable across rebuilds.
+*/
+function rebuild(host, draw){
+  const active = document.activeElement;
+  const key = active && host.contains(active) ? active.dataset.fk : null;
+  draw();
+  if (key){
+    const again = host.querySelector(`[data-fk="${CSS.escape(key)}"]`);
+    if (again) again.focus();
+  }
 }
 
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
@@ -572,6 +622,7 @@ async function loadLibrary(){
     const rows = await r.json();
     if (mine !== libSeq) return;      // a newer request has already answered
     library = rows;
+    libRev++;                         // contents may differ; force a redraw
   } catch {
     return;             // a snapshot or a later refetch will put it right
   }
@@ -607,6 +658,10 @@ function libraryView(){
 }
 
 function renderLibrary(){
+  rebuild($("#librows"), _renderLibrary);
+}
+
+function _renderLibrary(){
   // An inline rename owns the row it's in. Freezing at most a screenful of
   // static rows for the few seconds an edit takes is free, and far more robust
   // than trying to preserve the editing node across a rebuild.
@@ -626,7 +681,6 @@ function renderLibrary(){
   // control to clear it.
   if (hideTools) $("#libq").value = "";
   $("#libtools").hidden = hideTools;
-  const rows = libraryView();
 
   // Which slots hold each track, from the snapshot — so these badges follow an
   // upload or a clear without refetching the library.
@@ -635,6 +689,20 @@ function renderLibrary(){
     (bySlot[s.source_hash] = bySlot[s.source_hash] || []).push(s.slot);
   });
 
+  // Everything the rows depend on. libRev stands in for the library's contents
+  // so this stays cheap with a large library; the rest is what the snapshot
+  // contributes (which slots hold what, and what the assign target would be)
+  // plus the two uncontrolled inputs. Progress is deliberately absent.
+  const libKey = [libRev, selected, nowPlaying,
+                  ((state && state.slots) || [])
+                    .map(s => s.slot + ":" + s.source_hash).join(","),
+                  ((state && state.loops) || []).join(","),
+                  state && state.slot_count,
+                  $("#libq").value, $("#libsort").value].join("\u0000");
+  if (libKey === lastLibKey) return;
+  lastLibKey = libKey;
+
+  const rows = libraryView();
   host.innerHTML = "";
   if (!all){
     host.innerHTML = '<div class="empty">Nothing in the library yet. '
@@ -665,6 +733,7 @@ function libraryRow(r, slots, target){
   nm.title = "Click to rename";
   nm.tabIndex = 0;
   nm.setAttribute("role", "button");
+  nm.dataset.fk = "lib:" + r.source_hash + ":name";
   const edit = () => startRename(el, nm, r);
   nm.onclick = edit;
   nm.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); } };
@@ -691,6 +760,7 @@ function libraryRow(r, slots, target){
   play.title = nowPlaying === r.source_hash ? "Stop" : "Listen";
   play.setAttribute("aria-label",
     (nowPlaying === r.source_hash ? "Stop " : "Listen to ") + r.name);
+  play.dataset.fk = "lib:" + r.source_hash + ":play";
   play.onclick = () => audition(r);
   el.appendChild(play);
 
@@ -704,6 +774,7 @@ function libraryRow(r, slots, target){
     : (selected != null
         ? `Put “${r.name}” in slot ${String(target).padStart(2,"0")}, the slot you have selected`
         : `Put “${r.name}” in slot ${String(target).padStart(2,"0")}, the lowest free slot`);
+  add.dataset.fk = "lib:" + r.source_hash + ":add";
   add.onclick = () => assignToSlot(r, target);
   el.appendChild(add);
 
@@ -713,6 +784,7 @@ function libraryRow(r, slots, target){
   del.textContent = "×";
   del.title = `Delete “${r.name}” from the device`;
   del.setAttribute("aria-label", "Delete " + r.name);
+  del.dataset.fk = "lib:" + r.source_hash + ":del";
   del.onclick = () => forget(r);
   el.appendChild(del);
 
@@ -742,6 +814,7 @@ function startRename(row, nm, r){
     // Optimistic: the row already reads the new name, and a failure re-reads
     // the server's version rather than leaving a lie on screen.
     r.name = name;
+    libRev++;          // edited in place, so the key must move
     renderLibrary();
     try {
       const resp = await fetch(`/api/library/${r.source_hash}`, {
