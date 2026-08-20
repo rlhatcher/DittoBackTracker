@@ -150,6 +150,11 @@ function render(s){
       // to cost 50 tabs, and the grid sits above everything else in the order.
       d.tabIndex = -1;
       d.onclick = () => {
+        // Before the branch, not inside it: the click has already moved
+        // focus here, and the move path below returns early, so setting
+        // this afterwards would leave the tab stop on whichever cell held
+        // it before — focus and the tab stop on different slots.
+        rovingSlot = i;
         // Pick-up-then-place reorder — the keyboard equivalent of the mouse
         // drag: with an occupied slot already selected, activating a different
         // slot moves or swaps into it. (state, not the once-built byslot
@@ -163,7 +168,6 @@ function render(s){
           return;
         }
         selected = selected===i?null:i;
-        rovingSlot = i;             // clicking here also moves the tab stop
         render(state);
       };
       d.addEventListener("dragstart", e => {
