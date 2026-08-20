@@ -154,7 +154,14 @@ class Updater:
                                f"({e}); rolled back")
         self._current_sha = target
         self.revision = target[:7] if target else None
+        # Both, together: remote_revision is only meaningful while an update is
+        # available, and _check_for_update maintains that pairing. Clearing one
+        # without the other leaves the device reporting "up to date" alongside
+        # a commit it supposedly needs — visible whenever the process keeps
+        # running past a deploy, which is what happens when the restart is
+        # refused.
         self.available = False
+        self.remote_revision = None
 
         # Restart from outside this process. sudo -n so a missing NOPASSWD rule
         # fails fast rather than hanging on a password prompt.

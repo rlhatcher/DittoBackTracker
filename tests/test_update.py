@@ -287,3 +287,50 @@ def test_update_rolls_back_when_revision_unwritable(service, repos, tmp_path,
 
     assert ok is False and "could not record the revision" in msg
     assert (app / "ditto" / "__init__.py").read_text() == "# OLD deployed\n"
+
+
+def test_a_successful_deploy_clears_the_remote_revision(service, repos,
+                                                        tmp_path, monkeypatch):
+    """remote_revision is only meaningful while an update is available.
+
+    Leaving it set after a deploy makes the device report "up to date" next to
+    a commit it supposedly needs. Observable whenever the process keeps running
+    past the deploy — which is exactly what happens when the restart is
+    refused, the case driven here.
+    """
+    src, work = repos["src"], repos["work"]
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "APP", tmp_path / "app")
+    monkeypatch.setattr(config, "REVISION_FILE", tmp_path / "app" / "REVISION")
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    (tmp_path / "app").mkdir()
+    shutil.copytree(src / "ditto", tmp_path / "app" / "ditto")
+
+    # Move the remote on, so a check finds an update and records its commit.
+    (work / "ditto" / "__init__.py").write_text("# newer\n")
+    _git("-C", str(work), "commit", "-am", "newer")
+    _git("-C", str(work), "push", "origin", "main")
+    service.updater._current_sha = _head(src)
+    service.updater._check_for_update()
+    assert service.updater.available is True
+    assert service.updater.remote_revision is not None
+
+    # Deploy for real, but refuse the restart so this process survives to be
+    # asked. The smoke check is stubbed: the fixture repo is not a real package.
+    monkeypatch.setattr(update.Updater, "_import_check",
+                        staticmethod(lambda app: None))
+    real = update.subprocess.run
+
+    def no_systemd(cmd, **kw):
+        if "systemctl" in " ".join(map(str, cmd)):
+            raise OSError("restart refused")
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(update.subprocess, "run", no_systemd)
+    ok, msg = service.update()
+    assert ok is False and "restart was refused" in msg
+
+    snap = service.snapshot()
+    assert snap["update_available"] is False
+    assert snap["remote_revision"] is None, \
+        "reported up to date while still naming a commit to update to"
