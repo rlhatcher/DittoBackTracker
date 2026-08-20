@@ -898,6 +898,11 @@ function startRename(row, nm, r){
   input.value = r.name;
   input.maxLength = 200;
   input.setAttribute("aria-label", "Rename " + r.name);
+  // The same focus key as the span it replaces. Ending an edit rebuilds the
+  // row, and rebuild() can only restore focus to a key it can find — without
+  // this the input is focused, then removed, and focus falls to the document,
+  // which is the exact failure the rebuild helper exists to prevent.
+  input.dataset.fk = nm.dataset.fk;
   row.replaceChild(input, nm);
   input.focus();
   input.select();
