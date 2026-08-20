@@ -28,15 +28,6 @@ class SlowRead:
 
 
 @pytest.fixture
-def service():
-    config.ensure_dirs()
-    svc = core.Service()
-    svc._drain(timeout=5.0)
-    yield svc
-    svc.shutdown(timeout=2.0)
-
-
-@pytest.fixture
 def fake_pedal(tmp_path, monkeypatch):
     """A directory standing in for a mounted pedal, as test_pedal.py does."""
     monkeypatch.setattr(config, "MOUNT", tmp_path)
@@ -86,40 +77,64 @@ def test_the_worker_clears_the_warning_when_the_job_ends(service, fake_pedal):
     assert snap["busy"] is None
 
 
-def test_a_read_does_not_warn(service):
+def test_a_read_does_not_warn(service, fake_pedal, monkeypatch):
     """Unplugging mid-read costs only the download, so a read must not cry
-    wolf — that distinction is the whole reason busy_kind isn't a boolean."""
-    service.busy = "Reading loop"
-    service.busy_kind = "read"
-    assert service.snapshot()["busy_kind"] == "read"
+    wolf — that distinction is the whole reason busy_kind isn't a boolean.
+
+    Sampled while the pedal is actually being read, the same way the write case
+    is. Setting busy_kind here and reading it back out of snapshot() would only
+    prove that snapshot copies a field.
+    """
+    (fake_pedal / config.LOOP_FILENAME).write_bytes(b"RIFF" + b"\0" * 64)
+    seen = []
+    real_copy = pedal.copy_loop
+
+    def watch(slot, dest):
+        seen.append((service.busy, service.busy_kind))
+        return real_copy(slot, dest)
+
+    monkeypatch.setattr(pedal, "copy_loop", watch)
+    stage = core.LoopStage()
+    service._do_stage_loop(5, service._mount_gen, stage)
+
+    assert seen, "copy_loop was never reached"
+    busy, kind = seen[0]
+    assert kind == "read", f"a read raised the write warning: {kind!r}"
+    assert busy, "a read should still say what it is doing"
 
 
 # --- shutdown --------------------------------------------------------------
 
-def test_halt_does_not_wait_on_its_own_job(service, fake_pedal, monkeypatch):
+def test_halt_does_not_drain(service, fake_pedal, monkeypatch):
     """_halt runs *as* the end job, inside the worker, so _in_flight is already
     set on its own behalf. A _drain there could never see idle and would burn
-    its whole timeout before every poweroff."""
+    its whole timeout before every poweroff.
+
+    Watch for the call rather than timing the result: shutdown() is the only
+    other caller of _drain, so a count of zero says exactly what this is about
+    and says it on any machine.
+    """
     monkeypatch.setattr(core.subprocess, "run", lambda *a, **k: None)
     monkeypatch.setattr(pedal, "unmount", lambda: None)
     monkeypatch.setattr(core.time, "sleep", lambda s: None)   # the read-me pause
 
-    took = []
-    real = core.Service._halt
+    drained, halted = [], []
+    real_halt = core.Service._halt
+    monkeypatch.setattr(core.Service, "_drain",
+                        lambda self, timeout=300.0: drained.append(timeout))
 
-    def timed(self):
-        t0 = time.monotonic()
-        real(self)
-        took.append(time.monotonic() - t0)
+    def watch(self):
+        real_halt(self)
+        halted.append(True)
 
-    monkeypatch.setattr(core.Service, "_halt", timed)
+    monkeypatch.setattr(core.Service, "_halt", watch)
     service.end_session()
 
     deadline = time.monotonic() + 20
-    while not took and time.monotonic() < deadline:
+    while not halted and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert took, "the end job never reached _halt"
-    assert took[0] < 2.0, f"_halt waited {took[0]:.1f}s — it is draining itself"
+    assert halted, "the end job never reached _halt"
+    assert drained == [], f"_halt drained instead of running: {drained}"
 
 
 def test_pedal_work_is_refused_once_ending(service):

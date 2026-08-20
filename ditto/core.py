@@ -21,6 +21,14 @@ from .update import Updater
 log = logging.getLogger(__name__)
 
 
+# Queued by shutdown() to unblock the worker's get(). Matched by identity, so it
+# can never collide with a real job.
+_STOP = ("stop",)
+
+# How often a drain re-checks whether the queue has emptied.
+_DRAIN_POLL = 0.05
+
+
 class ShuttingDown(Exception):
     """A pedal operation was asked for after the session began ending."""
 
@@ -589,6 +597,9 @@ class Service:
             return
         self._drain(timeout=timeout)
         self._stop.set()
+        # Wake the worker: it is blocked in a 0.5 s get and only tests _stop at
+        # the top of the loop, so the join would wait out that timeout.
+        self._work.put(_STOP)
         for t in self._threads:
             t.join(timeout=5.0)
         try:
@@ -769,6 +780,8 @@ class Service:
                     job = self._work.get(timeout=0.5)
                 except queue.Empty:
                     continue
+                if job is _STOP:
+                    break       # shutdown; anything still queued is abandoned
                 # Hold the job rather than putting it back: the queue is FIFO
                 # and requeuing would move it behind work queued later, and a
                 # convert has to stay ahead of the write it queues. A held job
@@ -1019,7 +1032,7 @@ class Service:
             # a write still running and unmount underneath it.
             if self._work.empty() and not self._in_flight.is_set():
                 return
-            time.sleep(0.2)
+            time.sleep(_DRAIN_POLL)
 
     def _halt(self) -> None:
         # No _drain here. This runs *as* the end job, inside the worker, so

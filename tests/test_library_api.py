@@ -3,7 +3,8 @@
 These run against a real Service on a throwaway data tree rather than the
 duck-typed FakeService in test_web_loops, because the interesting behaviour
 (refusing to delete a track a slot still holds, the collector's view of what is
-still referenced) lives in the service, not the route.
+still referenced) lives in the service, not the route. The `service`, `app` and
+`client` fixtures come from conftest.
 """
 
 import io
@@ -11,41 +12,10 @@ import threading
 
 import pytest
 
-from ditto import config, core, db, web
+from ditto import config, core, db
 
 H1 = "aaaaaaaaaaaaaaaaaaaa"
 H2 = "bbbbbbbbbbbbbbbbbbbb"
-
-
-@pytest.fixture
-def service(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DATA", tmp_path)
-    monkeypatch.setattr(config, "DB_PATH", tmp_path / "state.db")
-    for name in ("SOURCES", "STAGED", "TRASH", "LOOPS"):
-        d = tmp_path / name.lower()
-        monkeypatch.setattr(config, name, d)
-        d.mkdir(parents=True, exist_ok=True)
-    for attr in ("conn", "path"):
-        if hasattr(db._local, attr):
-            delattr(db._local, attr)
-
-    svc = core.Service()
-    svc._drain(timeout=5.0)          # let the boot sweep finish
-    yield svc
-    svc.shutdown(timeout=2.0)
-    for attr in ("conn", "path"):
-        if hasattr(db._local, attr):
-            delattr(db._local, attr)
-
-
-@pytest.fixture
-def app(service):
-    return web.create_app(service)
-
-
-@pytest.fixture
-def client(app):
-    return app.test_client()
 
 
 def seed(h, name="Track", duration=120.0, body=b"ID3 pretend audio"):
@@ -334,11 +304,24 @@ def test_the_page_itself_must_revalidate(client):
     assert client.get("/").headers["Cache-Control"] == "no-cache"
 
 
-@pytest.mark.parametrize("name", ["db.py", "../web.py", "app.js.map", ""])
+@pytest.mark.parametrize("name", ["index.html", "db.py", "app.js.map"])
 def test_only_the_named_assets_are_reachable(client, name):
     """An allowlist, not a directory route: a stray file in static/ is never
-    served."""
-    assert client.get(f"/static/{name}").status_code in (404, 308)
+    served from here.
+
+    index.html is the case that actually exercises the allowlist — it is a real
+    file sitting in static/, deliberately absent from ASSETS because it is
+    served from "/" instead. The others never reach the check; routing rejects
+    them first, which is why this asserts 404 exactly rather than accepting a
+    redirect and calling it proof.
+    """
+    assert client.get(f"/static/{name}").status_code == 404
+
+
+def test_the_allowlisted_assets_really_are_served(client):
+    """The other half: a 404 for everything would satisfy the test above."""
+    for name in ("app.js", "app.css"):
+        assert client.get(f"/static/{name}").status_code == 200
 
 
 def test_audition_is_a_safe_method_and_needs_no_guard(client):

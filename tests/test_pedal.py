@@ -71,9 +71,21 @@ def test_remove_loop_removes_only_the_loop(mount):
 
 
 def test_remove_loop_absent_is_noop(mount):
-    _slot_dir(mount, 7)
+    """Removing a loop that is not there must not raise, and must not take
+    anything else with it.
+
+    Asserting has_loop() afterwards proved nothing — the loop never existed, so
+    that held either way. What matters is that the slot and its backing track
+    are still where they were.
+    """
+    d = _slot_dir(mount, 7)
+    (d / config.TRACK_FILENAME).write_bytes(b"a real track")
+
     pedal.remove_loop(7)                                # must not raise
-    assert not pedal.has_loop(7)
+
+    assert d.is_dir(), "the slot directory was removed"
+    assert (d / config.TRACK_FILENAME).read_bytes() == b"a real track", \
+        "the backing track was taken with it"
 
 
 def test_run_turns_a_missing_mount_binary_into_a_pedal_error(monkeypatch):

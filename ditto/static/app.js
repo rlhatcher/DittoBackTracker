@@ -41,6 +41,7 @@ let lastListKey = null, lastLibKey = null;
    leaves the key exactly where it was. Without this the input stays on screen
    for good. */
 function libraryDomDirty(){ lastLibKey = null; }
+
 /* Which slot cell currently holds the grid's single tab stop. It has to live
    here rather than only on the element: render() rewrites every cell's
    tabIndex, so a position the user arrowed to would be reset to the selected
@@ -48,7 +49,9 @@ function libraryDomDirty(){ lastLibKey = null; }
    null means "follow the selection, else the first cell". */
 let rovingSlot = null;
 
-function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
+const pad2 = n => String(n).padStart(2, "0");
+
+function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+pad2(s%60); }
 
 /* The tracks list: what is on the pedal right now, plus any loop-only slots.
    Split out of render() so a dirty check can skip it wholesale. */
@@ -63,7 +66,7 @@ function drawTrackList(list, s, byslot, loops){
       list.innerHTML = '<div style="color:var(--tx2);font-size:14px">Nothing loaded yet.</div>';
     }
     slotNums.forEach(n => {
-      const r = byslot[n], pad = String(n).padStart(2,"0");
+      const r = byslot[n], pad = pad2(n);
       const el = document.createElement("div");
       el.className = "track";
       if (r){
@@ -122,7 +125,7 @@ function render(s){
   pd.innerHTML = `<span class="dot" style="background:${c}"></span>${t}`;
 
   if (s.version){
-      setText($("#ver"), "v" + s.version + (s.revision ? " · " + s.revision : ""));
+    setText($("#ver"), "v" + s.version + (s.revision ? " · " + s.revision : ""));
   }
   // The update completes when a snapshot shows the deployed revision has changed
   // (the restart brought up the new build). Gate on that, not on the SSE
@@ -253,11 +256,11 @@ function render(s){
   if (binMode){
     /* leave the bin prompt in place while a slot is being dragged */
   } else if (selected != null){
-    const pad = String(selected).padStart(2,"0");
+    const pad = pad2(selected);
     const occ = byslot[selected];
     $("#drophead").innerHTML = `Drop here to fill slot <b>${pad}</b>`;
     const nxt = [selected+1, selected+2].filter(n => n <= total)
-      .map(n => String(n).padStart(2,"0"));
+      .map(n => pad2(n));
     $("#dropnote").textContent = occ
       ? `Slot ${pad} holds “${occ.display_name}” — tap another slot to move it there, drop a file to replace it, or tap ${pad} again to deselect.`
       : nxt.length
@@ -339,7 +342,7 @@ function printHtml(s){
   const rows = (s.slots || []).slice().sort((a,b) => a.slot - b.slot);
   const body = rows.length
     ? rows.map(r =>
-        `<tr><td class="n">${String(r.slot).padStart(2,"0")}</td>` +
+        `<tr><td class="n">${pad2(r.slot)}</td>` +
         `<td>${escapeHtml(r.display_name)}</td></tr>`).join("")
     : `<tr><td></td><td>No backing tracks loaded.</td></tr>`;
   return `<!doctype html><html><head><meta charset="utf-8">` +
@@ -389,15 +392,35 @@ function updateBtnState(s){
   }
 }
 
+/* Send it, parse whatever came back, say whether it worked — the shape seven of
+   the thirteen call sites want. `status` is 0 when the request never reached the
+   device: the device's own error is worth showing, a network failure is not. The
+   six sites with their own control flow stay written out. */
+async function api(url, opts){
+  try {
+    const r = await fetch(url, opts);
+    return {ok: r.ok, status: r.status,
+            body: await r.json().catch(() => ({}))};
+  } catch {
+    return {ok: false, status: 0, body: {}};
+  }
+}
+
+/* Report a failed api() call. `what` is the fallback for when the device did
+   not answer, or answered without an error of its own. */
+function failFrom(r, what){
+  fail(r.status ? (r.body.error || what) : what + " — check the connection");
+}
+
+const jsonBody = body => ({method: "POST",
+                           headers: {"Content-Type": "application/json"},
+                           body: JSON.stringify(body)});
+
 function fail(text){ setText($("#msg"), text); $("#msg").className = "msg err"; }
 
-function moveTo(src, dst){
-  fetch(`/api/slots/${src}/move`, {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({to: dst})})
-    .then(r => r.ok ? null : r.json().catch(()=>({})))
-    .then(j => { if (j) fail(j.error || "Move failed"); })
-    .catch(() => fail("Move failed — check the connection"));
+async function moveTo(src, dst){
+  const r = await api(`/api/slots/${src}/move`, jsonBody({to: dst}));
+  if (!r.ok) failFrom(r, "Move failed");
 }
 
 async function send(files, start){
@@ -406,7 +429,7 @@ async function send(files, start){
   [...files].forEach(f => fd.append("file", f));
   if (start != null) fd.append("start", start);
   setText($("#msg"), start != null
-    ? `Uploading to slot ${String(start).padStart(2,"0")}…` : "Uploading…");
+    ? `Uploading to slot ${pad2(start)}…` : "Uploading…");
   let r;
   try {
     r = await fetch("/api/upload", {method:"POST", body:fd});
@@ -480,33 +503,23 @@ function setBinMode(on){
 }
 
 async function removeSlot(slot, name){
-  let j;
-  try {
-    const r = await fetch(`/api/slots/${slot}`, {method:"DELETE"});
-    j = await r.json().catch(()=>({}));
-    if (!r.ok){ fail(j.error || "Could not clear the slot"); return; }
-  } catch {
-    fail("Could not clear the slot — check the connection");
-    return;
-  }
+  const resp = await api(`/api/slots/${slot}`, {method:"DELETE"});
+  if (!resp.ok){ failFrom(resp, "Could not clear the slot"); return; }
+  const j = resp.body;
   const host = $("#undoslot");
   host.innerHTML = "";
   // The delete names its own trash entry. Reading back the newest item
   // instead would offer to restore whatever was deleted last, not this.
   if (j.trash_id == null) return;
-  const label = name || "slot " + String(slot).padStart(2,"0");
+  const label = name || "slot " + pad2(slot);
   const b = document.createElement("button");
   b.className = "undo";
   b.textContent = `Undo “${label.length > 16 ? label.slice(0,15)+"…" : label}”`;
   b.onclick = async () => {
-    // fetch only rejects on a network error, so a 404 (the entry has since
-    // been pruned) would otherwise look like success. Check r.ok explicitly.
-    try {
-      const r = await fetch(`/api/trash/${j.trash_id}/restore`, {method:"POST"});
-      if (!r.ok) fail("Undo failed — the trash entry has gone");
-    } catch {
-      fail("Undo failed — check the connection");
-    }
+    // A 404 means the entry has since been pruned. fetch does not reject on
+    // that, so the ok check is what catches it.
+    const r = await api(`/api/trash/${j.trash_id}/restore`, {method:"POST"});
+    if (!r.ok) failFrom(r, "Undo failed — the trash entry has gone");
     host.innerHTML = "";
   };
   host.appendChild(b);
@@ -516,17 +529,10 @@ async function removeSlot(slot, name){
 async function removeLoop(slot){
   // A loop is a live take with no source — deleting it is irreversible, so
   // guard the accidental click. No undo: there is nothing to restore from.
-  const pad = String(slot).padStart(2,"0");
+  const pad = pad2(slot);
   if (!confirm(`Delete the loop in slot ${pad} from the pedal? You can't undo this.`)) return;
-  try {
-    const r = await fetch(`/api/loops/${slot}`, {method:"DELETE"});
-    if (!r.ok){
-      const j = await r.json().catch(()=>({}));
-      fail(j.error || "Could not remove the loop");
-    }
-  } catch {
-    fail("Could not remove the loop — check the connection");
-  }
+  const r = await api(`/api/loops/${slot}`, {method:"DELETE"});
+  if (!r.ok) failFrom(r, "Could not remove the loop");
 }
 
 /* No click handler here: #drop is the input's <label>, so the browser opens
@@ -571,15 +577,13 @@ async function doCheck(){
   const btn = $("#update");
   checking = true;
   btn.disabled = true; btn.textContent = "Checking…"; btn.className = "link";
-  let j;
-  try {
-    const r = await fetch("/api/update/check", {method:"POST"});
-    j = await r.json().catch(() => ({}));
-  } catch {
+  const r = await api("/api/update/check", {method:"POST"});
+  if (!r.status){
     checking = false; updateBtnState(state);
     fail("Update check failed — check the connection");
     return;
   }
+  const j = r.body;
   checking = false;
   if (!j.ok){
     // The check couldn't run (offline, or not a git deployment).
@@ -845,7 +849,7 @@ function libraryRow(r, slots, target){
   if (slots && slots.length){
     const b = document.createElement("span");
     b.className = "inslot";
-    b.textContent = slots.map(n => String(n).padStart(2,"0")).join(" ");
+    b.textContent = slots.map(n => pad2(n)).join(" ");
     b.title = slots.length > 1 ? `On the pedal in slots ${b.textContent}`
                                : `On the pedal in slot ${b.textContent}`;
     el.appendChild(b);
@@ -866,12 +870,12 @@ function libraryRow(r, slots, target){
   add.className = "libbtn";
   add.type = "button";
   add.disabled = target === null;
-  add.textContent = target === null ? "Full" : "→ " + String(target).padStart(2,"0");
+  add.textContent = target === null ? "Full" : "→ " + pad2(target);
   add.title = target === null
     ? "Every slot is taken"
     : (selected != null
-        ? `Put “${r.name}” in slot ${String(target).padStart(2,"0")}, the slot you have selected`
-        : `Put “${r.name}” in slot ${String(target).padStart(2,"0")}, the lowest free slot`);
+        ? `Put “${r.name}” in slot ${pad2(target)}, the slot you have selected`
+        : `Put “${r.name}” in slot ${pad2(target)}, the lowest free slot`);
   add.dataset.fk = "lib:" + r.source_hash + ":add";
   add.onclick = () => assignToSlot(r, target);
   el.appendChild(add);
@@ -922,27 +926,20 @@ function startRename(row, nm, r){
     r.name = name;
     libRev++;          // edited in place, so the key must move
     renderLibrary();
-    try {
-      const resp = await fetch(`/api/library/${r.source_hash}`, {
-        method:"PATCH", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({name})});
-      if (!resp.ok){
-        const j = await resp.json().catch(()=>({}));
-        fail(j.error || "Rename failed");
-        loadLibrary();
-        return;
-      }
-      // The optimistic write went to the row object we captured, but
-      // renderLibrary is only frozen during the edit — loadLibrary is not, and
-      // es.onopen fires on the five-minute rotation. If it replaced `library`
-      // while this was in flight, that object is detached and the row would
-      // render the old name until some later refresh. Re-read from the server
-      // so the rendered name is the committed one either way.
+    const resp = await api(`/api/library/${r.source_hash}`,
+                           {...jsonBody({name}), method: "PATCH"});
+    if (!resp.ok){
+      failFrom(resp, "Rename failed");
       loadLibrary();
-    } catch {
-      fail("Rename failed — check the connection");
-      loadLibrary();
+      return;
     }
+    // The optimistic write went to the row object we captured, but
+    // renderLibrary is only frozen during the edit — loadLibrary is not, and
+    // es.onopen fires on the five-minute rotation. If it replaced `library`
+    // while this was in flight, that object is detached and the row would
+    // render the old name until some later refresh. Re-read from the server
+    // so the rendered name is the committed one either way.
+    loadLibrary();
   };
 
   input.onblur = () => finish(true);
@@ -974,20 +971,10 @@ function audition(r){
 
 async function assignToSlot(r, slot){
   if (slot == null) return;
-  const pad = String(slot).padStart(2,"0");
-  try {
-    const resp = await fetch(`/api/slots/${slot}/assign`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({hash: r.source_hash})});
-    if (!resp.ok){
-      const j = await resp.json().catch(()=>({}));
-      fail(j.error || `Couldn't put that in slot ${pad}`);
-      return;
-    }
-  } catch {
-    fail("Assign failed — check the connection");
-    return;
-  }
+  const pad = pad2(slot);
+  const resp = await api(`/api/slots/${slot}/assign`,
+                         jsonBody({hash: r.source_hash}));
+  if (!resp.ok){ failFrom(resp, `Couldn't put that in slot ${pad}`); return; }
   selected = null;      // consumed; the next click picks its own target
   loadLibrary();        // the slot badges come from the snapshot, but `added`
                         // ordering and any server-side change do not
@@ -1009,7 +996,7 @@ async function forget(r, force){
   }
   if (resp.status === 409){
     // It's on the pedal. Say which slots, rather than refusing opaquely.
-    const where = (j.slots || []).map(n => String(n).padStart(2,"0")).join(", ");
+    const where = (j.slots || []).map(n => pad2(n)).join(", ");
     if (confirm(`“${label}” is on the pedal in slot ${where}. Clear `
                 + `${(j.slots || []).length > 1 ? "those slots" : "that slot"} `
                 + `and delete it?`)){

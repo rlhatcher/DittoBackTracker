@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from ditto import config, core, web, update
+from ditto import config, web, update
 
 
 # --- endpoint status mapping ----------------------------------------------
@@ -90,22 +90,6 @@ def test_update_check_cross_site_403():
 
 
 # --- core guards / redeploy -------------------------------------------------
-
-@pytest.fixture
-def service():
-    svc = core.Service()
-    # Startup queues a collector job, and update() refuses while any job is in
-    # flight. These tests are about update()'s own guards, so wait for the
-    # device to reach idle first rather than racing the boot sweep. _drain
-    # returns silently when its timeout expires, so assert the device really
-    # did settle — otherwise a slow sweep would have these tests assert on a
-    # refusal that came from startup rather than from the guard under test.
-    svc._drain(timeout=5.0)
-    assert svc._work.empty() and not svc._in_flight.is_set(), \
-        "startup work did not finish; these tests would assert on the wrong refusal"
-    yield svc
-    svc.shutdown(timeout=2.0)
-
 
 def test_update_refused_while_busy(service):
     service.busy = "Writing something"
@@ -214,12 +198,24 @@ def test_check_skipped_during_deploy(service, repos, monkeypatch):
     assert service.updater.remote_revision is None      # skipped entirely
 
 
-def test_startup_update_check_noops_without_checkout(service):
-    # SRC has no checkout in the temp data dir, so the startup check is a fast
-    # no-op that leaves the state untouched (and never raises).
+def test_startup_update_check_noops_without_checkout(service, monkeypatch,
+                                                     tmp_path):
+    """Without a checkout the startup check must give up before running git.
+
+    Asserting that the state is unchanged would pass if the method body were
+    `pass`, and would not distinguish "declined" from "never ran" — the fixture
+    leaves those fields at their initial values anyway. Assert the outcome it
+    reports, and that it did not reach out.
+    """
+    monkeypatch.setattr(config, "SRC", tmp_path / "no-checkout")
+    ran = []
+    monkeypatch.setattr(update.Updater, "_git",
+                        staticmethod(lambda *a, **k: ran.append(a)))
+
     service.updater.startup_check()
-    assert service.updater.available is False
-    assert service.updater.remote_revision is None
+
+    assert ran == [], "it ran git against a directory with no checkout"
+    assert service.updater._check_for_update() == "no deployment to check"
 
 
 def test_check_now_reports_available(service, repos, monkeypatch):
