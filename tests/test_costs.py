@@ -6,6 +6,7 @@ round trip per file, a USB stat per slot, an ffprobe per track.
 """
 
 import itertools
+import types
 import queue
 import threading
 
@@ -34,9 +35,9 @@ def svc(tmp_path, monkeypatch):
     s.busy = s.busy_kind = s.progress = s.last_error = None
     s.ending = False
     s._loops = frozenset()
-    s._revision = "abc1234"
-    s._update_available = False
-    s._remote_revision = None
+    # snapshot() reads these three off the updater now.
+    s.updater = types.SimpleNamespace(revision="abc1234", available=False,
+                                      remote_revision=None)
     s._snap_seq = itertools.count(1)
     # Enough of the machinery for _emit and the convert job to run.
     s._subs = []

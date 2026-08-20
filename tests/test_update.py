@@ -3,10 +3,11 @@ core guard/redeploy/update-check branches, using local git repos (no network).""
 
 import shutil
 import subprocess
+import threading
 
 import pytest
 
-from ditto import config, core, web
+from ditto import config, core, web, update
 
 
 # --- endpoint status mapping ----------------------------------------------
@@ -121,7 +122,7 @@ def test_update_refused_while_job_in_flight(service):
     finally:
         service._in_flight.clear()
     assert ok is False and "busy" in msg
-    assert not service._updating.is_set()
+    assert not service.updater.admitted.is_set()
 
 
 def test_update_no_git_checkout(service, tmp_path, monkeypatch):
@@ -173,27 +174,27 @@ def test_update_available_when_remote_ahead(service, repos, monkeypatch):
     src, work = repos["src"], repos["work"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    service._current_sha = _head(src)
-    service._update_available, service._remote_revision = False, None
+    service.updater._current_sha = _head(src)
+    service.updater.available, service.updater.remote_revision = False, None
 
     # Advance the remote past what the checkout has.
     (work / "ditto" / "__init__.py").write_text("# b\n")
     _git("-C", str(work), "commit", "-am", "B")
     _git("-C", str(work), "push", "origin", "main")
 
-    service._check_for_update()
-    assert service._update_available is True
-    assert service._remote_revision
+    service.updater._check_for_update()
+    assert service.updater.available is True
+    assert service.updater.remote_revision
 
 
 def test_no_update_when_current(service, repos, monkeypatch):
     src = repos["src"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    service._current_sha = _head(src)
-    service._check_for_update()
-    assert service._update_available is False
-    assert service._remote_revision is None      # null unless an update exists
+    service.updater._current_sha = _head(src)
+    service.updater._check_for_update()
+    assert service.updater.available is False
+    assert service.updater.remote_revision is None      # null unless an update exists
 
 
 def test_check_skipped_during_deploy(service, repos, monkeypatch):
@@ -202,30 +203,30 @@ def test_check_skipped_during_deploy(service, repos, monkeypatch):
     src = repos["src"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    service._current_sha = _head(src)
-    service._update_available, service._remote_revision = False, None
-    assert service._update_lock.acquire(blocking=False)
+    service.updater._current_sha = _head(src)
+    service.updater.available, service.updater.remote_revision = False, None
+    assert service.updater._lock.acquire(blocking=False)
     try:
-        service._check_for_update()
+        service.updater._check_for_update()
     finally:
-        service._update_lock.release()
-    assert service._update_available is False
-    assert service._remote_revision is None      # skipped entirely
+        service.updater._lock.release()
+    assert service.updater.available is False
+    assert service.updater.remote_revision is None      # skipped entirely
 
 
 def test_startup_update_check_noops_without_checkout(service):
     # SRC has no checkout in the temp data dir, so the startup check is a fast
     # no-op that leaves the state untouched (and never raises).
-    service._startup_update_check()
-    assert service._update_available is False
-    assert service._remote_revision is None
+    service.updater.startup_check()
+    assert service.updater.available is False
+    assert service.updater.remote_revision is None
 
 
 def test_check_now_reports_available(service, repos, monkeypatch):
     src, work = repos["src"], repos["work"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    service._current_sha = _head(src)
+    service.updater._current_sha = _head(src)
 
     (work / "ditto" / "__init__.py").write_text("# b\n")
     _git("-C", str(work), "commit", "-am", "B")
@@ -280,10 +281,96 @@ def test_update_rolls_back_when_revision_unwritable(service, repos, tmp_path,
     (app / "REVISION").mkdir()
     monkeypatch.setattr(config, "REVISION_FILE", app / "REVISION")
     # Pretend the deployed code imports cleanly.
-    monkeypatch.setattr(core.Service, "_import_check",
+    monkeypatch.setattr(update.Updater, "_import_check",
                         staticmethod(lambda app: None))
 
     ok, msg = service.update()
 
     assert ok is False and "could not record the revision" in msg
     assert (app / "ditto" / "__init__.py").read_text() == "# OLD deployed\n"
+
+
+def test_a_successful_deploy_clears_the_remote_revision(service, repos,
+                                                        tmp_path, monkeypatch):
+    """remote_revision is only meaningful while an update is available.
+
+    Leaving it set after a deploy makes the device report "up to date" next to
+    a commit it supposedly needs. Observable whenever the process keeps running
+    past the deploy — which is exactly what happens when the restart is
+    refused, the case driven here.
+    """
+    src, work = repos["src"], repos["work"]
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "APP", tmp_path / "app")
+    monkeypatch.setattr(config, "REVISION_FILE", tmp_path / "app" / "REVISION")
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    (tmp_path / "app").mkdir()
+    shutil.copytree(src / "ditto", tmp_path / "app" / "ditto")
+
+    # Move the remote on, so a check finds an update and records its commit.
+    (work / "ditto" / "__init__.py").write_text("# newer\n")
+    _git("-C", str(work), "commit", "-am", "newer")
+    _git("-C", str(work), "push", "origin", "main")
+    service.updater._current_sha = _head(src)
+    service.updater._check_for_update()
+    assert service.updater.available is True
+    assert service.updater.remote_revision is not None
+
+    # Deploy for real, but refuse the restart so this process survives to be
+    # asked. The smoke check is stubbed: the fixture repo is not a real package.
+    monkeypatch.setattr(update.Updater, "_import_check",
+                        staticmethod(lambda app: None))
+    real = update.subprocess.run
+
+    def no_systemd(cmd, **kw):
+        if "systemctl" in " ".join(map(str, cmd)):
+            raise OSError("restart refused")
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(update.subprocess, "run", no_systemd)
+    ok, msg = service.update()
+    assert ok is False and "restart was refused" in msg
+
+    snap = service.snapshot()
+    assert snap["update_available"] is False
+    assert snap["remote_revision"] is None, \
+        "reported up to date while still naming a commit to update to"
+
+
+def test_the_gate_is_cleared_before_the_lock_is_released(service, monkeypatch):
+    """A failed update must not reopen the gate under a second one.
+
+    Releasing the lock first lets another update acquire it and set the gate;
+    this one's clear would then reopen it with that deploy already running,
+    leaving the worker free to touch the pedal during a git reset and a
+    restart. The window is a couple of bytecodes, so assert the ordering
+    rather than racing it.
+    """
+    order = []
+    upd = service.updater
+
+    class RecordingLock:
+        """A stand-in for the lock itself — _thread.lock's methods are
+        read-only, so the attribute is replaced rather than patched."""
+
+        def __init__(self):
+            self._real = threading.Lock()
+
+        def acquire(self, blocking=True):
+            return self._real.acquire(blocking)
+
+        def release(self):
+            order.append("release")
+            self._real.release()
+
+    monkeypatch.setattr(upd, "_lock", RecordingLock())
+    real_clear = upd.admitted.clear
+    monkeypatch.setattr(upd.admitted, "clear",
+                        lambda: (order.append("clear"), real_clear())[1])
+
+    service.busy = "Writing something"          # forces the refusal path
+    ok, _ = service.update()
+
+    assert ok is False
+    assert order == ["clear", "release"], (
+        f"the gate outlived the lock: {order}")

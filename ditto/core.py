@@ -7,10 +7,8 @@ import itertools
 import logging
 import os
 import queue
-import shutil
 import socket
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -18,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import __version__, config, db, media, pedal
+from .update import Updater
 
 log = logging.getLogger(__name__)
 
@@ -116,22 +115,14 @@ class Service:
         # from a different pedal mounted after an unplug/replug. Only the monitor
         # thread writes it; the worker only reads (an atomic int compare).
         self._mount_gen = 0
-        # Serializes self-update so two clicks can't redeploy on top of each
-        # other. Held only for the brief git-pull + redeploy, never a job.
-        self._update_lock = threading.Lock()
-        # Set while an update is admitted: gates the worker from starting any new
-        # job, so a redeploy/restart never overlaps pedal work. Stays set once a
-        # restart is pending; cleared if the update bails out.
-        self._updating = threading.Event()
-
-        # Deployed code identity + whether the remote has something newer.
-        # `revision`/`_current_sha` are the SHA actually deployed (recorded at
-        # the last successful deploy, else the checkout HEAD) — cheap, no network
-        # — read once at startup; `update_available`/`remote_revision` are set by
-        # the startup check and by on-demand checks the user triggers.
-        self._revision, self._current_sha = self._deployed_head()
-        self._update_available = False
-        self._remote_revision: Optional[str] = None
+        # Before the updater, which captures self._stop.is_set as a callable.
+        self._stop = threading.Event()
+        # git and systemd live in update.py; it owns all of its own state and
+        # asks the session only what it must know before it may run.
+        self.updater = Updater(is_ending=lambda: self.ending,
+                               is_busy=self._busy_for_update,
+                               stopped=self._stop.is_set,
+                               on_change=self._emit)
 
         # Serializes "is this device still accepting work?" with the enqueue
         # that follows it, and with end_session's own set-and-enqueue. Reentrant
@@ -150,8 +141,6 @@ class Service:
         # next() on an itertools.count is atomic, so no lock is needed.
         self._snap_seq = itertools.count(1)
         self._last_prog_emit = 0.0
-
-        self._stop = threading.Event()
         # One update check at startup, off the boot path so it never delays the
         # app coming up (and no-ops without a checkout or network). After that,
         # checks happen only when the user asks. Tracked in _threads so shutdown()
@@ -266,9 +255,9 @@ class Service:
             "capacity": self.capacity(slots),
             "ip": local_ip(),
             "version": __version__,
-            "revision": self._revision,
-            "update_available": self._update_available,
-            "remote_revision": self._remote_revision,
+            "revision": self.updater.revision,
+            "update_available": self.updater.available,
+            "remote_revision": self.updater.remote_revision,
         }
 
     # ------------------------------------------------------------ operations
@@ -572,246 +561,22 @@ class Service:
             self._work.put(("end",))
         self._emit()
 
-    # -------------------------------------------------------------- self-update
+    def _busy_for_update(self) -> bool:
+        """Is there pedal work in flight or queued? Asked by the updater before
+        it admits a redeploy, and evaluated after it has closed the gate."""
+        return bool(self.busy or self._in_flight.is_set()
+                    or not self._work.empty())
 
+    # The web layer talks to the service, not to the updater. These stay so the
+    # routes and their tests do not have to know where the code moved to.
     def update(self) -> "tuple[bool, str]":
-        """Pull the tracked branch, redeploy the app, and restart out-of-process.
-
-        Returns (ok, message): on success `message` is the deployed short commit,
-        otherwise a human-readable reason. Serialized so two clicks can't redeploy
-        on top of each other. Admission is atomic with job execution: `_updating`
-        is set first, which gates the worker from starting any job, and the update
-        is only admitted when nothing is in flight and the queue is empty — so a
-        restart never runs concurrently with (or interrupts) a write. On success
-        `_updating` stays set (a restart is pending); it's cleared on every path
-        that does not initiate one. The restart itself is done by a separate
-        oneshot unit (RESTART_SERVICE), so it isn't killing this process.
-        """
-        if self.ending:
-            return (False, "the device is shutting down")
-        if not self._update_lock.acquire(blocking=False):
-            return (False, "an update is already running")
-        # Gate the worker before inspecting idleness, so a job can't slip from
-        # the queue into flight between the check and the deploy.
-        self._updating.set()
-        result = (False, "update failed")
-        try:
-            if self.busy or self._in_flight.is_set() or not self._work.empty():
-                result = (False, "busy — try again when the current work finishes")
-            else:
-                result = self._do_update()
-        finally:
-            self._update_lock.release()
-            if not result[0]:
-                self._updating.clear()      # no restart pending — resume work
-        return result
-
-    def _do_update(self) -> "tuple[bool, str]":
-        src, app = config.SRC, config.APP
-        if not (src / ".git").is_dir():
-            return (False, f"no git checkout at {src}")
-        try:
-            self._git(src, "fetch", "--quiet", "origin", config.UPDATE_BRANCH)
-            self._git(src, "reset", "--hard", "--quiet",
-                      f"origin/{config.UPDATE_BRANCH}")
-        except (subprocess.SubprocessError, OSError) as e:
-            return (False, f"git update failed: {self._proc_err(e)}")
-
-        target = self._rev_parse(src, "HEAD")        # what we're deploying to
-
-        # Atomic-ish redeploy: build the new tree beside the live one and swap by
-        # rename, so a failed copy never leaves the app without a ditto/ package.
-        # The previous deployment is kept as ditto.bak — a one-rename rollback if
-        # the new code won't load, and the last-known-good between updates.
-        new, live, bak = app / "ditto.new", app / "ditto", app / "ditto.bak"
-        try:
-            if new.exists():
-                shutil.rmtree(new)
-            shutil.copytree(src / "ditto", new)
-            if bak.exists():
-                shutil.rmtree(bak)
-            if live.exists():
-                live.rename(bak)
-            new.rename(live)
-        except OSError as e:
-            if not live.exists() and bak.exists():
-                bak.rename(live)                # put the old code back
-            shutil.rmtree(new, ignore_errors=True)
-            return (False, f"deploy failed: {e}")
-
-        # Smoke-check the deployed code before committing to a restart: import it
-        # from the app dir (cwd is first on sys.path). This catches a syntax or
-        # import error — the common "broke on deploy" — without waiting on the
-        # restart, which cannot be observed from the process being restarted. On
-        # failure, roll back to the previous deployment and do not restart.
-        check = self._import_check(app)
-        if check is not None:
-            err = self._rollback(live, bak)
-            if err:
-                return (False, f"new code failed to load and rollback failed "
-                               f"({err}); manual recovery may be needed")
-            return (False, f"new code failed to load; rolled back: {check}")
-
-        # Record the SHA that is now actually deployed — only after the swap and
-        # smoke-check succeed — so the reported revision and the update check
-        # reflect the running tree even if a later deploy fails after the reset.
-        # Write atomically (temp + replace) so a failed write leaves the previous
-        # REVISION intact; if it fails, roll back so the recorded revision and the
-        # live tree can never disagree on the next boot.
-        if target:
-            tmp = config.REVISION_FILE.with_name(config.REVISION_FILE.name + ".tmp")
-            try:
-                tmp.write_text(target + "\n")
-                os.replace(str(tmp), str(config.REVISION_FILE))
-            except OSError as e:
-                tmp.unlink(missing_ok=True)
-                err = self._rollback(live, bak)
-                if err:
-                    return (False, f"deployed but could not record the revision "
-                                   f"({e}) and rollback failed ({err}); manual "
-                                   f"recovery may be needed")
-                return (False, f"deployed but could not record the revision "
-                               f"({e}); rolled back")
-        self._current_sha = target
-        self._revision = target[:7] if target else None
-        self._update_available = False
-
-        # Restart from outside this process. sudo -n so a missing NOPASSWD rule
-        # fails fast rather than hanging on a password prompt.
-        try:
-            # Absolute systemctl path so it matches the scoped sudoers rule
-            # exactly (see etc/99-ditto-restart).
-            subprocess.run(
-                ["sudo", "-n", "/usr/bin/systemctl", "start", "--no-block",
-                 config.RESTART_SERVICE],
-                check=True, capture_output=True, text=True, timeout=15)
-        except (subprocess.SubprocessError, OSError) as e:
-            return (False, f"deployed {self._revision or 'update'} but the "
-                           f"restart was refused — is OTA set up? "
-                           f"{self._proc_err(e)}")
-        return (True, self._revision or "updated")
-
-    @staticmethod
-    def _rollback(live: Path, bak: Path) -> Optional[str]:
-        """Restore the previous deployment (bak -> live) as a checked operation.
-        Returns None on success, or a short error if the live tree could not be
-        removed or the backup could not be restored — in which case the caller
-        must surface it rather than leaving broken code in place."""
-        try:
-            if live.exists():
-                shutil.rmtree(live)
-            if bak.exists():
-                bak.rename(live)
-        except OSError as e:
-            return str(e)[:200]
-        return None
-
-    @staticmethod
-    def _import_check(app: Path) -> Optional[str]:
-        """Import the deployed package from `app`. Returns None if it loads, or a
-        short error string if it doesn't."""
-        try:
-            r = subprocess.run([sys.executable, "-c", "import ditto.web"],
-                               cwd=str(app), capture_output=True, text=True,
-                               timeout=30)
-        except (subprocess.SubprocessError, OSError) as e:
-            return str(e)[:200]
-        if r.returncode != 0:
-            return (r.stderr.strip() or "import failed").splitlines()[-1][:200]
-        return None
-
-    def _startup_update_check(self) -> None:
-        """One remote check at startup so the button reflects reality without the
-        user asking. Off the boot path; no-ops without a checkout or network.
-        After this, checks happen only on demand (check_now)."""
-        self._check_for_update()
+        return self.updater.update()
 
     def check_now(self) -> Dict:
-        """Run a remote check on demand and report the outcome for the UI. Blocks
-        on the git fetch (seconds on this single-user box). `ok` is false with a
-        reason when the check couldn't run (no deployment, offline, mid-deploy)."""
-        err = self._check_for_update()
-        return {
-            "ok": err is None,
-            "error": err,
-            "revision": self._revision,
-            "update_available": self._update_available,
-            "remote_revision": self._remote_revision,
-        }
+        return self.updater.check_now()
 
-    def _check_for_update(self) -> Optional[str]:
-        """Fetch the remote and flag whether it has something newer than the
-        deployed checkout. Returns None when the check ran (state may have
-        changed), or a short reason when it couldn't. Emits only when the result
-        changes.
-
-        Runs the whole check under _update_lock so it never runs git on the
-        checkout concurrently with a deploy (update() holds the same lock): if a
-        deploy holds it, the check just skips this round."""
-        src = config.SRC
-        if self._current_sha is None or not (src / ".git").is_dir():
-            return "no deployment to check"
-        if not self._update_lock.acquire(blocking=False):
-            return "an update is already running"
-        try:
-            try:
-                self._git(src, "fetch", "--quiet", "origin",
-                          config.UPDATE_BRANCH)
-            except (subprocess.SubprocessError, OSError):
-                return "couldn't reach the remote"
-            ref = f"origin/{config.UPDATE_BRANCH}"
-            remote_full = self._rev_parse(src, ref)
-            if not remote_full:
-                return "couldn't read the remote branch"
-            available = remote_full != self._current_sha
-            # Contract: remote_revision is meaningful only when an update is
-            # available; keep it null otherwise.
-            remote_short = self._rev_parse(src, ref, short=True) if available else None
-            # Publish under the lock: a deploy holds the same lock, so this can't
-            # overwrite update_available against a _current_sha the deploy has
-            # since moved. Skip during teardown.
-            if self._stop.is_set():
-                return None
-            if (available != self._update_available
-                    or remote_short != self._remote_revision):
-                self._update_available = available
-                self._remote_revision = remote_short
-                self._emit()
-        finally:
-            self._update_lock.release()
-        return None
-
-    def _deployed_head(self) -> "tuple[Optional[str], Optional[str]]":
-        """(short, full) SHA of the deployed code. Prefer the SHA recorded at the
-        last successful deploy; fall back to the checkout HEAD (a fresh install
-        has app == src but no REVISION yet). (None, None) if neither is known."""
-        try:
-            full = config.REVISION_FILE.read_text().strip() or None
-        except OSError:
-            full = None
-        if not full and (config.SRC / ".git").is_dir():
-            full = self._rev_parse(config.SRC, "HEAD")
-        return (full[:7] if full else None, full)
-
-    @staticmethod
-    def _git(cwd: Path, *args: str) -> None:
-        subprocess.run(["git", "-C", str(cwd), *args], check=True,
-                       capture_output=True, text=True, timeout=60)
-
-    @staticmethod
-    def _rev_parse(src: Path, ref: str, short: bool = False) -> Optional[str]:
-        args = ["rev-parse"] + (["--short"] if short else []) + [ref]
-        try:
-            r = subprocess.run(["git", "-C", str(src), *args], check=True,
-                               capture_output=True, text=True, timeout=10)
-            return r.stdout.strip() or None
-        except (subprocess.SubprocessError, OSError):
-            return None
-
-    @staticmethod
-    def _proc_err(e: Exception) -> str:
-        out = getattr(e, "stderr", "") or ""
-        return (out.strip() or str(e))[:200]
+    def _startup_update_check(self) -> None:
+        self.updater.startup_check()
 
     def shutdown(self, timeout: float = 30.0) -> None:
         """SIGTERM path — a service stop or restart, not a session ending.
@@ -996,7 +761,7 @@ class Service:
             # Don't start a job while an update is admitted: a redeploy/restart
             # must not overlap pedal work. Anything queued waits here and is
             # drained on the pending restart (or resumes if the update bails).
-            if self._updating.is_set():
+            if self.updater.admitted.is_set():
                 self._stop.wait(0.1)
                 continue
             if job is None:
@@ -1026,7 +791,7 @@ class Service:
             # redeploy alongside a write that is about to start. Claiming first
             # means whichever runs second sees what the first did.
             self._in_flight.set()
-            if self._updating.is_set():
+            if self.updater.admitted.is_set():
                 self._in_flight.clear()
                 continue
             try:
