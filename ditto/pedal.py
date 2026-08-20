@@ -187,6 +187,23 @@ def _atomic_copy(src: Path, dest: Path, prefix: str) -> None:
     `prefix` names the temp file. Interrupted writes are collected by name:
     `~bt` on the pedal by clean_temp_files, `~loop` locally when the staging
     directory is purged at startup.
+
+    What this does *not* make durable, and why that is fine:
+
+    - The slot directory itself, when mkdir has just created one. The entry for
+      it lives in the volume root, which is not fsynced here.
+    - Anything at all, for the loop direction.
+
+    Both are closed by the caller rather than here. `_do_write` runs `os.sync()`
+    between this returning and `db.mark_synced()`, so the database never records
+    a track as written until every filesystem is flushed — directory entry,
+    rename and mode together. The loop direction copies into the local staging
+    directory, which is emptied at startup by design, so durability there would
+    be work for something deliberately transient.
+
+    Syncing the volume root here instead would add a round trip to a ~1 MB/s USB
+    link on every track written, to guarantee something that is already
+    guaranteed a line later.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent),

@@ -1,6 +1,10 @@
 """Loop-file helpers in pedal.py, exercised against a temp dir standing in for
 the mounted pedal. No real device or ffmpeg needed."""
 
+import pathlib
+import queue
+import tempfile
+import threading
 import pytest
 
 from ditto import config, pedal
@@ -272,3 +276,46 @@ def test_the_mode_is_set_before_the_sync_that_makes_it_durable(mount, tmp_path,
     assert order[:2] == ["chmod", "fsync"], (
         f"the mode was not covered by the sync: {order}")
     assert pedal.track_path(30).stat().st_mode & 0o777 == 0o644
+
+
+def test_a_write_is_flushed_before_the_database_records_it(monkeypatch):
+    """The durability boundary _atomic_copy documents.
+
+    It does not sync the volume root, so a slot directory it has just created
+    is not durable on its own. _do_write closes that by running os.sync()
+    before mark_synced, which is what stops the database claiming a track is on
+    the pedal when a power cut could still lose it.
+    """
+    from ditto import core
+
+    order = []
+    monkeypatch.setattr(core.pedal, "mounted", lambda: True)
+    monkeypatch.setattr(core.pedal, "write_track",
+                        lambda slot, wav: order.append("write"))
+    monkeypatch.setattr(core.pedal, "capacity", lambda: (1 << 30, 1 << 30))
+    monkeypatch.setattr(core.pedal, "track_path",
+                        lambda slot: pathlib.Path("/nonexistent/BT.WAV"))
+    monkeypatch.setattr(core.os, "sync", lambda: order.append("sync"))
+    monkeypatch.setattr(core.db, "mark_synced",
+                        lambda slot, h: order.append("mark_synced"))
+
+    svc = core.Service.__new__(core.Service)
+    svc.fmt = dict(config.DEFAULT_FORMAT)
+    svc.busy = svc.busy_kind = svc.progress = None
+    svc._subs, svc._subs_lock = [], threading.Lock()
+    svc._work = queue.Queue()
+    # _emit builds a snapshot; give it only what that needs.
+    monkeypatch.setattr(core.Service, "_emit", lambda self: None)
+
+    staged = pathlib.Path(tempfile.mkdtemp()) / "x.wav"
+    staged.write_bytes(b"\0" * 128)
+    monkeypatch.setattr(core.db, "get_slot",
+                        lambda s: {"slot": s, "source_hash": "a" * 20,
+                                   "state": "staged", "display_name": "T",
+                                   "duration": 1.0, "synced_hash": None})
+    monkeypatch.setattr(core.media, "staged_path", lambda h, fmt: staged)
+
+    svc._do_write(1)
+
+    assert order == ["write", "sync", "mark_synced"], (
+        f"the write was recorded before it was flushed: {order}")
