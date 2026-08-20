@@ -3,7 +3,6 @@ the mounted pedal. No real device or ffmpeg needed."""
 
 import pathlib
 import queue
-import tempfile
 import threading
 import pytest
 
@@ -278,7 +277,8 @@ def test_the_mode_is_set_before_the_sync_that_makes_it_durable(mount, tmp_path,
     assert pedal.track_path(30).stat().st_mode & 0o777 == 0o644
 
 
-def test_a_write_is_flushed_before_the_database_records_it(monkeypatch):
+def test_a_write_is_flushed_before_the_database_records_it(tmp_path,
+                                                          monkeypatch):
     """The durability boundary _atomic_copy documents.
 
     It does not sync the volume root, so a slot directory it has just created
@@ -307,7 +307,7 @@ def test_a_write_is_flushed_before_the_database_records_it(monkeypatch):
     # _emit builds a snapshot; give it only what that needs.
     monkeypatch.setattr(core.Service, "_emit", lambda self: None)
 
-    staged = pathlib.Path(tempfile.mkdtemp()) / "x.wav"
+    staged = tmp_path / "x.wav"
     staged.write_bytes(b"\0" * 128)
     monkeypatch.setattr(core.db, "get_slot",
                         lambda s: {"slot": s, "source_hash": "a" * 20,
