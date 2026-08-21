@@ -267,7 +267,7 @@ function render(s){
         ? `Extra files continue into ${nxt.join(", ")}… Choose the slot again to deselect.`
         : `Slot ${pad} is the last slot. Choose the slot again to deselect.`;
   } else {
-    $("#drophead").textContent = "Drop audio here, or click to choose";
+    $("#drophead").textContent = "Drop audio here, or choose a file";
     $("#dropnote").textContent =
       "Drop straight onto a slot to target it, or use a leading number — “07 Blue Bossa.mp3”";
   }
