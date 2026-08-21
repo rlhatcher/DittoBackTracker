@@ -352,13 +352,29 @@
 
   /* -- the slot map ------------------------------------------------------- */
 
-  #grid { display: grid; grid-template-columns: repeat(20, 1fr); gap: 3px; margin-top: var(--space-1); }
+  /* Ten wide at every width. Twenty columns of square cells only worked on a
+     wide screen — at 900px they measured 16.8px, under the 24px WCAG 2.2 target
+     minimum for something you drag onto — and the count had to be repeated in
+     app.js for arrow-key movement, so a responsive column count would have made
+     that constant a lie at some breakpoint. Ten decades of a fixed 34px row is
+     legible on a phone and on a laptop, and Down from slot 7 lands on 17. */
+  #grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: var(--space-1); margin-top: var(--space-1); }
   .cell {
-    position: relative; aspect-ratio: 1; background: transparent;
-    padding: 0; font: inherit; -webkit-appearance: none; appearance: none;
+    position: relative; height: 34px; background: transparent;
+    display: flex; align-items: flex-end;
+    padding: 3px 5px; font: inherit; -webkit-appearance: none; appearance: none;
     border: var(--rule-minor) solid var(--cell-border);
     border-radius: var(--radius-sm); cursor: pointer; transition: transform .1s;
   }
+  /* Printed in every cell, bottom-left. pointer-events:none is load-bearing,
+     not tidiness: without it the drag events fire on the number as well as the
+     cell and the drop outline flickers on every crossing between the two. */
+  .cell .n {
+    font: 10px var(--font-mono); line-height: 1; color: var(--text-faint);
+    pointer-events: none;
+  }
+  .cell.synced .n, .cell.converting .n, .cell.error .n { color: var(--on-state); }
+  .cell.staged .n { color: var(--on-queued); }
   .cell.synced { background: var(--state-synced); border-color: var(--state-synced); }
   .cell.converting { background: var(--state-converting); border-color: var(--state-converting); }
   .cell.staged { background: var(--state-queued); border-color: var(--state-queued); }
@@ -382,6 +398,28 @@
   .cell.over { outline: 2px solid var(--color-accent); outline-offset: 2px; transform: scale(1.35); }
   .cell.dragging { opacity: 0.35; }
   .cell[draggable=true] { cursor: grab; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: var(--space-4);
+    margin-top: var(--space-3);
+    font-size: var(--text-meta); color: var(--text-muted);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i {
+    width: 9px; height: 9px; flex: none; font-style: normal;
+    border: var(--rule-minor) solid var(--cell-border);
+  }
+  .legend .k-synced { background: var(--state-synced); border-color: var(--state-synced); }
+  .legend .k-converting { background: var(--state-converting); border-color: var(--state-converting); }
+  .legend .k-queued { background: var(--state-queued); border-color: var(--state-queued); }
+  /* The loop swatch is the marker itself, not a filled square — it is an
+     overlay on a cell in either state, so showing it as a fill would say
+     something the map does not. */
+  .legend .k-loop { border-color: var(--cell-border); position: relative; }
+  .legend .k-loop::after {
+    content: ""; position: absolute; top: 1px; right: 1px;
+    width: 4px; height: 4px; background: var(--state-loop);
+  }
 
   /* -- on the pedal ------------------------------------------------------- */
 
@@ -513,13 +551,22 @@
      library track means picking a slot and then acting on the row, which in one
      column is a scroll to the top and back.
 
-     1280 is inherited from the 20-column map and is still load-bearing while
-     the map is 20 columns: halving the width halves the cell, and at a 900px
-     breakpoint they came out 16.8px against 25.9px — under the 24px WCAG 2.2
-     target minimum, for a control you drag onto. The next commit takes the map
-     to 10 columns of 34px cells, which is where this number gets re-derived
-     downwards rather than inherited. */
-  @media (min-width: 1280px) {
+     900, down from 1280, and the reason the number moved is that the thing it
+     was protecting no longer needs protecting. The old map was 20 columns of
+     square cells, so halving the page halved the cell: at 900px they came out
+     16.8px, under the 24px WCAG 2.2 target minimum for something you drag onto,
+     and 1280 was the lowest width that kept them legal. Ten columns of a fixed
+     34px row do not shrink that way — the cell is 37x34 at 900px and still
+     30x34 at 375px in one column, so the map is no longer the binding
+     constraint at any width this page is used at.
+
+     What binds now is the list row. "On the pedal" spends about 195px on the
+     slot number, duration, status and clear button before the track name gets
+     anything, plus 40px of section padding, so a 450px pane leaves the name
+     around 215px — roughly thirty characters, which is a song title. Below
+     that the names ellipsise while the columns are still half empty, and one
+     column reads better. */
+  @media (min-width: 900px) {
 
     /* Header and bar are grid rows, not position:fixed. Same picture, minus the
        padding-bottom that guesses at the bar's height and the safe-area maths
