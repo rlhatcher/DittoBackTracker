@@ -49,7 +49,19 @@ MAX_NAME_LEN = 200
 
 # Servable front-end assets, by exact name. No charset here — Werkzeug appends
 # one for text/* and would otherwise emit it twice.
-ASSETS = {"app.js": "text/javascript", "app.css": "text/css"}
+#
+# Archivo is served from here rather than fetched from Google Fonts: the device
+# is usually the only thing on its network, and a render-blocking font request
+# to a host it cannot reach stalls first paint until DNS gives up. One variable
+# woff2 covers the whole 400-800 weight axis, so there is no second file. The
+# licence sits beside it and is served too, because OFL 1.1 asks that it travel
+# with the font.
+ASSETS = {
+    "app.js": "text/javascript",
+    "app.css": "text/css",
+    "archivo-latin.woff2": "font/woff2",
+    "archivo-OFL.txt": "text/plain",
+}
 
 # Each open stream holds a server thread for its whole life, and there are only
 # a handful. Retiring a stream periodically lets EventSource reconnect (it does

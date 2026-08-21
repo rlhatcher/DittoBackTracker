@@ -63,7 +63,7 @@ function drawTrackList(list, s, byslot, loops){
     const slotNums = [...new Set([...s.slots.map(x=>x.slot), ...loops])]
       .sort((a,b)=>a-b);
     if (!slotNums.length){
-      list.innerHTML = '<div style="color:var(--tx2);font-size:14px">Nothing loaded yet.</div>';
+      list.innerHTML = '<div class="empty">Nothing loaded yet.</div>';
     }
     slotNums.forEach(n => {
       const r = byslot[n], pad = pad2(n);
@@ -120,9 +120,12 @@ function render(s){
   state = s;
 
   const pd = $("#pedal");
-  const map = {mounted:["var(--ok)","connected"],absent:["var(--tx2)","no pedal"],error:["var(--err)","error"]};
-  const [c,t] = map[s.pedal] || map.absent;
-  pd.innerHTML = `<span class="dot" style="background:${c}"></span>${t}`;
+  // A class, not a colour: the stylesheet owns the palette, and naming one here
+  // would be the one place a token could drift without the CSS noticing.
+  const map = {mounted:["ok","connected"],absent:["off","no pedal"],error:["off","error"]};
+  const [cls,t] = map[s.pedal] || map.absent;
+  pd.className = cls;
+  pd.innerHTML = `<span class="dot"></span>${t}`;
 
   if (s.version){
     setText($("#ver"), "v" + s.version + (s.revision ? " · " + s.revision : ""));
