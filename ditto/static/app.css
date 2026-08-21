@@ -168,3 +168,54 @@ input.libedit{flex:1;min-width:0;background:var(--bg);color:var(--tx);
 .libbtn.playing{border-color:var(--accent);color:var(--accent)}
 #libfoot{margin-top:10px}
 .empty{color:var(--tx2);font-size:14px}
+
+/* --- Desktop ------------------------------------------------------------ */
+
+/* Everything above is the narrow layout, and stays the layout below 1280px.
+   The device is managed from a laptop, so at that width the single column
+   becomes two: the pedal on the left, the library beside it. Assigning a
+   library track means picking a slot and then acting on the row, which in one
+   column is a scroll to the top and back.
+
+   1280, not something smaller, because the slot grid is 20 fixed columns of
+   square cells: halving the width halves the cell. At a 900px breakpoint they
+   came out 16.8px against 25.9px today — under the 24px WCAG 2.2 target
+   minimum, for a control you drag onto. The pair of widths here keeps a cell
+   at or above what one column gives it.
+
+   Placement only — the cards are the same elements in the same order, put into
+   grid areas. Nothing here restyles a component, so the narrow layout cannot
+   drift away from this one. */
+@media (min-width:1280px){
+  .wrap{max-width:1400px;display:grid;align-items:start;column-gap:16px;
+    grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+    grid-template-areas:
+      "head  head"
+      "cap   lib"
+      "slots lib"
+      "drop  lib"
+      "list  lib"
+      "foot  foot";}
+  .wrap > header{grid-area:head}
+  #capcard{grid-area:cap}
+  #slotcard{grid-area:slots}
+  #drop{grid-area:drop}
+  #listcard{grid-area:list}
+  #libcard{grid-area:lib}
+  .wrap > .foot{grid-area:foot}
+
+  /* Both lists grow without limit — 99 slots, and a library as long as the
+     card is. Left unbounded, the taller column sets the page height and
+     scrolling one scrolls the other out of view, which is the thing two
+     columns are meant to fix. Cap them against the viewport and let each
+     scroll on its own.
+
+     Not position:sticky on the left column: it can exceed the viewport by
+     itself, and sticky then does nothing at all, silently. */
+  #librows{max-height:calc(100vh - 320px);overflow-y:auto}
+  #list{max-height:calc(100vh - 420px);overflow-y:auto}
+
+  /* The library is the column that stays put, so its own header and tools
+     should not scroll away with the rows. */
+  #libcard{position:sticky;top:16px}
+}
