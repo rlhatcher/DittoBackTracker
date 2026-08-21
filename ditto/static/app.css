@@ -223,40 +223,46 @@
 
   /* -- chrome ------------------------------------------------------------- */
 
+  /* Nothing on this page is a box. Every division is a 2px rule, so the header
+     is a rule with content above it rather than a card floating on a ground. */
   header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: var(--space-3) var(--space-4);
-    border: var(--rule-minor) solid var(--rule);
-    margin-bottom: var(--space-3);
+    display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; row-gap: var(--space-1);
+    padding: var(--space-3) 20px;
+    border-bottom: var(--rule-major) solid var(--rule);
   }
-  .meta {
-    font-size: var(--text-label); color: var(--text-muted);
-    display: flex; gap: var(--space-4); align-items: center;
-  }
+  /* Narrow: the brand takes the first line on its own and the three meta items
+     sit right-aligned under it. Left to wrap on their own they break inside the
+     phrase — "no / pedal", "Check for / update" — which reads as damage. */
+  header h1 { flex: 1 0 100%; }
+  #pedal, #ver, #update { white-space: nowrap; }
+  /* Everything after the brand is pushed right as one group. */
+  #pedal { margin-left: auto; font-size: var(--text-label); color: var(--text-muted); }
   /* A square, not a dot: nothing on this page is round. */
-  .dot { width: 8px; height: 8px; display: inline-block; margin-right: 5px; }
+  .dot { width: 8px; height: 8px; display: inline-block; margin-right: 7px; }
   /* Three states, not two. The unknown one is the first frame's worth of "—",
      and painting that in the alarm colour would cry wolf on every page load. */
   #pedal .dot { background: var(--text-faint); }
   #pedal.ok .dot { background: var(--color-text); }
   #pedal.off { color: var(--text-danger); }
   #pedal.off .dot { background: var(--text-danger); }
-
-  .card {
-    border: var(--rule-minor) solid var(--rule);
-    padding: var(--space-3) var(--space-4);
-    margin-bottom: var(--space-3);
+  #ver {
+    font: var(--text-meta) var(--font-mono); letter-spacing: 0.06em;
+    color: var(--text-faint);
   }
+
+  .pane > section {
+    padding: 18px 20px;
+    border-bottom: var(--rule-major) solid var(--rule);
+  }
+  .pane > section:last-child { border-bottom: 0; }
   .row {
     display: flex; justify-content: space-between; align-items: baseline;
     font-size: var(--text-label); color: var(--text-muted);
   }
-  .foot {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-top: var(--space-3); padding: 0 2px;
-    font-size: var(--text-small); color: var(--text-muted);
-  }
-  #ver { font: var(--text-small) var(--font-mono); letter-spacing: 0.06em; }
+  /* The section head and the number beside it sit on one line, so the h2's
+     bottom margin would push the pair off the baseline it shares. */
+  .row > h2 { margin: 0; }
   .listhead {
     display: flex; align-items: center; justify-content: space-between;
     margin-bottom: var(--space-2);
@@ -431,10 +437,16 @@
 
   #drop {
     display: block; border: 2px dashed var(--rule);
-    background: var(--color-surface); padding: 26px var(--space-4);
+    background: var(--color-surface); padding: 22px 18px;
     text-align: center; color: var(--text-muted); font-size: var(--text-control);
     cursor: pointer; transition: border-color .15s, background .15s, color .15s;
   }
+  #drophead {
+    display: block;
+    font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+    font-size: var(--text-body); color: var(--color-text);
+  }
+  #dropnote { display: block; margin-top: 6px; font-size: var(--text-small); }
   #drop.over { border-color: var(--color-accent); background: var(--hover-loud); }
   /* Dropping a slot here removes it, so the zone stops being dashed: solid is
      the difference between "put something here" and "this will delete it". */
@@ -443,11 +455,14 @@
     background: color-mix(in srgb, var(--text-danger) 14%, transparent);
     border-style: solid;
   }
-  /* The input itself is off screen, so its focus ring has to land on the label. */
-  .wrap:has(#file:focus-visible) #drop { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  /* The input itself is off screen, so its focus ring has to land on the label.
+     Anchored on body, not .wrap: .wrap is gone, and nothing would have failed
+     loudly if these had been left pointing at it — the two file inputs would
+     simply have had no visible focus at all. */
+  body:has(#file:focus-visible) #drop { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   /* Same for the Library's own file input, or a keyboard user reaching "Add
      files" gets no visible focus at all. */
-  .wrap:has(#libfile:focus-visible) #libadd { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  body:has(#libfile:focus-visible) #libadd { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
   /* -- action bar --------------------------------------------------------- */
 
@@ -455,16 +470,28 @@
     position: fixed; left: 0; right: 0; bottom: 0;
     background: var(--color-surface);
     border-top: var(--rule-major) solid var(--rule);
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-3) 20px;
     padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
     display: flex; gap: var(--space-3); align-items: center; justify-content: space-between;
   }
-  .prog { flex: 1; height: 6px; background: var(--capacity-track); overflow: hidden; }
+  /* Progress is the bar's own top rule filling in, laid over the 2px divider
+     rather than beside the message. It costs no layout, so a conversion can no
+     longer squeeze #msg to nothing, and the most Modernist thing on the page is
+     a rule that means something. */
+  .prog {
+    position: absolute; top: calc(var(--rule-major) * -1); left: 0; right: 0;
+    height: var(--rule-major); background: transparent; overflow: hidden;
+  }
   .progfill { height: 100%; background: var(--color-accent); width: 0; transition: width .2s; }
   .msg {
     font-size: var(--text-label); color: var(--text-muted); flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  /* The design's full button label is 28 characters and only fits a laptop. On a
+     phone it squeezed #msg down to "Plug in ..." — and #msg is the only thing on
+     this device that ever says "don't unplug", so it is not the part that gives
+     way. The button says "Done" there, which is what it said before. */
+  .wide-only { display: none; }
   .err { color: var(--text-danger); }
   /* Mid-write and shutdown warnings. With no panel LED or display, this line is
      the only thing telling the user not to pull the plug, so it carries weight
@@ -475,57 +502,65 @@
 
 @layer layout {
 
-  .wrap { max-width: 640px; margin: 0 auto; padding: var(--space-4); }
+  /* Narrow first. One column, the page scrolls, the action bar is pinned — the
+     layout a phone gets, and the fallback the desktop frame below reverts to. */
+  body { padding-bottom: 84px; }
+  .pane-l { border-bottom: var(--rule-major) solid var(--rule); }
+  .pane > section:last-child { border-bottom: 0; }
 
-  /* Everything above is the narrow layout, and stays the layout below 1280px.
-     The device is managed from a laptop, so at that width the single column
+  /* The device is managed from a laptop, so at this width the single column
      becomes two: the pedal on the left, the library beside it. Assigning a
      library track means picking a slot and then acting on the row, which in one
      column is a scroll to the top and back.
 
-     1280, not something smaller, because the slot grid is 20 fixed columns of
-     square cells: halving the width halves the cell. At a 900px breakpoint they
-     came out 16.8px against 25.9px today — under the 24px WCAG 2.2 target
-     minimum, for a control you drag onto. The pair of widths here keeps a cell
-     at or above what one column gives it.
-
-     Placement only — the cards are the same elements in the same order, put into
-     grid areas. Nothing here restyles a component, so the narrow layout cannot
-     drift away from this one. */
+     1280 is inherited from the 20-column map and is still load-bearing while
+     the map is 20 columns: halving the width halves the cell, and at a 900px
+     breakpoint they came out 16.8px against 25.9px — under the 24px WCAG 2.2
+     target minimum, for a control you drag onto. The next commit takes the map
+     to 10 columns of 34px cells, which is where this number gets re-derived
+     downwards rather than inherited. */
   @media (min-width: 1280px) {
-    .wrap {
-      max-width: 1400px; display: grid; align-items: start;
-      column-gap: var(--space-4);
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      grid-template-areas:
-        "head  head"
-        "cap   lib"
-        "slots lib"
-        "drop  lib"
-        "list  lib"
-        "foot  foot";
+
+    /* Header and bar are grid rows, not position:fixed. Same picture, minus the
+       padding-bottom that guesses at the bar's height and the safe-area maths
+       that guesses at the phone. */
+    body {
+      height: 100dvh; overflow: hidden; padding-bottom: 0;
+      display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
     }
-    .wrap > header { grid-area: head; }
-    #capcard { grid-area: cap; }
-    #slotcard { grid-area: slots; }
-    #drop { grid-area: drop; }
-    #listcard { grid-area: list; }
-    #libcard { grid-area: lib; }
-    .wrap > .foot { grid-area: foot; }
+    /* Relative, not static: the progress rule is absolutely positioned against
+       the bar, and a static bar would hand it the viewport instead. */
+    .bar { position: relative; }
+    .wide-only { display: inline; }
+    header h1 { flex: 0 0 auto; }
 
-    /* Both lists grow without limit — 99 slots, and a library as long as the
-       card is. Left unbounded, the taller column sets the page height and
-       scrolling one scrolls the other out of view, which is the thing two
-       columns are meant to fix. Cap them against the viewport and let each
-       scroll on its own.
+    .cols {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      min-height: 0; overflow: hidden;
+    }
+    .pane-l { border-right: var(--rule-major) solid var(--rule); border-bottom: 0; }
 
-       Not position:sticky on the left column: it can exceed the viewport by
-       itself, and sticky then does nothing at all, silently. */
-    #librows { max-height: calc(100vh - 320px); overflow-y: auto; }
-    #list { max-height: calc(100vh - 420px); overflow-y: auto; }
+    /* Each pane scrolls on its own. The design scrolls the whole page, but the
+       left column is the taller one — capacity, a 99-cell map, the drop zone
+       and up to 99 rows — so one shared scrollbar means reaching slot 80 takes
+       the library off screen, which is the thing two columns exist to fix. The
+       design's own max-height on the tree concedes the point.
 
-    /* The library is the column that stays put, so its own header and tools
-       should not scroll away with the rows. */
-    #libcard { position: sticky; top: var(--space-4); }
+       min-height:0 on every grid ancestor is not optional: without it a grid
+       item refuses to shrink below its content, the panes silently never
+       scroll, and the action bar is pushed off the bottom of the screen. */
+    .pane { min-height: 0; }
+    .pane-l { overflow-y: auto; }
+
+    /* The right pane is the one that stays put: its own head and search should
+       not scroll away with the rows, so the library is a grid and only the rows
+       are the part that moves. This is the design's max-height:520px expressed
+       as a fraction of the pane instead of a guess at the viewport. */
+    .pane-r { overflow: hidden; display: grid; }
+    #libcard {
+      min-height: 0; display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+    }
+    #librows { min-height: 0; overflow-y: auto; }
   }
 }
