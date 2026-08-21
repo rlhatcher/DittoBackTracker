@@ -50,6 +50,12 @@ function libraryDomDirty(){ lastLibKey = null; }
 let rovingSlot = null;
 
 const pad2 = n => String(n).padStart(2, "0");
+// One vocabulary for slot state. The wire words are not the shown words, and
+// the map cell and the list row describe the same slot — a cell announcing
+// "synced" while the row under it reads "on pedal" is one state with two names.
+const STATE_LABEL = {converting: "converting", staged: "staged",
+                     synced: "on pedal", error: "error"};
+const stateLabel = st => STATE_LABEL[st] || st;
 
 function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+pad2(s%60); }
 
@@ -70,7 +76,7 @@ function drawTrackList(list, s, byslot, loops){
       const el = document.createElement("div");
       el.className = "track";
       if (r){
-        const label = {converting:"converting",staged:"staged",synced:"on pedal",error:"error"}[r.state]||r.state;
+        const label = stateLabel(r.state);
         el.innerHTML = `
           <span class="num">${pad}</span>
           <span class="nm">${escapeHtml(r.display_name)}</span>
@@ -242,7 +248,7 @@ function render(s){
       : hasLoop ? `Slot ${p}: recorded loop only` : `Slot ${p} (empty)`;
     // title is a tooltip, not a name — spell the name out for a screen reader.
     d.setAttribute("aria-label", row
-      ? `Slot ${p}, ${row.display_name}, ${row.state}${loopNote}`
+      ? `Slot ${p}, ${row.display_name}, ${stateLabel(row.state)}${loopNote}`
       : hasLoop ? `Slot ${p}, recorded loop only` : `Slot ${p}, empty`);
     // Exactly one cell is tabbable: wherever the user last arrowed to, else
     // the selected slot, else the first.

@@ -109,6 +109,12 @@
     --capacity-danger: var(--color-accent);
 
     --focus-ring: var(--color-accent);
+    /* Accent at a strength that can carry a word — either as the ink or as the
+       fill behind it. --color-accent is 3.76:1 on the light ground, which is
+       the right bar for a boundary or a bar and the wrong one for a label.
+       WCAG's large-text allowance is 18pt, or 14pt bold — that is 18.66px, not
+       14px bold, and every accent label on this page is 12-14px. */
+    --accent-legible: var(--color-accent-700);
     --hover-quiet: color-mix(in srgb, var(--color-text) 7%, transparent);
     --hover-loud: color-mix(in srgb, var(--color-accent) 10%, transparent);
 
@@ -151,6 +157,8 @@
       /* #ec3013 is ~3:1 on the light ground and barely 2:1 on this one. The
          500 is the same hue with the lightness the dark ground needs. */
       --color-accent: #ff563c;
+      /* 5.6:1 on this ground already, so the 700 would only be dimmer. */
+      --accent-legible: var(--color-accent);
       --color-divider: color-mix(in srgb, #f3f2f2 35%, transparent);
 
       --color-neutral-100: #232120;
@@ -275,7 +283,7 @@
   /* The filled primary. Accent, not ink: this is the one control on the page
      that ends the session. */
   button.act {
-    background: var(--color-accent); color: var(--color-bg);
+    background: var(--accent-legible); color: var(--color-bg);
     border: 0; border-radius: var(--radius-md);
     padding: 10px var(--space-4);
     font-family: var(--font-heading); font-weight: var(--font-heading-weight);
@@ -285,14 +293,14 @@
 
   /* Ghost. */
   .link {
-    background: none; border: 0; color: var(--color-accent); cursor: pointer;
+    background: none; border: 0; color: var(--accent-legible); cursor: pointer;
     font-size: var(--text-small); padding: var(--space-1) 6px;
   }
   .link:hover { background: var(--hover-loud); }
   .link:disabled { color: var(--text-muted); cursor: default; background: none; }
   /* A waiting update is a call to action, so it reads as a filled block. */
   .link.avail {
-    background: var(--color-accent); color: var(--color-bg);
+    background: var(--accent-legible); color: var(--color-bg);
     font-weight: var(--font-heading-weight); padding: 5px 10px;
   }
   .link.avail:hover { opacity: 0.9; }
@@ -313,7 +321,7 @@
   }
   .libbtn:disabled { opacity: 0.45; cursor: default; background: none; }
   .libbtn.danger:hover, .loopbtn.danger:hover { color: var(--text-danger); }
-  .libbtn.playing { border-color: var(--color-accent); color: var(--color-accent); }
+  .libbtn.playing { border-color: var(--color-accent); color: var(--accent-legible); }
 
   .x {
     border: 0; background: none; color: var(--text-faint); cursor: pointer;
