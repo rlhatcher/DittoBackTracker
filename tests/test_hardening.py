@@ -17,6 +17,7 @@ import time
 
 import pytest
 
+import conftest
 from ditto import config, core, db
 
 
@@ -345,3 +346,17 @@ def test_shutdown_is_idempotent(service, monkeypatch):
     monkeypatch.setattr(core.pedal, "unmount", lambda: None)
     service.shutdown(timeout=5.0)
     service.shutdown(timeout=5.0)      # must not raise or hang
+
+
+def test_the_suite_cannot_power_off_the_machine():
+    """_halt ends in `sudo -n /sbin/poweroff`, and install.sh grants the ditto
+    user a NOPASSWD rule for exactly that. Any test that reaches _halt would
+    therefore shut a provisioned device down mid-run — a laptop only hides it
+    because sudo fails there. conftest replaces the call; this is what says so
+    out loud, so the seam cannot be removed silently."""
+    before = len(conftest.sudo_attempts)
+
+    result = core.subprocess.run(["sudo", "-n", "/sbin/poweroff"], check=False)
+
+    assert result.returncode == 0, "the guard should stand in for the real call"
+    assert conftest.sudo_attempts[before:] == [["sudo", "-n", "/sbin/poweroff"]]

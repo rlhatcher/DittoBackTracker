@@ -170,6 +170,10 @@ def test_end_session_queues_exactly_one_marker(service, monkeypatch):
     interval forces the interpreter to interleave, so an unguarded
     check-then-set reliably produces more than one marker.
     """
+    # The markers this queues are real, and the worker acts on them: without
+    # this the run ends in _halt, which sleeps 1.5 s and reaches for poweroff.
+    # Counting markers is the whole subject here, so cut the halt off.
+    monkeypatch.setattr(core.Service, "_halt", lambda self: None)
     monkeypatch.setattr(service, "_emit", lambda: None)
     markers = []
     real_put = service._work.put
