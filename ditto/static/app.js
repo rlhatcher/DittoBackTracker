@@ -262,12 +262,12 @@ function render(s){
     const nxt = [selected+1, selected+2].filter(n => n <= total)
       .map(n => pad2(n));
     $("#dropnote").textContent = occ
-      ? `Slot ${pad} holds “${occ.display_name}” — tap another slot to move it there, drop a file to replace it, or tap ${pad} again to deselect.`
+      ? `Slot ${pad} holds “${occ.display_name}” — select another slot to move it there, drop a file to replace it, or choose ${pad} again to deselect.`
       : nxt.length
-        ? `Extra files continue into ${nxt.join(", ")}… Tap the slot again to deselect.`
-        : `Slot ${pad} is the last slot. Tap the slot again to deselect.`;
+        ? `Extra files continue into ${nxt.join(", ")}… Choose the slot again to deselect.`
+        : `Slot ${pad} is the last slot. Choose the slot again to deselect.`;
   } else {
-    $("#drophead").textContent = "Drop audio here, or tap to choose";
+    $("#drophead").textContent = "Drop audio here, or click to choose";
     $("#dropnote").textContent =
       "Drop straight onto a slot to target it, or use a leading number — “07 Blue Bossa.mp3”";
   }
