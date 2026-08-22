@@ -49,15 +49,153 @@ function libraryDomDirty(){ lastLibKey = null; }
    null means "follow the selection, else the first cell". */
 let rovingSlot = null;
 
+/* Which slot the pointer (or keyboard focus) is over, shared by the map and the
+   list so each can highlight the other's counterpart.
+
+   This must never reach render() or either dirty key, and that is the whole
+   design of what follows. Sweeping the mouse across the map changes it dozens
+   of times a second; if that redrew, a 99-row list would be rebuilt at
+   pointer-move rate and focus would be destroyed on the way — the exact failure
+   lastListKey exists to prevent, arriving through a different door. Hover is
+   therefore painted by hand, by paintLinks(), and never by a redraw. */
+let hoveredSlot = null;
+
+/* The only thing that writes .sel and .linked, on either surface.
+
+   Selection and hover are the two pieces of state both the map and the list
+   show, so they are painted rather than rendered: this touches at most four
+   nodes and is safe to call on every pointer move. render() calls it last,
+   because a rebuild drops the classes with the elements that carried them. */
+function paintLinks(){
+  const g = $("#grid"), list = $("#list");
+  g.querySelectorAll(".sel, .linked").forEach(e => e.classList.remove("sel", "linked"));
+  list.querySelectorAll(".sel, .linked").forEach(e => e.classList.remove("sel", "linked"));
+  // Selection outranks hover, so a slot that is both gets only .sel.
+  if (hoveredSlot !== null && hoveredSlot !== selected) mark(hoveredSlot, "linked");
+  if (selected !== null) mark(selected, "sel");
+
+  function mark(n, cls){
+    g.querySelector(`.cell[data-slot="${n}"]`)?.classList.add(cls);
+    list.querySelector(`.track[data-slot="${n}"]`)?.classList.add(cls);
+  }
+}
+
+/* aria-pressed is owned here too, for the same reason: the list only rebuilds
+   when its own contents change, and selection is deliberately not part of that
+   key — so a row's button would keep announcing a selection it no longer has. */
+function paintPressed(){
+  document.querySelectorAll("#grid .cell, #list .num").forEach(e => {
+    e.setAttribute("aria-pressed", +e.closest("[data-slot]").dataset.slot === selected
+                                   ? "true" : "false");
+  });
+}
+
+/* What the Slots header reads out. Written through setText so it does not churn
+   the DOM when the pointer moves within one cell. */
+function updateSlotRead(){
+  const el = $("#slotread");
+  if (hoveredSlot === null){
+    setText(el, "map and list are linked");
+    el.className = "";
+    return;
+  }
+  const row = state && state.slots.find(x => x.slot === hoveredSlot);
+  const loop = state && (state.loops || []).includes(hoveredSlot);
+  setText(el, `Slot ${pad2(hoveredSlot)} — ` +
+    (row ? row.display_name : loop ? "recorded loop" : "empty"));
+  el.className = "on";
+}
+
+function setHovered(n){
+  if (n === hoveredSlot) return;   // pointer moving within one cell
+  hoveredSlot = n;
+  paintLinks();
+  updateSlotRead();
+}
+
+/* Selecting a slot, from either surface. With an occupied slot already selected,
+   choosing a different one moves or swaps into it — the click equivalent of the
+   drag, and the reason this is not simply a toggle. */
+function selectSlot(n){
+  if (selected !== null && selected !== n &&
+      state.slots.some(x => x.slot === selected)){
+    const src = selected;
+    selected = null;
+    moveTo(src, n);
+    render(state);
+    return;
+  }
+  selected = selected === n ? null : n;
+  render(state);
+}
+
+/* Drag behaviour for anything that stands for a slot. A map cell and a list row
+   are the same thing to a drag, so both get this and all four directions —
+   cell to cell, cell to row, row to cell, row to row — fall out of one
+   implementation instead of two that can disagree. */
+function attachSlotDnD(el, n){
+  el.addEventListener("dragstart", e => {
+    dragSrc = n;
+    e.dataTransfer.setData(SLOT_MIME, String(n));
+    e.dataTransfer.effectAllowed = "move";
+    el.classList.add("dragging");
+    setBinMode(true);
+  });
+  el.addEventListener("dragend", () => {
+    dragSrc = null;
+    el.classList.remove("dragging");
+    setBinMode(false);
+  });
+  ["dragenter", "dragover"].forEach(ev => el.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation();
+    if (dragSrc !== n) el.classList.add("over");
+  }));
+  ["dragleave", "drop"].forEach(ev => el.addEventListener(ev, e => {
+    e.preventDefault(); el.classList.remove("over");
+  }));
+  el.addEventListener("drop", e => {
+    e.stopPropagation();
+    const from = e.dataTransfer.getData(SLOT_MIME);
+    if (from){
+      const src = parseInt(from, 10);
+      if (src !== n) moveTo(src, n);
+    } else {
+      send(e.dataTransfer.files, n);
+    }
+  });
+}
+
 const pad2 = n => String(n).padStart(2, "0");
 // One vocabulary for slot state. The wire words are not the shown words, and
 // the map cell and the list row describe the same slot — a cell announcing
 // "synced" while the row under it reads "on pedal" is one state with two names.
-const STATE_LABEL = {converting: "converting", staged: "staged",
+// "staged" is the wire word for a slot whose audio is converted and waiting to
+// be written; the design calls that queued, and so does the map's legend. There
+// is no reason the row should be the one place that says staged.
+const STATE_LABEL = {converting: "converting", staged: "queued",
                      synced: "on pedal", error: "error"};
 const stateLabel = st => STATE_LABEL[st] || st;
 
 function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+pad2(s%60); }
+
+/* The row's slot number, which is also how the row is selected.
+
+   A button rather than the whole row: making a div of name, duration and a
+   clear button into one control would swallow all three, and leaving the row
+   clickable with no keyboard path would be a plain WCAG failure. This is small,
+   honest about what it does, and doubles as the drag handle. */
+function slotButton(n){
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "num";
+  b.textContent = pad2(n);
+  b.title = `Select slot ${pad2(n)}`;
+  b.setAttribute("aria-label", `Select slot ${pad2(n)}`);
+  b.setAttribute("aria-pressed", "false");   // paintPressed owns the real value
+  b.dataset.fk = "slot:" + n + ":select";
+  b.onclick = e => { e.stopPropagation(); selectSlot(n); };
+  return b;
+}
 
 /* The tracks list: what is on the pedal right now, plus any loop-only slots.
    Split out of render() so a dirty check can skip it wholesale. */
@@ -75,13 +213,18 @@ function drawTrackList(list, s, byslot, loops){
       const r = byslot[n], pad = pad2(n);
       const el = document.createElement("div");
       el.className = "track";
+      el.dataset.slot = n;
+      // Drop target either way: a loop-only row is still a slot you can put a
+      // backing track into. Only a row with a track can be dragged *from*.
+      attachSlotDnD(el, n);
+      el.draggable = !!r;
       if (r){
         const label = stateLabel(r.state);
         el.innerHTML = `
-          <span class="num">${pad}</span>
           <span class="nm">${escapeHtml(r.display_name)}</span>
           <span class="dur">${mmss(r.duration)}</span>
           <span class="st ${r.state}">${label}</span>`;
+        el.prepend(slotButton(n));
         const x = document.createElement("button");
         x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
         x.dataset.fk = "slot:" + r.slot + ":clear";
@@ -90,9 +233,9 @@ function drawTrackList(list, s, byslot, loops){
       } else {
         // Loop-only slot: no backing track, so no name/duration/clear control.
         el.innerHTML = `
-          <span class="num">${pad}</span>
           <span class="nm loop-only">Loop only</span>
           <span class="st loop">loop</span>`;
+        el.prepend(slotButton(n));
       }
       list.appendChild(el);
       if (loops.has(n)){
@@ -182,61 +325,22 @@ function render(s){
       // to cost 50 tabs, and the grid sits above everything else in the order.
       d.tabIndex = -1;
       d.onclick = () => {
-        // Before the branch, not inside it: the click has already moved
-        // focus here, and the move path below returns early, so setting
-        // this afterwards would leave the tab stop on whichever cell held
-        // it before — focus and the tab stop on different slots.
+        // Before selectSlot, not after: the click has already moved focus here,
+        // and the move path inside returns early, so setting this afterwards
+        // would leave the tab stop on whichever cell held it before — focus and
+        // the tab stop on different slots.
         rovingSlot = i;
-        // Pick-up-then-place reorder — the keyboard equivalent of the mouse
-        // drag: with an occupied slot already selected, activating a different
-        // slot moves or swaps into it. (state, not the once-built byslot
-        // closure, so occupancy is read from the latest snapshot.)
-        if (selected !== null && selected !== i &&
-            state.slots.some(x => x.slot === selected)){
-          const src = selected;
-          selected = null;
-          moveTo(src, i);
-          render(state);
-          return;
-        }
-        selected = selected===i?null:i;
-        render(state);
+        selectSlot(i);
       };
-      d.addEventListener("dragstart", e => {
-        dragSrc = i;
-        e.dataTransfer.setData(SLOT_MIME, String(i));
-        e.dataTransfer.effectAllowed = "move";
-        d.classList.add("dragging");
-        setBinMode(true);
-      });
-      d.addEventListener("dragend", () => {
-        dragSrc = null;
-        d.classList.remove("dragging");
-        setBinMode(false);
-      });
-      ["dragenter","dragover"].forEach(ev => d.addEventListener(ev, e => {
-        e.preventDefault(); e.stopPropagation();
-        if (dragSrc !== i) d.classList.add("over"); }));
-      ["dragleave","drop"].forEach(ev => d.addEventListener(ev, e => {
-        e.preventDefault(); d.classList.remove("over"); }));
-      d.addEventListener("drop", e => {
-        e.stopPropagation();
-        const from = e.dataTransfer.getData(SLOT_MIME);
-        if (from){
-          const src = parseInt(from, 10);
-          if (src !== i) moveTo(src, i);
-        } else {
-          send(e.dataTransfer.files, i);
-        }
-      });
+      attachSlotDnD(d, i);
       g.appendChild(d);
     }
   }
   [...g.children].forEach((d,i) => {
     const n = i+1, row = byslot[n], hasLoop = loops.has(n);
-    d.className = "cell" + (row?" "+row.state:"") + (hasLoop?" has-loop":"")
-      + (selected===n?" sel":"");
-    d.setAttribute("aria-pressed", selected===n ? "true" : "false");
+    // .sel and .linked are paintLinks()'s, and aria-pressed is paintPressed()'s;
+    // writing them here would fight the painter every time hover moved.
+    d.className = "cell" + (row?" "+row.state:"") + (hasLoop?" has-loop":"");
     d.draggable = !!row;
     const loopNote = hasLoop ? " · holds a recorded loop" : "";
     // Zero-padded here too: the cell now prints "07", and a name of "Slot 7"
@@ -319,6 +423,13 @@ function render(s){
   // The library's own rows come from /api/library, but its slot badges and its
   // assign targets come from the snapshot — so a new snapshot re-renders it.
   renderLibrary();
+
+  // Last, and after any rebuild above: the classes these paint live on elements
+  // the rebuild may have just replaced, so painting earlier would paint the
+  // nodes that are about to be thrown away.
+  paintLinks();
+  paintPressed();
+  updateSlotRead();
 }
 
 /* Rebuild `host` while keeping focus where the user put it.
@@ -513,6 +624,33 @@ $("#grid").addEventListener("keydown", e => {
   cells[to].tabIndex = 0;
   rovingSlot = to + 1;              // survive the next render
   cells[to].focus();
+});
+
+/* Hovering either surface highlights the other's counterpart.
+
+   Delegated, not per-node, for one reason that matters and one that is tidy:
+   the list is rebuilt whenever its contents change, so per-row listeners would
+   have to be re-attached every time and any missed row would silently stop
+   linking. The map is built once, but there is no reason for it to work
+   differently.
+
+   The pointer can land on a child — a track name, a duration — so the slot is
+   read from the nearest ancestor carrying data-slot rather than the target
+   itself. mouseleave rather than mouseout: it fires once when the pointer
+   really leaves the surface, instead of on every internal boundary. */
+const slotUnder = e => {
+  const el = e.target.closest && e.target.closest("[data-slot]");
+  return el ? +el.dataset.slot : null;
+};
+["#grid", "#list"].forEach(sel => {
+  const host = $(sel);
+  host.addEventListener("mouseover", e => setHovered(slotUnder(e)));
+  host.addEventListener("mouseleave", () => setHovered(null));
+  // Keyboard focus links the two surfaces the same way the pointer does.
+  host.addEventListener("focusin", e => setHovered(slotUnder(e)));
+  host.addEventListener("focusout", e => {
+    if (!host.contains(e.relatedTarget)) setHovered(null);
+  });
 });
 
 const drop = $("#drop");

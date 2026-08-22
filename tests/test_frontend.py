@@ -121,6 +121,21 @@ TEXT = [
     ("--text-danger",    "--color-surface",     13, 800, "the same, in the bar"),
     ("--accent-legible", "--color-bg",          12, 400, "a ghost button"),
     ("--color-bg",       "--accent-legible",    14, 800, "the primary button"),
+    # The list row has two more grounds: hovered and selected. Nothing here
+    # inherits from the --color-bg rows above; a tinted row is its own surface.
+    ("--color-text",     "--surface-hover", 15, 400, "a name on a hovered row"),
+    ("--text-faint",     "--surface-hover", 12, 400, "a duration on a hovered row"),
+    ("--text-muted",     "--surface-hover", 12, 400, "a status on a hovered row"),
+    ("--text-danger",    "--surface-hover", 12, 400, "a warning status, hovered"),
+    ("--color-text",     "--surface-selected",  15, 400, "a name on a selected row"),
+    ("--text-faint",     "--surface-selected",  12, 400, "a duration on a selected row"),
+    ("--text-muted",     "--surface-selected",  12, 400, "a status on a selected row"),
+    ("--text-danger",    "--surface-selected",  12, 400, "a warning status, selected"),
+    # the row's slot-number block, unselected and selected
+    ("--color-bg",       "--color-text",        13, 800, "a slot number block"),
+    ("--color-bg",       "--accent-legible",    13, 800, "a selected slot number block"),
+    ("--text-faint",     "--color-bg",          11, 400, "the resting slot readout"),
+    ("--color-text",     "--color-bg",          11, 800, "the active slot readout"),
     # the slot numbers printed in the map, one per cell state
     ("--text-faint",     "--color-bg",          10, 400, "an empty slot number"),
     ("--on-state",       "--state-synced",      10, 400, "an on-pedal slot number"),

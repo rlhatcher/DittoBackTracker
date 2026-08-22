@@ -108,6 +108,14 @@
     --capacity-caution: var(--color-accent-600);
     --capacity-danger: var(--color-accent);
 
+    /* Grounds a row can take, and the ring that marks its counterpart on the
+       other surface. Named here because a component may not reach into the
+       ramp — and because "the selected row" is the thing that has a colour,
+       not "accent 100". */
+    --surface-hover: var(--color-neutral-200);
+    --surface-selected: var(--color-accent-100);
+    --link-ring: var(--color-accent-400);
+
     --focus-ring: var(--color-accent);
     /* Accent at a strength that can carry a word — either as the ink or as the
        fill behind it. --color-accent is 3.76:1 on the light ground, which is
@@ -407,6 +415,11 @@
   .cell.dragging { opacity: 0.35; }
   .cell[draggable=true] { cursor: grab; }
 
+  /* Names the hovered slot, or says what the surface is for when nothing is
+     hovered. The quiet state is the resting one, so it is the unmarked class. */
+  #slotread { font-size: var(--text-meta); color: var(--text-faint); }
+  #slotread.on { color: var(--color-text); font-weight: var(--font-heading-weight); }
+
   .legend {
     display: flex; flex-wrap: wrap; gap: var(--space-4);
     margin-top: var(--space-3);
@@ -436,7 +449,25 @@
     border-bottom: var(--rule-minor) solid var(--rule);
   }
   .track:last-child { border-bottom: 0; }
-  .num { font: var(--text-label) var(--font-mono); color: var(--text-muted); width: 22px; flex: none; }
+  /* The row's slot number is a control now — it selects the slot — so it is a
+     filled block rather than grey text, matching the map's own inversion.
+     --accent-legible when selected, not --color-accent: the label is 13px bold,
+     which is not WCAG large text, and full accent behind it is 3.76:1. */
+  .num {
+    font: var(--text-label) var(--font-mono); font-weight: var(--font-heading-weight);
+    background: var(--color-text); color: var(--color-bg);
+    border: 0; border-radius: var(--radius-sm); padding: 3px 6px;
+    flex: none; cursor: pointer; line-height: 1.2;
+  }
+  .num[aria-pressed="true"] { background: var(--accent-legible); }
+
+  /* Selection and hover, shared by the map and the list. Selection outranks
+     hover, which paintLinks() enforces by never marking both on one node. */
+  .track.linked { background: var(--surface-hover); }
+  .track.sel { background: var(--surface-selected); }
+  .track:hover { background: var(--surface-hover); }
+  .track.sel:hover { background: var(--surface-selected); }
+  .cell.linked { outline: 2px solid var(--link-ring); outline-offset: 1px; }
   .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dur { font-size: var(--text-small); color: var(--text-faint); flex: none; }
   .st {
