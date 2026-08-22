@@ -12,7 +12,7 @@ import threading
 
 import pytest
 
-from ditto import config, core, db
+from ditto import config, core, db, web
 
 H1 = "aaaaaaaaaaaaaaaaaaaa"
 H2 = "bbbbbbbbbbbbbbbbbbbb"
@@ -318,10 +318,26 @@ def test_only_the_named_assets_are_reachable(client, name):
     assert client.get(f"/static/{name}").status_code == 404
 
 
-def test_the_allowlisted_assets_really_are_served(client):
-    """The other half: a 404 for everything would satisfy the test above."""
-    for name in ("app.js", "app.css"):
-        assert client.get(f"/static/{name}").status_code == 200
+@pytest.mark.parametrize("name", sorted(web.ASSETS))
+def test_the_allowlisted_assets_really_are_served(client, name):
+    """The other half: a 404 for everything would satisfy the test above.
+
+    Driven off ASSETS itself rather than a copy of the list, so adding an entry
+    without shipping the file fails here instead of in a browser.
+    """
+    rv = client.get(f"/static/{name}")
+    assert rv.status_code == 200, f"{name} is allowlisted but not on disk"
+    assert rv.headers["Content-Type"].startswith(web.ASSETS[name])
+
+
+def test_the_webfont_survives_being_checked_out(client):
+    """.gitattributes says `* text=auto`, which would LF-normalise a woff2 and
+    corrupt it. Nothing about that failure is visible server-side — the file is
+    still served, still the right length-ish, and no browser will parse it. The
+    magic number is the cheapest thing that actually notices.
+    """
+    body = client.get("/static/archivo-latin.woff2").data
+    assert body[:4] == b"wOF2", "the font is not woff2 — check .gitattributes"
 
 
 def test_audition_is_a_safe_method_and_needs_no_guard(client):

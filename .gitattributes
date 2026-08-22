@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The webfont is brotli-compressed binary. `text=auto` above would guess at it
+# and LF-normalise the bytes, which corrupts the file silently — it only shows
+# up as a font that no browser will parse.
+*.woff2 binary

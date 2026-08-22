@@ -50,6 +50,12 @@ function libraryDomDirty(){ lastLibKey = null; }
 let rovingSlot = null;
 
 const pad2 = n => String(n).padStart(2, "0");
+// One vocabulary for slot state. The wire words are not the shown words, and
+// the map cell and the list row describe the same slot — a cell announcing
+// "synced" while the row under it reads "on pedal" is one state with two names.
+const STATE_LABEL = {converting: "converting", staged: "staged",
+                     synced: "on pedal", error: "error"};
+const stateLabel = st => STATE_LABEL[st] || st;
 
 function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+pad2(s%60); }
 
@@ -63,14 +69,14 @@ function drawTrackList(list, s, byslot, loops){
     const slotNums = [...new Set([...s.slots.map(x=>x.slot), ...loops])]
       .sort((a,b)=>a-b);
     if (!slotNums.length){
-      list.innerHTML = '<div style="color:var(--tx2);font-size:14px">Nothing loaded yet.</div>';
+      list.innerHTML = '<div class="empty">Nothing loaded yet.</div>';
     }
     slotNums.forEach(n => {
       const r = byslot[n], pad = pad2(n);
       const el = document.createElement("div");
       el.className = "track";
       if (r){
-        const label = {converting:"converting",staged:"staged",synced:"on pedal",error:"error"}[r.state]||r.state;
+        const label = stateLabel(r.state);
         el.innerHTML = `
           <span class="num">${pad}</span>
           <span class="nm">${escapeHtml(r.display_name)}</span>
@@ -120,9 +126,12 @@ function render(s){
   state = s;
 
   const pd = $("#pedal");
-  const map = {mounted:["var(--ok)","connected"],absent:["var(--tx2)","no pedal"],error:["var(--err)","error"]};
-  const [c,t] = map[s.pedal] || map.absent;
-  pd.innerHTML = `<span class="dot" style="background:${c}"></span>${t}`;
+  // A class, not a colour: the stylesheet owns the palette, and naming one here
+  // would be the one place a token could drift without the CSS noticing.
+  const map = {mounted:["ok","connected"],absent:["off","no pedal"],error:["off","error"]};
+  const [cls,t] = map[s.pedal] || map.absent;
+  pd.className = cls;
+  pd.innerHTML = `<span class="dot"></span>${t}`;
 
   if (s.version){
     setText($("#ver"), "v" + s.version + (s.revision ? " · " + s.revision : ""));
@@ -157,8 +166,18 @@ function render(s){
     for (let i=1;i<=total;i++){
       const d = document.createElement("button");
       d.type = "button";
-      d.className = "cell"; d.title = "Slot "+i; d.dataset.slot = i;
+      d.className = "cell"; d.title = "Slot "+pad2(i); d.dataset.slot = i;
       d.setAttribute("aria-pressed", "false");
+      // The number never changes, so it is built once here and the per-frame
+      // patch loop below never touches it. It is a child node rather than
+      // ::before because a pseudo-element cannot be read as text — and it is
+      // pointer-events:none in the CSS because a real child makes dragenter
+      // and dragleave fire on every crossing between cell and number, which
+      // flickers the drop outline the whole time you hover a cell.
+      const num = document.createElement("span");
+      num.className = "n";
+      num.textContent = pad2(i);
+      d.appendChild(num);
       // Roving tabindex: the grid is one stop, not 99. Reaching slot 50 used
       // to cost 50 tabs, and the grid sits above everything else in the order.
       d.tabIndex = -1;
@@ -220,13 +239,17 @@ function render(s){
     d.setAttribute("aria-pressed", selected===n ? "true" : "false");
     d.draggable = !!row;
     const loopNote = hasLoop ? " · holds a recorded loop" : "";
+    // Zero-padded here too: the cell now prints "07", and a name of "Slot 7"
+    // would not contain its own visible label — so speech input asking for
+    // "slot oh seven" would find nothing (WCAG 2.5.3).
+    const p = pad2(n);
     d.title = row
-      ? `Slot ${n}: ${row.display_name} — drag to another slot to move or swap${loopNote}`
-      : hasLoop ? `Slot ${n}: recorded loop only` : `Slot ${n} (empty)`;
+      ? `Slot ${p}: ${row.display_name} — drag to another slot to move or swap${loopNote}`
+      : hasLoop ? `Slot ${p}: recorded loop only` : `Slot ${p} (empty)`;
     // title is a tooltip, not a name — spell the name out for a screen reader.
     d.setAttribute("aria-label", row
-      ? `Slot ${n}, ${row.display_name}, ${row.state}${loopNote}`
-      : hasLoop ? `Slot ${n}, recorded loop only` : `Slot ${n}, empty`);
+      ? `Slot ${p}, ${row.display_name}, ${stateLabel(row.state)}${loopNote}`
+      : hasLoop ? `Slot ${p}, recorded loop only` : `Slot ${p}, empty`);
     // Exactly one cell is tabbable: wherever the user last arrowed to, else
     // the selected slot, else the first.
     const roving = rovingSlot !== null ? rovingSlot
@@ -459,17 +482,20 @@ async function send(files, start){
 
    With a roving tabindex the grid is a single tab stop, so the arrows have to
    provide movement within it. GRID_COLS mirrors the CSS
-   `grid-template-columns: repeat(20, 1fr)`; if that changes, change this.
+   `grid-template-columns: repeat(10, 1fr)`; if that changes, change this.
+
+   Ten is now the same number in both places for a reason the old twenty was
+   not: the map is ten wide at every width, so a row is a decade and Down from
+   slot 7 lands on 17. That is the only arrangement of 99 slots where the rows
+   mean something, which is why the column count is no longer allowed to vary.
 
    Movement is linear over slot order, not bounded by the row. Left and Right
-   step one slot and will cross a row edge, because slot 21 genuinely does
-   follow slot 20 — the rows are how 99 slots are made to fit on a phone, not a
-   structure the user is navigating. Stopping at column 20 would leave slot 21
-   unreachable from slot 20 except by Down then nineteen Lefts. Up and Down
-   step a whole row, so both traversals are available. Only the real ends, slot
-   1 and slot 99, stop.
+   step one slot and will cross a row edge, because slot 11 genuinely does
+   follow slot 10. Stopping at column 10 would leave slot 11 unreachable from
+   slot 10 except by Down then nine Lefts. Up and Down step a whole row, so
+   both traversals are available. Only the real ends, slot 1 and slot 99, stop.
 */
-const GRID_COLS = 20;
+const GRID_COLS = 10;
 $("#grid").addEventListener("keydown", e => {
   const step = {ArrowRight: 1, ArrowLeft: -1,
                 ArrowDown: GRID_COLS, ArrowUp: -GRID_COLS}[e.key];
