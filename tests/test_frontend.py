@@ -136,6 +136,9 @@ TEXT = [
     ("--color-bg",       "--accent-legible",    13, 800, "a selected slot number block"),
     ("--text-faint",     "--color-bg",          11, 400, "the resting slot readout"),
     ("--color-text",     "--color-bg",          11, 800, "the active slot readout"),
+    # the per-track slot field, and the marker for a track in several slots
+    ("--color-text",     "--color-surface",     12, 800, "a slot field"),
+    ("--text-faint",     "--color-surface",     11, 400, "the extra-slots marker"),
     # the slot numbers printed in the map, one per cell state
     ("--text-faint",     "--color-bg",          10, 400, "an empty slot number"),
     ("--on-state",       "--state-synced",      10, 400, "an on-pedal slot number"),

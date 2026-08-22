@@ -60,6 +60,20 @@ let rovingSlot = null;
    therefore painted by hand, by paintLinks(), and never by a redraw. */
 let hoveredSlot = null;
 
+/* A track lifted out of the library, waiting for a slot to be chosen for it —
+   the source_hash, or null. The map tints its empty cells while this is set. */
+let pickedTrack = null;
+
+/* Uncommitted text in the per-track slot fields, keyed by source_hash.
+
+   The rows are rebuilt whenever the snapshot moves, which during a conversion
+   is five times a second, so a field's value cannot live only in the DOM. It is
+   read back when the row is built, which is what makes a rebuild reconstruct
+   what was being typed instead of wiping it. Deliberately not a freeze flag
+   like editingHash: a slot field can sit focused for a while, and freezing the
+   whole library for that long would stop the other rows tracking the pedal. */
+let slotDraft = {};
+
 /* The only thing that writes .sel and .linked, on either surface.
 
    Selection and hover are the two pieces of state both the map and the list
@@ -117,6 +131,19 @@ function setHovered(n){
    choosing a different one moves or swaps into it — the click equivalent of the
    drag, and the reason this is not simply a toggle. */
 function selectSlot(n){
+  // Placing a picked-up track comes first. It is the more recent and the more
+  // explicit intent: the user has said which track, and this click says where.
+  // There is deliberately no loop branch in front of it — BT.WAV and LOOP.WAV
+  // are separate files in one slot directory, so assigning to a loop slot
+  // cannot overwrite the loop, and refusing it would remove the feature the
+  // loop exists for. The confirmation names the loop instead.
+  if (pickedTrack !== null){
+    const r = (library || []).find(x => x.source_hash === pickedTrack);
+    pickedTrack = null;
+    if (r) assignToSlot(r, n);
+    else render(state);
+    return;
+  }
   if (selected !== null && selected !== n &&
       state.slots.some(x => x.slot === selected)){
     const src = selected;
@@ -127,6 +154,49 @@ function selectSlot(n){
   }
   selected = selected === n ? null : n;
   render(state);
+}
+
+/* Lift a track out of the library, or put it back down.
+
+   With an empty slot already selected the question "where?" is already
+   answered, so a click on a track fills it rather than starting a pickup —
+   otherwise the user would have to say where twice. */
+function pickUp(r){
+  if (selected !== null && !(state.slots || []).some(x => x.slot === selected)){
+    assignToSlot(r, selected);
+    return;
+  }
+  const same = pickedTrack === r.source_hash;
+  pickedTrack = same ? null : r.source_hash;
+  render(state);
+  // render() has just rewritten #msg from the snapshot, so this goes after it.
+  if (!same) say(`Choose a slot for “${r.name}”`);
+}
+
+function cancelPickup(){
+  if (pickedTrack === null) return;
+  pickedTrack = null;
+  render(state);
+}
+
+/* What the drop zone's note says, which is always about what you can do next.
+   The wording is the design's; assignTarget() supplies "next free is 09" and is
+   already loop-aware, so the number here and the number a click would use are
+   one computation. */
+function hintText(byslot){
+  if (pickedTrack !== null){
+    const r = (library || []).find(x => x.source_hash === pickedTrack);
+    const t = assignTarget();
+    return `Choose a slot for “${r ? r.name : "that track"}”`
+         + (t !== null ? ` — next free is ${pad2(t)}` : " — the pedal is full");
+  }
+  if (selected !== null){
+    return byslot[selected]
+      ? `Slot ${pad2(selected)} selected — click another slot or row to move or swap`
+      : `Slot ${pad2(selected)} selected — click a track to fill it`;
+  }
+  return "Hover to link map and list · drag a track onto a slot · "
+       + "drag slot to slot to swap";
 }
 
 /* Drag behaviour for anything that stands for a slot. A map cell and a list row
@@ -380,23 +450,21 @@ function render(s){
     rebuild(list, () => drawTrackList(list, s, byslot, loops));
   }
 
+  // Every empty cell tints while a track is picked up, as one class on the
+  // grid rather than 99 class writes. Loop-bearing slots tint with the rest:
+  // they are assignable, so leaving them plain would promise a refusal that
+  // does not happen.
+  $("#grid").classList.toggle("picking", pickedTrack !== null);
+
   if (binMode){
     /* leave the bin prompt in place while a slot is being dragged */
-  } else if (selected != null){
-    const pad = pad2(selected);
-    const occ = byslot[selected];
-    $("#drophead").innerHTML = `Drop here to fill slot <b>${pad}</b>`;
-    const nxt = [selected+1, selected+2].filter(n => n <= total)
-      .map(n => pad2(n));
-    $("#dropnote").textContent = occ
-      ? `Slot ${pad} holds “${occ.display_name}” — select another slot to move it there, drop a file to replace it, or choose ${pad} again to deselect.`
-      : nxt.length
-        ? `Extra files continue into ${nxt.join(", ")}… Choose the slot again to deselect.`
-        : `Slot ${pad} is the last slot. Choose the slot again to deselect.`;
   } else {
-    $("#drophead").textContent = "Drop audio here, or choose a file";
-    $("#dropnote").textContent =
-      "Drop straight onto a slot to target it, or use a leading number — “07 Blue Bossa.mp3”";
+    // textContent throughout: these strings now carry a track name, and the
+    // previous version of this block built one of them with innerHTML.
+    setText($("#drophead"), selected != null
+      ? `Drop here to fill slot ${pad2(selected)}`
+      : "Drop audio here, or choose a file");
+    setText($("#dropnote"), hintText(byslot));
   }
 
   const busy = !!s.busy;
@@ -409,10 +477,13 @@ function render(s){
   }
   const m = $("#msg");
   // This page is the only status surface — there is no panel light or display —
-  // so the mid-write warning has to be unmissable here or nowhere.
+  // so the mid-write warning has to be unmissable here or nowhere. Those two
+  // branches run whatever else is on the line; everything below them yields to
+  // a confirmation the user has not had time to read yet.
   if (s.ending)            { setText(m, "Shutting down — leave everything plugged in until this page disconnects"); m.className="msg warn"; }
   else if (s.busy && s.busy_kind === "write")
                            { setText(m, s.busy + " — don't unplug"); m.className="msg warn"; }
+  else if (Date.now() < msgHold) { /* a confirmation owns the line */ }
   else if (s.busy)         { setText(m, s.busy); m.className="msg"; }
   else if (s.error)        { setText(m, s.error); m.className="msg err"; }
   else if (s.pedal==="mounted") { setText(m, "Ready"); m.className="msg"; }
@@ -441,10 +512,20 @@ function render(s){
 function rebuild(host, draw){
   const active = document.activeElement;
   const key = active && host.contains(active) ? active.dataset.fk : null;
+  // Restoring focus to a text field but not the caret puts it at the end, so a
+  // rebuild landing mid-word moves the cursor out from under the typist. Five
+  // times a second, during a conversion, in a two-character field.
+  const caret = key && active.selectionStart != null
+    ? [active.selectionStart, active.selectionEnd] : null;
   draw();
   if (key){
     const again = host.querySelector(`[data-fk="${CSS.escape(key)}"]`);
-    if (again) again.focus();
+    if (again){
+      again.focus();
+      if (caret && again.setSelectionRange){
+        try { again.setSelectionRange(caret[0], caret[1]); } catch { /* not a text field */ }
+      }
+    }
   }
 }
 
@@ -550,7 +631,33 @@ const jsonBody = body => ({method: "POST",
                            headers: {"Content-Type": "application/json"},
                            body: JSON.stringify(body)});
 
-function fail(text){ setText($("#msg"), text); $("#msg").className = "msg err"; }
+/* Two status surfaces, and they must not swap jobs. #msg says what just
+   happened; the drop-zone note says what you can do next. Cross them and the
+   bar reads "Ready" while the note says "Choose a slot for X".
+
+   #msg is also the aria-live region, so anything that only shows in the note is
+   invisible to a screen reader — which is why picking a track writes both.
+
+   The hold is what makes these messages survive being said. render() rewrites
+   #msg from the snapshot, and an assign changes the snapshot, so without it a
+   confirmation is overwritten by "Ready" in the same tick it was written — the
+   user is told nothing and a screen reader announces nothing. For six seconds
+   after one of these, the snapshot does not get the line back.
+
+   Except when the device needs it: `ending`, and a write in flight, are the
+   only things this page has to say "don't unplug" with, and they outrank any
+   confirmation. render() checks that before it checks the hold. */
+let msgHold = 0, msgTimer = null;
+function holdMsg(){
+  msgHold = Date.now() + 6000;
+  clearTimeout(msgTimer);
+  // Hand the line back afterwards, rather than leaving the last confirmation up
+  // until whenever the next frame happens to arrive.
+  msgTimer = setTimeout(() => { if (state) render(state); }, 6000);
+}
+function say(text){ setText($("#msg"), text); $("#msg").className = "msg"; holdMsg(); }
+function warn(text){ setText($("#msg"), text); $("#msg").className = "msg warn"; holdMsg(); }
+function fail(text){ setText($("#msg"), text); $("#msg").className = "msg err"; holdMsg(); }
 
 async function moveTo(src, dst){
   const r = await api(`/api/slots/${src}/move`, jsonBody({to: dst}));
@@ -651,6 +758,15 @@ const slotUnder = e => {
   host.addEventListener("focusout", e => {
     if (!host.contains(e.relatedTarget)) setHovered(null);
   });
+});
+
+/* Escape puts a picked-up track back. Not while a field has focus: there the
+   key means "revert what I typed", and the field handles it. */
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape" || pickedTrack === null) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "SELECT")) return;
+  cancelPickup();
 });
 
 const drop = $("#drop");
@@ -958,8 +1074,10 @@ function _renderLibrary(){
   // so this stays cheap with a large library; the rest is what the snapshot
   // contributes (which slots hold what, and what the assign target would be)
   // plus the two uncontrolled inputs. Progress is deliberately absent.
+  // `selected` used to be here for the "→ 09" button's label, which has gone.
+  // pickedTrack takes its place: it changes which row is highlighted.
   const libKey = JSON.stringify([
-    libRev, selected, nowPlaying,
+    libRev, pickedTrack, nowPlaying,
     ((state && state.slots) || []).map(s => [s.slot, s.source_hash]),
     (state && state.loops) || [],
     state && state.slot_count,
@@ -980,8 +1098,7 @@ function _renderLibrary(){
     host.innerHTML = '<div class="empty">Nothing matches that search.</div>';
   }
 
-  const target = assignTarget();
-  rows.forEach(r => host.appendChild(libraryRow(r, bySlot[r.source_hash], target)));
+  rows.forEach(r => host.appendChild(libraryRow(r, bySlot[r.source_hash] || [])));
 
   const mins = library.reduce((t, r) => t + (r.duration || 0), 0);
   $("#libfoot").innerHTML =
@@ -989,9 +1106,110 @@ function _renderLibrary(){
     + (rows.length === all ? "" : `<span>${rows.length} shown</span>`);
 }
 
-function libraryRow(r, slots, target){
+/* The slot a track occupies, as an editable field.
+
+   A track can occupy several slots — db.slots_for_hash returns a list and the
+   API is happy to put one track in two places — and a two-character field
+   cannot say that. So the field shows the lowest, a "+n" marker says there are
+   more, and editing acts on the lowest. Clearing removes every one of them, and
+   asks first when that is more than one, because the field showing "02" is a
+   poor warning that confirming will also empty slot 47. */
+function slotField(r, slots){
+  const wrap = document.createElement("span");
+  wrap.className = "slotwrap";
+  wrap.onclick = e => e.stopPropagation();
+  const lowest = slots.length ? Math.min(...slots) : null;
+
+  const f = document.createElement("input");
+  f.type = "text";
+  f.inputMode = "numeric";
+  f.maxLength = 2;
+  f.className = "slotfield" + (lowest !== null ? " assigned" : "");
+  f.placeholder = "––";
+  const draft = slotDraft[r.source_hash];
+  f.value = draft !== undefined ? draft : lowest !== null ? pad2(lowest) : "";
+  f.dataset.fk = "lib:" + r.source_hash + ":slot";
+  f.title = lowest === null
+    ? `Type a slot number to put “${r.name}” on the pedal`
+    : `“${r.name}” is in slot ${pad2(lowest)} — type another to move it, or clear it to take it off`;
+  f.setAttribute("aria-label", `Slot for ${r.name}`);
+  f.oninput = () => { slotDraft[r.source_hash] = f.value; };
+  f.onkeydown = e => {
+    e.stopPropagation();
+    if (e.key === "Enter"){ e.preventDefault(); f.blur(); }
+    else if (e.key === "Escape"){ revertSlotField(r); }
+  };
+  f.onblur = () => commitSlotField(r, slots);
+  wrap.appendChild(f);
+
+  if (slots.length > 1){
+    const more = document.createElement("span");
+    more.className = "slotmore";
+    more.textContent = "+" + (slots.length - 1);
+    more.title = `Also in ${slots.slice(1).map(pad2).join(", ")}`;
+    wrap.appendChild(more);
+  }
+  return wrap;
+}
+
+function revertSlotField(r){
+  delete slotDraft[r.source_hash];
+  libraryDomDirty();     // the data has not moved, only the DOM
+  renderLibrary();
+}
+
+/* Enter or blur commits what was typed. Every branch clears the draft first, so
+   a failure leaves the field showing the truth rather than the attempt. */
+async function commitSlotField(r, slots){
+  const raw = (slotDraft[r.source_hash] ?? "").trim();
+  if (slotDraft[r.source_hash] === undefined) return;    // nothing was typed
+  delete slotDraft[r.source_hash];
+  const lowest = slots.length ? Math.min(...slots) : null;
+  const max = (state && state.slot_count) || 99;
+
+  if (raw === ""){
+    if (lowest === null){ revertSlotField(r); return; }
+    if (slots.length > 1 && !confirm(
+        `Take “${r.name}” off the pedal? It is in slots `
+        + `${slots.map(pad2).join(", ")}, and all of them will be cleared.`)){
+      revertSlotField(r); return;
+    }
+    if (slots.length === 1){
+      removeSlot(lowest, r.name);          // one slot, so the undo can name it
+    } else {
+      for (const n of slots) await api(`/api/slots/${n}`, {method: "DELETE"});
+      say(`“${r.name}” taken off the pedal`);
+    }
+    return;
+  }
+
+  const n = /^\d{1,2}$/.test(raw) ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(n) || n < 1 || n > max){
+    // Not the design's literal "01–99": docs/api.md says clients read
+    // slot_count rather than assuming the pedal has 99 slots.
+    warn(`Slot numbers run 01–${pad2(max)}`);
+    revertSlotField(r);
+    return;
+  }
+  if (n === lowest){ revertSlotField(r); return; }
+
+  if (lowest !== null){
+    // One call, not assign-then-delete: two calls can fail between them and
+    // leave the track in both slots. move already does move-or-swap, which is
+    // also the better reading of "vacating whatever slot it held".
+    await moveTo(lowest, n);
+  } else {
+    await assignToSlot(r, n);
+  }
+}
+
+function libraryRow(r, slots){
   const el = document.createElement("div");
-  el.className = "librow";
+  el.className = "librow" + (pickedTrack === r.source_hash ? " picked" : "");
+  // Clicking the row lifts the track; clicking a control in it does not. Every
+  // control stops propagation rather than this checking what was hit, so a new
+  // control cannot forget to opt out and silently start picking things up.
+  el.onclick = () => pickUp(r);
 
   const nm = document.createElement("span");
   nm.className = "libname";
@@ -1001,7 +1219,7 @@ function libraryRow(r, slots, target){
   nm.setAttribute("role", "button");
   nm.dataset.fk = "lib:" + r.source_hash + ":name";
   const edit = () => startRename(el, nm, r);
-  nm.onclick = edit;
+  nm.onclick = e => { e.stopPropagation(); edit(); };
   nm.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); } };
   el.appendChild(nm);
 
@@ -1010,14 +1228,7 @@ function libraryRow(r, slots, target){
   dur.textContent = mmss(r.duration);
   el.appendChild(dur);
 
-  if (slots && slots.length){
-    const b = document.createElement("span");
-    b.className = "inslot";
-    b.textContent = slots.map(n => pad2(n)).join(" ");
-    b.title = slots.length > 1 ? `On the pedal in slots ${b.textContent}`
-                               : `On the pedal in slot ${b.textContent}`;
-    el.appendChild(b);
-  }
+  el.appendChild(slotField(r, slots));
 
   const play = document.createElement("button");
   play.className = "libbtn" + (nowPlaying === r.source_hash ? " playing" : "");
@@ -1027,22 +1238,8 @@ function libraryRow(r, slots, target){
   play.setAttribute("aria-label",
     (nowPlaying === r.source_hash ? "Stop " : "Listen to ") + r.name);
   play.dataset.fk = "lib:" + r.source_hash + ":play";
-  play.onclick = () => audition(r);
+  play.onclick = e => { e.stopPropagation(); audition(r); };
   el.appendChild(play);
-
-  const add = document.createElement("button");
-  add.className = "libbtn";
-  add.type = "button";
-  add.disabled = target === null;
-  add.textContent = target === null ? "Full" : "→ " + pad2(target);
-  add.title = target === null
-    ? "Every slot is taken"
-    : (selected != null
-        ? `Put “${r.name}” in slot ${pad2(target)}, the slot you have selected`
-        : `Put “${r.name}” in slot ${pad2(target)}, the lowest free slot`);
-  add.dataset.fk = "lib:" + r.source_hash + ":add";
-  add.onclick = () => assignToSlot(r, target);
-  el.appendChild(add);
 
   const del = document.createElement("button");
   del.className = "libbtn danger";
@@ -1051,7 +1248,7 @@ function libraryRow(r, slots, target){
   del.title = `Delete “${r.name}” from the device`;
   del.setAttribute("aria-label", "Delete " + r.name);
   del.dataset.fk = "lib:" + r.source_hash + ":del";
-  del.onclick = () => forget(r);
+  del.onclick = e => { e.stopPropagation(); forget(r); };
   el.appendChild(del);
 
   return el;
@@ -1136,10 +1333,27 @@ function audition(r){
 async function assignToSlot(r, slot){
   if (slot == null) return;
   const pad = pad2(slot);
+  // Read before the write: afterwards the slot holds the new track and cannot
+  // say what it replaced.
+  const had = ((state && state.slots) || []).find(x => x.slot === slot);
+  const hasLoop = ((state && state.loops) || []).includes(slot);
+
   const resp = await api(`/api/slots/${slot}/assign`,
                          jsonBody({hash: r.source_hash}));
   if (!resp.ok){ failFrom(resp, `Couldn't put that in slot ${pad}`); return; }
+  pickedTrack = null;
   selected = null;      // consumed; the next click picks its own target
+
+  // A loop in the target slot is the one case worth saying out loud. It is not
+  // a warning: BT.WAV and LOOP.WAV live side by side and the pedal plays the
+  // track with the loop over it, which is the point of the feature. Saying so
+  // is what stops the user wondering whether they just destroyed a take.
+  say(hasLoop
+      ? `“${r.name}” assigned to slot ${pad} — the loop recorded there still plays over it`
+      : had
+        ? `Replaced slot ${pad} with “${r.name}”`
+        : `“${r.name}” assigned to slot ${pad}`);
+
   loadLibrary();        // the slot badges come from the snapshot, but `added`
                         // ordering and any server-side change do not
 }

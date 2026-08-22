@@ -468,6 +468,13 @@
   .track:hover { background: var(--surface-hover); }
   .track.sel:hover { background: var(--surface-selected); }
   .cell.linked { outline: 2px solid var(--link-ring); outline-offset: 1px; }
+  /* Every free cell tints while a track is picked up — one class on the grid,
+     not 99 class writes. Loop-bearing cells tint with the rest: a loop does not
+     make a slot unavailable, and leaving them plain would promise a refusal
+     that never comes. */
+  #grid.picking .cell:not(.synced):not(.converting):not(.staged):not(.error) {
+    background: var(--surface-selected);
+  }
   .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dur { font-size: var(--text-small); color: var(--text-faint); flex: none; }
   .st {
@@ -503,11 +510,28 @@
   }
   .libname:hover { text-decoration: underline dotted var(--text-faint); }
   .libdur { font-size: var(--text-small); color: var(--text-faint); flex: none; }
-  /* Which slots hold this track. Read from the snapshot, so it stays live. */
-  .inslot {
-    font: var(--text-meta) var(--font-mono); color: var(--color-text);
-    border: var(--rule-minor) solid var(--color-text); padding: 1px var(--space-1); flex: none;
+  /* The slot this track sits in, and the way to change it. A bordered field
+     rather than a badge, because it is now something you type into. */
+  .slotwrap { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+  .slotfield {
+    width: 46px; text-align: center; padding: 3px 4px;
+    font: var(--text-small) var(--font-mono); font-weight: var(--font-heading-weight);
+    color: var(--color-text); caret-color: var(--color-accent);
+    background: var(--color-surface);
+    border: var(--rule-minor) solid var(--rule); border-radius: var(--radius-sm);
+    -webkit-appearance: none; appearance: none;
   }
+  /* Assigned reads as a solid edge, unassigned as a hairline: the difference
+     between "this track is on the pedal" and "this is where it would go". */
+  .slotfield.assigned { border-color: var(--color-text); }
+  .slotfield:focus-visible { border-color: var(--color-accent); outline-offset: 0; }
+  /* A track can be in more than one slot and the field can only show one. */
+  .slotmore { font: var(--text-meta) var(--font-mono); color: var(--text-faint); }
+
+  /* A track lifted out of the library, waiting for a slot. */
+  .librow.picked { background: var(--surface-selected); }
+  .librow.picked .libname { font-weight: var(--font-heading-weight); }
+  .librow { cursor: pointer; }
   #libfoot { margin-top: 10px; }
 
   /* -- drop zone ---------------------------------------------------------- */
