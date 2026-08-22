@@ -489,10 +489,14 @@
   .nm.loop-only { color: var(--text-faint); font-style: italic; }
   /* Loop controls sit on their own indented line under the track row, so a
      narrow phone never has to squeeze them next to the name and state. */
+  /* The continuation line under a slot that holds both a track and a loop.
+     Indented to the track name, so it reads as belonging to the row above. */
   .looprow {
     display: flex; flex-wrap: wrap; gap: var(--space-2);
-    padding: 0 0 10px 32px; margin-top: -2px;
+    padding: 0 0 10px 40px; margin-top: -2px;
+    border-bottom: var(--rule-minor) solid var(--rule);
   }
+  .looprow .loopbtn, .track .loopbtn { font-size: var(--text-meta); }
 
   /* -- library ------------------------------------------------------------ */
 

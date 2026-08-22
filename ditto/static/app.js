@@ -267,6 +267,30 @@ function slotButton(n){
   return b;
 }
 
+/* Download and delete for a pedal-recorded loop. One definition, used both on a
+   loop-only row and on the continuation line under a row that has both. */
+function loopControls(n){
+  const pad = pad2(n);
+  const dl = document.createElement("a");
+  dl.className = "loopbtn";
+  dl.href = `/api/loops/${n}`;
+  dl.setAttribute("download", `loop-${pad}.wav`);
+  dl.textContent = "Download loop";
+  dl.title = `Download the loop from slot ${pad} (leaves it on the pedal)`;
+  dl.dataset.fk = "slot:" + n + ":loopdl";
+  dl.onclick = e => e.stopPropagation();
+
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.className = "loopbtn danger";
+  rm.textContent = "Remove loop";
+  rm.title = `Delete the loop in slot ${pad} from the pedal`;
+  rm.setAttribute("aria-label", `Delete the recorded loop in slot ${pad}`);
+  rm.dataset.fk = "slot:" + n + ":looprm";
+  rm.onclick = e => { e.stopPropagation(); removeLoop(n); };
+  return [dl, rm];
+}
+
 /* The tracks list: what is on the pedal right now, plus any loop-only slots.
    Split out of render() so a dirty check can skip it wholesale. */
 function drawTrackList(list, s, byslot, loops){
@@ -301,29 +325,28 @@ function drawTrackList(list, s, byslot, loops){
         x.onclick = () => removeSlot(r.slot, r.display_name);
         el.appendChild(x);
       } else {
-        // Loop-only slot: no backing track, so no name/duration/clear control.
+        // Loop-only slot: no backing track, so nothing to clear. The design
+        // puts a bare × here, but DELETE /api/slots/<n> deliberately leaves
+        // LOOP.WAV alone — that button would look broken. The loop's own
+        // controls go here instead, and they are the row's only actions.
         el.innerHTML = `
-          <span class="nm loop-only">Loop only</span>
+          <span class="nm loop-only">Recorded loop — kept, never overwritten</span>
           <span class="st loop">loop</span>`;
         el.prepend(slotButton(n));
       }
       list.appendChild(el);
+      // A loop's controls always go on their own indented line, whether or not
+      // the slot also holds a backing track. Two reasons, and the first is the
+      // design's own × on a loop row: DELETE /api/slots/<n> leaves LOOP.WAV
+      // alone, so that button would look broken, and a row carrying two × that
+      // mean different things is worse. The second is width — the design's
+      // "Recorded loop — kept, never overwritten" plus two buttons ellipsises
+      // the sentence away on half a laptop screen. One rule for both cases.
+      // Not behind hover: it is rare, and it deletes a recording.
       if (loops.has(n)){
         const lr = document.createElement("div");
         lr.className = "looprow";
-        const dl = document.createElement("a");
-        dl.className = "loopbtn"; dl.href = `/api/loops/${n}`;
-        dl.setAttribute("download", `loop-${pad}.wav`);
-        dl.textContent = "Download loop";
-        dl.title = `Download the loop from slot ${pad} (leaves it on the pedal)`;
-        dl.dataset.fk = "slot:" + n + ":loopdl";
-        lr.appendChild(dl);
-        const rm = document.createElement("button");
-        rm.className = "loopbtn danger"; rm.textContent = "Remove loop";
-        rm.title = `Delete the loop in slot ${pad} from the pedal`;
-        rm.dataset.fk = "slot:" + n + ":looprm";
-        rm.onclick = () => removeLoop(n);
-        lr.appendChild(rm);
+        loopControls(n).forEach(c => lr.appendChild(c));
         list.appendChild(lr);
       }
       if (r && r.state === "error" && r.error){
@@ -775,8 +798,8 @@ function setBinMode(on){
   binMode = on;
   drop.classList.toggle("bin", on);
   if (on){
-    $("#drophead").innerHTML = "🗑 Drop here to remove from the pedal";
-    $("#dropnote").textContent = "You can undo straight afterwards.";
+    setText($("#drophead"), "Drop here to remove from the pedal");
+    setText($("#dropnote"), "You can undo straight afterwards.");
   } else {
     render(state);
   }
@@ -832,6 +855,22 @@ drop.addEventListener("drop", e => {
     send(e.dataTransfer.files, selected);
   }
 });
+/* The design wants a file dropped anywhere on this half of the page to land.
+   Cells and list rows already stopPropagation on their own drops, so this only
+   sees the gaps between them, and a slot being dragged is not a file — that
+   keeps its meaning of "put this back", not "upload nothing". */
+const paneL = document.querySelector(".pane-l");
+["dragenter", "dragover"].forEach(ev => paneL.addEventListener(ev, e => {
+  if (dragSrc === null) e.preventDefault();
+}));
+paneL.addEventListener("drop", e => {
+  if (dragSrc !== null) return;               // a slot, handled by its target
+  if (!e.dataTransfer.files.length) return;
+  e.preventDefault();
+  send(e.dataTransfer.files, selected);
+});
+
+// Anywhere else, a dropped file would navigate the page away from the app.
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("drop", e => e.preventDefault());
 
