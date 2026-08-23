@@ -583,6 +583,14 @@
      wide as "Assign 09–17" and must not wrap to a second line. */
   .libbtn.assign { flex: none; white-space: nowrap; font-size: var(--text-meta); }
 
+  /* One column is where the folder row runs out of width: caret, name, count,
+     first-slot field, "Assign 04–07" and a dissolve, against 335px. The count
+     is the one part that says nothing you cannot get by opening the folder, so
+     it is what goes, and the name gets the space back. */
+  @media (max-width: 899px) {
+    .foldermeta { display: none; }
+  }
+
   /* Which folder a row came out of, for rows shown outside the tree. */
   .libpath {
     flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;

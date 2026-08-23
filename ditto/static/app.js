@@ -249,8 +249,8 @@ function hintText(byslot){
       ? `Slot ${pad2(selected)} selected — click another slot or row to move or swap`
       : `Slot ${pad2(selected)} selected — click a track to fill it`;
   }
-  return "Hover to link map and list · drag a track onto a slot · "
-       + "drag slot to slot to swap";
+  return "Hover to link map and list · a leading number sends a file "
+       + "straight to that slot · drag slot to slot to swap";
 }
 
 /* Drag behaviour for anything that stands for a slot. A map cell and a list row
@@ -538,9 +538,13 @@ function render(s){
   } else {
     // textContent throughout: these strings now carry a track name, and the
     // previous version of this block built one of them with innerHTML.
+    // Where a drop lands is not something to leave the user to infer, now that
+    // it depends on which folder is open.
     setText($("#drophead"), selected != null
       ? `Drop here to fill slot ${pad2(selected)}`
-      : "Drop audio here, or choose a file");
+      : currentFolder !== null
+        ? `Drop audio here — it lands in “${folderName(currentFolder)}”`
+        : "Drop audio here, or choose a file");
     setText($("#dropnote"), hintText(byslot));
   }
 
@@ -744,36 +748,106 @@ async function moveTo(src, dst){
   return r.ok;
 }
 
+/* Does this filename carry a leading slot number?
+
+   The pattern, the stem and the range check mirror web.py's LEADING_NUM and
+   slot_from_name, and the two have to stay in step: this decides which of the
+   two endpoints a dropped file is sent to, and the server decides which slot it
+   then lands in. Duplicating it is the price of splitting the drop here rather
+   than changing what /api/upload means for everyone else. */
+const LEADING_NUM = /^\D*?0*(\d{1,2})(?:\D|$)/;
+function slotFromName(name){
+  const m = LEADING_NUM.exec(name.replace(/\.[^./\\]*$/, ""));
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  const max = (state && state.slot_count) || 99;
+  return n >= 1 && n <= max ? n : null;
+}
+
+/* One multipart POST, with the two answer shapes flattened into one.
+
+   A 413 or a 500 carries no `errors` list, and a dropped connection carries no
+   body at all, so both become an error entry here — otherwise a whole batch can
+   fail and leave the status line on "Uploading…". */
+async function postFiles(url, files, extra){
+  const fd = new FormData();
+  files.forEach(f => fd.append("file", f));
+  Object.entries(extra || {}).forEach(([k, v]) => {
+    if (v !== null && v !== undefined) fd.append(k, v);
+  });
+  try {
+    const r = await fetch(url, {method: "POST", body: fd});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok && !(j.errors && j.errors.length)){
+      return {added: [], errors: [{error: j.error || `Upload failed (${r.status})`}]};
+    }
+    return {added: j.added || [], errors: j.errors || []};
+  } catch {
+    return {added: [], errors: [{error: "Upload failed — check the connection"}]};
+  }
+}
+
+const folderName = id =>
+  ((folders || []).find(f => f.id === id) || {}).name || "the library";
+
+/* Where a dropped file goes.
+
+   Pointing at a slot wins over everything else — that is what the pointing was
+   for. Otherwise a leading number is the only thing that means "put this on the
+   pedal", and every other file goes to the library, into whichever folder is
+   open. The pedal holds about twelve tracks and the card holds as many as you
+   like, so filling slots is a choice rather than what a drop does by default.
+
+   This is a change in what an unnumbered drop does: it used to take the lowest
+   free slot. /api/upload still behaves exactly as documented for anyone calling
+   it directly — the routing moved into the page, not into the contract. */
 async function send(files, start){
   if (!files || !files.length) return;
-  const fd = new FormData();
-  [...files].forEach(f => fd.append("file", f));
-  if (start != null) fd.append("start", start);
-  setText($("#msg"), start != null
-    ? `Uploading to slot ${pad2(start)}…` : "Uploading…");
-  let r;
-  try {
-    r = await fetch("/api/upload", {method:"POST", body:fd});
-  } catch {
+  const list = [...files];
+
+  if (start != null){
+    setText($("#msg"), `Uploading to slot ${pad2(start)}…`);
+    const res = await postFiles("/api/upload", list,
+                                {start, folder_id: currentFolder});
     selected = null;
-    fail("Upload failed — check the connection");
+    reportUpload(res, list.length, 0);
+    // A slot upload creates a library row too. Without this the new track is
+    // missing from the Library card until the next reconnect — in the common
+    // case the five-minute stream rotation.
+    loadLibrary();
     return;
   }
-  const j = await r.json().catch(()=>({}));
+
+  const toPedal = list.filter(f => slotFromName(f.name || "") !== null);
+  const toLib = list.filter(f => slotFromName(f.name || "") === null);
+  setText($("#msg"), "Uploading…");
+  const res = {added: [], errors: []};
+  for (const [url, batch] of [["/api/upload", toPedal], ["/api/library", toLib]]){
+    if (!batch.length) continue;
+    const one = await postFiles(url, batch, {folder_id: currentFolder});
+    res.added.push(...one.added);
+    res.errors.push(...one.errors);
+  }
   selected = null;
-  // A 413 or a 500 carries no `errors` list, so an ok check has to come first
-  // or the message stays on "Uploading…" forever.
-  if (!r.ok && !(j.errors && j.errors.length)){
-    fail(j.error || `Upload failed (${r.status})`);
+  reportUpload(res, toPedal.length, toLib.length);
+  loadLibrary();
+}
+
+/* Errors win the line: a batch that half landed is the case a confirmation
+   would paper over. A pedal upload announces itself through busy and the
+   progress bar, but a library one changes nothing visible in the left pane, so
+   it has to say where the tracks went. */
+function reportUpload(res, nped, nlib){
+  if (res.errors.length){
+    fail(res.errors.map(e => e.name ? `${e.name}: ${e.error}` : e.error).join("; "));
     return;
   }
-  if (j.errors && j.errors.length){
-    fail(j.errors.map(e=>`${e.name}: ${e.error}`).join("; "));
-  }
-  // A slot upload creates a library row too. Without this the new track is
-  // missing from the Library card until the next reconnect — in the common
-  // case the five-minute stream rotation.
-  loadLibrary();
+  if (!nlib) return;
+  const where = currentFolder !== null ? `“${folderName(currentFolder)}”`
+                                       : "the library";
+  const n = res.added.length - nped;
+  say(`${n} track${n === 1 ? "" : "s"} added to ${where}`
+      + (nped ? ` · ${nped} to the pedal` : ""));
 }
 
 /* Arrow-key movement inside the slot grid.
@@ -1969,24 +2043,10 @@ async function forget(r, force){
 
 async function sendToLibrary(files){
   if (!files || !files.length) return;
-  const fd = new FormData();
-  [...files].forEach(f => fd.append("file", f));
+  const list = [...files];
   setText($("#msg"), "Adding to the library…");
-  let r, j;
-  try {
-    r = await fetch("/api/library", {method:"POST", body:fd});
-    j = await r.json().catch(()=>({}));
-  } catch {
-    fail("Upload failed — check the connection");
-    return;
-  }
-  if (!r.ok && !(j.errors && j.errors.length)){
-    fail(j.error || `Upload failed (${r.status})`);
-    return;
-  }
-  if (j.errors && j.errors.length){
-    fail(j.errors.map(e => `${e.name}: ${e.error}`).join("; "));
-  }
+  const res = await postFiles("/api/library", list, {folder_id: currentFolder});
+  reportUpload(res, 0, list.length);
   loadLibrary();
 }
 
