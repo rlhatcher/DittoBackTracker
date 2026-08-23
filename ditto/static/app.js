@@ -1193,6 +1193,15 @@ async function loadFolders(){
     const changed = JSON.stringify(rows) !== JSON.stringify(folders);
     folders = rows;
     if (changed) folderRev++;
+    // A folder dissolved in another tab would otherwise stay the upload target
+    // here, and _form_folder fails the whole request on a folder that has gone
+    // — so a drop would 404 with nothing landing.
+    if (currentFolder !== null && !rows.some(f => f.id === currentFolder)){
+      currentFolder = null;
+      // The drop zone names it, and the drop zone is written from the snapshot
+      // — which folders do not ride, so it has to be told.
+      if (state) render(state);
+    }
   } catch {
     return;                             // a later refetch will put it right
   }
