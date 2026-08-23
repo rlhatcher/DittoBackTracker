@@ -74,6 +74,13 @@ let pickedTrack = null;
    whole library for that long would stop the other rows tracking the pedal. */
 let slotDraft = {};
 
+/* How many times each field has been edited, so a late failure can tell whether
+   the field it wants to roll back is still the one it was sent for. A commit
+   deletes the draft and then waits on the network; the user can be typing again
+   before the answer comes. Without this, a slow refusal wipes what they have
+   since typed. */
+let slotEdit = {};
+
 /* The only thing that writes .sel and .linked, on either surface.
 
    Selection and hover are the two pieces of state both the map and the list
@@ -1191,7 +1198,10 @@ function slotField(r, slots){
     ? `Type a slot number to put “${r.name}” on the pedal`
     : `“${r.name}” is in slot ${pad2(lowest)} — type another to move it, or clear it to take it off`;
   f.setAttribute("aria-label", `Slot for ${r.name}`);
-  f.oninput = () => { slotDraft[r.source_hash] = f.value; };
+  f.oninput = () => {
+    slotDraft[r.source_hash] = f.value;
+    slotEdit[r.source_hash] = (slotEdit[r.source_hash] || 0) + 1;
+  };
   f.onkeydown = e => {
     e.stopPropagation();
     if (e.key === "Enter"){ e.preventDefault(); f.blur(); }
@@ -1227,6 +1237,10 @@ async function commitSlotField(r, slots){
   const raw = (slotDraft[r.source_hash] ?? "").trim();
   if (slotDraft[r.source_hash] === undefined) return;    // nothing was typed
   delete slotDraft[r.source_hash];
+  // Whose edit this is. Anything awaited below must check it before rolling the
+  // field back, or it will roll back somebody else's typing.
+  const gen = slotEdit[r.source_hash];
+  const stillMine = () => slotEdit[r.source_hash] === gen;
   const lowest = slots.length ? Math.min(...slots) : null;
   const max = (state && state.slot_count) || 99;
 
@@ -1260,9 +1274,9 @@ async function commitSlotField(r, slots){
     // One call, not assign-then-delete: two calls can fail between them and
     // leave the track in both slots. move already does move-or-swap, which is
     // also the better reading of "vacating whatever slot it held".
-    if (!await moveTo(lowest, n)) revertSlotField(r);
+    if (!await moveTo(lowest, n) && stillMine()) revertSlotField(r);
   } else {
-    if (!await assignToSlot(r, n)) revertSlotField(r);
+    if (!await assignToSlot(r, n) && stillMine()) revertSlotField(r);
   }
 }
 
