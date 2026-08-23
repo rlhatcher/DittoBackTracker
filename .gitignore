@@ -18,3 +18,8 @@ trash/
 .Spotlight-V100
 .Trashes
 .python-version-ci
+
+# The designer's handoff for the main page: a prototype and two 500KB
+# screenshots, kept locally as a reference. The device updates itself by
+# pulling this repo, so it is not weight every Pi clone should carry.
+docs/design_handoff_dittobacktracker_main/

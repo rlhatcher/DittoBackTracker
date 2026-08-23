@@ -1338,6 +1338,32 @@ def test_a_start_that_is_not_a_slot_number_is_400(client, start):
     assert db.all_slots() == []
 
 
+def test_a_start_may_be_the_string_the_user_typed(client):
+    """The page sends the field's text rather than a number, because converting
+    it turns junk into NaN, JSON writes NaN as null, and null here means
+    "wherever there is room" — a junk start would fill from the next free slot
+    instead of being refused."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    rv = client.post(f"/api/folders/{f['id']}/assign", json={"start": "09"})
+
+    assert rv.status_code == 201
+    assert rv.get_json()["start"] == 9
+
+
+def test_a_null_start_means_wherever_there_is_room(client):
+    """Absent and null are the same thing here, unlike folder_id elsewhere:
+    there is no third state for a start slot to be in."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    body = client.post(f"/api/folders/{f['id']}/assign",
+                       json={"start": None}).get_json()
+
+    assert body["start"] == 1
+
+
 def test_a_cleared_start_field_means_wherever_there_is_room(client):
     """`?start=` is what a cleared first-slot field renders."""
     f = mkfolder(client, "Standards")

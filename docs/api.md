@@ -456,7 +456,10 @@ nothing was placed. Whatever was in a slot moves to the trash, as with a single
 assign.
 
 `201`, `404` if there is no such folder, `400` if `start` is not a slot number
-or is out of range. `?start=` with nothing after it means the same as no
+or is out of range. `start` may be a number or a numeric string — the page sends
+what was typed rather than converting it, because a conversion turns junk into
+`null`, and `null` here means "wherever there is room" rather than "refuse
+this". `?start=` with nothing after it means the same as no
 `start` at all, because that is what a cleared first-slot field renders; an
 empty string in the JSON body is junk and is refused.
 

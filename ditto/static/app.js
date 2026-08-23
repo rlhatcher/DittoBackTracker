@@ -1815,8 +1815,13 @@ function assignControls(f){
    afterwards is read from it rather than from what the label said before. */
 async function fillFolder(f){
   const raw = (folderStart[f.id] ?? "").trim();
+  // What was typed, not Number(it). JSON.stringify writes NaN as null, and null
+  // is how this API says "wherever there is room" — so a junk start would have
+  // filled from the next free slot instead of being refused. The button is
+  // normally disabled by then, but refreshPlans is a round trip and a click
+  // inside that window still carries the old plan's enabled state.
   const r = await api(`/api/folders/${f.id}/assign`,
-                      jsonBody(raw === "" ? {} : {start: Number(raw)}));
+                      jsonBody(raw === "" ? {} : {start: raw}));
   if (!r.ok){ failFrom(r, "Could not fill the slots"); return; }
   const p = r.body;
   // The pending undo restores one slot. A fill has just overwritten several,
