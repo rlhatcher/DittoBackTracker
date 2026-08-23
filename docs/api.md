@@ -93,6 +93,13 @@ Multipart. One or more `file` parts. This is what the UI uses.
 |---|---|
 | `file` | Repeatable |
 | `start` | Optional, 1–`slot_count` (99 today). Files fill consecutive slots from here |
+| `folder_id` | Optional. Files the uploaded tracks in this folder. Also accepted by `POST /api/library` and `POST /api/slots/<n>` |
+
+Both targeting fields are checked before any file is taken, so a request aimed
+somewhere that does not exist lands nothing rather than half a batch. An unknown
+`folder_id` is `404` for the whole request rather than an error per file: every
+file would fail identically, and the client's tree is stale, which is one
+problem and not N.
 
 Without `start`, a leading number in the filename picks the slot
 (`07 Blue Bossa.mp3` → slot 7). Files without one, or whose number is taken,
@@ -227,8 +234,29 @@ Every track on the device, newest first.
 
 ```json
 [ { "source_hash": "b9ecf8c94d007de0a5ae", "name": "Blue Bossa",
-    "duration": 311.0, "added": 1786070717.31 } ]
+    "duration": 311.0, "added": 1786070717.31,
+    "folder_id": null, "position": 0 } ]
 ```
+
+**This endpoint returns newest first**, as it always has. `position` is not its
+order; see tree order below.
+
+`folder_id` is the folder holding the track, or `null` for the top level. A
+track whose folder has gone reads as `null` too, so it surfaces at the top level
+rather than nowhere.
+
+### Tree order
+
+A second, derived order, and not the order of any response body. It is how the
+client should render the tree, and how a folder's contents are walked
+server-side:
+
+> Depth-first pre-order: a folder's own tracks, ordered by
+> `(position, added, source_hash)`, then its subfolders in `(position, id)`
+> order, each expanded the same way.
+
+Both places use the same definition, so the order the tree draws in is the order
+a folder assign writes in.
 
 The whole list, unpaginated: a few hundred rows is a small response, and
 searching and sorting are the client's business. Deliberately **not** part of
@@ -260,11 +288,26 @@ the whole request was unusable (no `file` part at all).
 
 ## PATCH /api/library/&lt;hash&gt;
 
-Rename a track. Body `{"name": "..."}`; 1–200 characters after trimming.
+Rename a track, file it in a folder, or both.
 
-Returns the updated row. `400` for an empty or overlong name, `404` if the
-track is unknown. The new name appears in the slot list, the grid tooltips and
-the print view immediately — there is only one copy of it.
+```json
+{ "name": "Blue Bossa", "folder_id": 3 }
+```
+
+Both fields optional, at least one required. `name` is 1–200 characters after
+trimming. `folder_id: null` files the track at the top level, which is why
+absent and `null` cannot mean the same thing. Returns the updated row.
+
+| Status | Meaning |
+|---|---|
+| `400` | Nothing to change, an empty or overlong name, or a `folder_id` that is not an integer or `null` |
+| `404` | No such track, or no such folder |
+
+The folder is checked before anything is written, so a request naming a missing
+folder does not leave a rename applied.
+
+The new name appears in the slot list, the grid tooltips and the print view
+immediately — there is only one copy of it.
 
 ---
 
@@ -294,6 +337,93 @@ slots are cleared regardless, and reporting an empty result would hide it.
 ```json
 { "error": "not found", "cleared": [3] }
 ```
+
+---
+
+## GET /api/folders
+
+Every folder on the device, flat. The client builds the tree.
+
+```json
+[ { "id": 1, "name": "Standards", "parent_id": null, "position": 0,
+    "created": 1786070001.0 } ]
+```
+
+`parent_id` is `null` for a top-level folder. Ordered top level first, then by
+`parent_id`, `position`, `id`.
+
+No counts or durations. The client already holds every track with its duration
+and its folder from `GET /api/library`, so folding a subtree costs one pass and
+no round trip, and it stays correct while the search box is filtering. Computing
+it here would be a recursive query per render, and a second source of truth that
+can disagree with the rows on screen.
+
+Folders are deliberately **not** in the state snapshot, for the same reason the
+library is not: that object is pushed several times a second during a conversion
+and has to stay small. Refetch this and `/api/library` when the event stream
+connects.
+
+---
+
+## POST /api/folders
+
+```json
+{ "name": "Standards", "parent_id": null }
+```
+
+`parent_id` is optional and may be `null` for the top level. `201` with the new
+row.
+
+| Status | Meaning |
+|---|---|
+| `400` | Empty name, a name over 200 characters, a `parent_id` that is not an integer or `null`, or a nesting depth past `MAX_FOLDER_DEPTH` (8) |
+| `404` | `parent_id` names no folder |
+
+---
+
+## PATCH /api/folders/&lt;id&gt;
+
+```json
+{ "name": "Set list", "parent_id": 4 }
+```
+
+Both fields optional, at least one required. A body with neither is `400`.
+`parent_id: null` moves the folder to the top level, which is why absent and
+`null` cannot mean the same thing. A move appends the folder to the end of its
+new parent. Returns the updated row.
+
+| Status | Meaning |
+|---|---|
+| `400` | Nothing to change, a bad name, a bad `parent_id`, a move into the folder's own subtree, or a move that would push the subtree past the depth limit |
+| `404` | No such folder, or no such new parent |
+
+The depth limit applies to the deepest leaf after the move, not to the folder
+being moved, so a shallow move of a tall subtree can be refused.
+
+---
+
+## DELETE /api/folders/&lt;id&gt;[?force]
+
+Dissolve a folder. **Never deletes a track**, under any flag. A library row is
+the only thing keeping its audio alive, and a folder is a grouping rather than a
+container.
+
+Without `force`, a folder holding anything is refused so the client can say what
+would move:
+
+```json
+{ "error": "not empty", "folders": [4, 5], "tracks": 9 }
+```
+
+With `force`, the contents are promoted to the folder's own parent and appended
+there:
+
+```json
+{ "ok": true, "to": 1, "promoted": { "folders": [4, 5], "tracks": 9 } }
+```
+
+`to` is the folder the contents moved to, or `null` for the top level. `404` if
+there is no such folder.
 
 ---
 

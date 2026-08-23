@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 from flask import (Flask, Response, abort, jsonify, request, send_file,
                    send_from_directory, stream_with_context)
@@ -93,6 +93,58 @@ def _json_str(body, field: str):
     return value if isinstance(value, str) else None
 
 
+def _json_name(body) -> "tuple[Optional[str], Optional[tuple]]":
+    """A trimmed, length-checked name, or the error response to return.
+
+    Same rules as a track rename, because a folder in the tree and a track in a
+    row sit next to each other and there is no reason one may be longer.
+    """
+    name = (_json_str(body, "name") or "").strip()
+    if not name:
+        return None, (jsonify(error="name must not be empty"), 400)
+    if len(name) > MAX_NAME_LEN:
+        return None, (jsonify(
+            error=f"name must be {MAX_NAME_LEN} characters or fewer"), 400)
+    return name, None
+
+
+def _json_folder_ref(body, field: str) -> "tuple[bool, Optional[int]]":
+    """(supplied, value) for a field naming a folder, or null for the top level.
+
+    Absent and null mean different things — leave it where it is, or move it to
+    the top level — so a caller cannot express one with the other, and the
+    caller of this cannot collapse them either.
+    """
+    if not isinstance(body, dict) or field not in body:
+        return False, None
+    v = body[field]
+    if v is None:
+        return True, None
+    # bool is an int subclass, and True would silently mean folder 1.
+    return (True, v) if isinstance(v, int) and not isinstance(v, bool) else (False, None)
+
+
+def _form_folder():
+    """The optional folder_id form field on the three ingest routes.
+
+    Returns (folder_id, error_response). An unknown folder fails the whole
+    request rather than each file in it: every file would fail identically, and
+    the client's tree is stale, which is one problem and not N. 404 rather than
+    400 to match POST /api/slots/<n>/assign, where naming a track that does not
+    exist is already a 404.
+    """
+    raw = request.form.get("folder_id")
+    if raw is None or raw == "":
+        return None, None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None, (jsonify(error="folder_id must be a folder id"), 400)
+    if db.folder_get(n) is None:
+        return None, (jsonify(error="no such folder"), 404)
+    return n, None
+
+
 class IngestError(NamedTuple):
     """Why one file could not be taken, and what that means over HTTP.
 
@@ -137,6 +189,29 @@ def _ingest(f, name: str, store):
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _file_row(row, folder_id):
+    """File a freshly ingested track, if the request named a folder.
+
+    Done after the ingest rather than inside it so the three routes and the
+    service keep the shapes they already have: a slot upload returns a slot row
+    and a library upload returns a library row, and both carry the hash.
+
+    Returns the row as it now stands, re-read rather than assumed. The folder
+    was checked before the file was taken, but a forced delete elsewhere can
+    commit while the upload is being written, and then the filing quietly does
+    nothing. Reporting the requested folder in that case would be the response
+    describing a state the database is not in.
+    """
+    if folder_id is None or not row:
+        return row
+    h = row.get("source_hash")
+    if not h:
+        return row
+    db.library_set_folder(h, folder_id)
+    stored = db.library_get(h)
+    return dict(row, folder_id=stored["folder_id"]) if stored else row
 
 
 def create_app(service: Service) -> Flask:
@@ -210,9 +285,14 @@ def create_app(service: Service) -> Flask:
         if Path(name).suffix.lower() not in config.AUDIO_SUFFIXES:
             return jsonify(error=f"{Path(name).suffix} is not an audio file"), 400
 
+        folder, ferr = _form_folder()
+        if ferr:
+            return ferr
+
         row, err = _ingest(f, name, lambda p, stem: service.upload(slot, p, stem))
         if err:
             return jsonify(error=err.message), err.status
+        row = _file_row(row, folder)
         return jsonify(row), 201
 
     @app.post("/api/upload")
@@ -231,6 +311,13 @@ def create_app(service: Service) -> Flask:
         start = request.form.get("start", type=int)
         if start is not None and not (1 <= start <= config.SLOTS):
             return jsonify(error=f"start must be 1-{config.SLOTS}"), 400
+
+        # Both targeting fields are checked before any file is taken, so a
+        # request aimed at somewhere that does not exist lands nothing at all
+        # rather than half a batch.
+        folder, ferr = _form_folder()
+        if ferr:
+            return ferr
 
         # A slot holding a recorded LOOP.WAV counts as taken for the purposes
         # of auto-assignment. An explicitly targeted slot may still be used —
@@ -302,7 +389,7 @@ def create_app(service: Service) -> Flask:
             if err:
                 errors.append({"name": name, "error": err.message})
             else:
-                results.append(row)
+                results.append(_file_row(row, folder))
 
         return jsonify(added=results, errors=errors), 201
 
@@ -417,6 +504,9 @@ def create_app(service: Service) -> Flask:
         files = request.files.getlist("file")
         if not files:
             return jsonify(error="no files"), 400
+        folder, ferr = _form_folder()
+        if ferr:
+            return ferr
         added, errors = [], []
         for f in files:
             name = f.filename or "track"
@@ -432,23 +522,43 @@ def create_app(service: Service) -> Flask:
             if err:
                 errors.append({"name": name, "error": err.message})
             else:
-                added.append(row)
+                added.append(_file_row(row, folder))
         return jsonify(added=added, errors=errors), 201
 
     @app.patch("/api/library/<h>")
-    def library_rename(h: str):
+    def library_edit(h: str):
+        """Rename a track, file it in a folder, or both in one call.
+
+        Extended rather than given a second route: folder_id is a column of the
+        row this already edits and returns, and the hash validation and the
+        cross-site guard are already here. Doing both at once is also what a
+        "new folder from these tracks" gesture wants.
+        """
         if not HASH_RE.match(h):
             return jsonify(error="not found"), 404
-        name = (_json_str(request.get_json(silent=True), "name") or "").strip()
-        if not name:
-            return jsonify(error="name must not be empty"), 400
-        if len(name) > MAX_NAME_LEN:
-            return jsonify(error=f"name must be {MAX_NAME_LEN} characters or "
-                                 f"fewer"), 400
-        row = service.rename(h, name)
-        if row is None:
+        body = request.get_json(silent=True)
+        has_name = isinstance(body, dict) and "name" in body
+        supplied, folder = _json_folder_ref(body, "folder_id")
+        if isinstance(body, dict) and "folder_id" in body and not supplied:
+            return jsonify(error="folder_id must be a folder id or null"), 400
+        if not has_name and not supplied:
+            return jsonify(error="nothing to change"), 400
+        if db.library_get(h) is None:
             return jsonify(error="not found"), 404
-        return jsonify(row)
+        # Checked before anything is written, so a bad folder cannot leave the
+        # rename applied and the filing not.
+        if folder is not None and db.folder_get(folder) is None:
+            return jsonify(error="no such folder"), 404
+
+        if has_name:
+            name, err = _json_name(body)
+            if err:
+                return err
+            if service.rename(h, name) is None:
+                return jsonify(error="not found"), 404
+        if supplied:
+            db.library_set_folder(h, folder)
+        return jsonify(db.library_get(h))
 
     @app.delete("/api/library/<h>")
     def library_forget(h: str):
@@ -469,6 +579,96 @@ def create_app(service: Service) -> Flask:
             # assignments changed underneath it.
             return jsonify(error="not found", cleared=slots), 404
         return jsonify(ok=True, cleared=slots)
+
+    # -- folders ---------------------------------------------------------
+    #
+    # These talk to db directly rather than through the service. There is no
+    # device I/O to admit and nothing to queue, and folders do not ride the
+    # state snapshot, so calling library_changed() would rebuild and broadcast a
+    # full snapshot that says nothing new. They also keep working while the
+    # device is shutting down, for the same reason a rename does: one row
+    # changes and the pedal is never touched.
+
+    @app.get("/api/folders")
+    def folders():
+        """Every folder, flat. The client builds the tree and folds the counts.
+
+        No counts or durations here on purpose. The browser already holds every
+        track with its duration and its folder, so summing a subtree is one pass
+        with no round trip, and it stays right when the search box filters the
+        rows. Aggregating here would be a recursive CTE per render on a Pi Zero,
+        and a second source of truth for "16 tracks, 7 folders" that can
+        disagree with what is actually on screen.
+        """
+        return jsonify(db.folders_all())
+
+    @app.post("/api/folders")
+    def folder_create():
+        body = request.get_json(silent=True)
+        name, err = _json_name(body)
+        if err:
+            return err
+        supplied, parent = _json_folder_ref(body, "parent_id")
+        if isinstance(body, dict) and "parent_id" in body and not supplied:
+            return jsonify(error="parent_id must be a folder id or null"), 400
+        if parent is not None and db.folder_get(parent) is None:
+            return jsonify(error="no such folder"), 404
+        row = db.folder_add(name, parent)
+        if row is None:
+            # folder_add re-checks the parent under its own lock, so a None here
+            # with a parent that existed a moment ago is the depth limit.
+            return jsonify(
+                error=f"folders may nest {config.MAX_FOLDER_DEPTH} deep"), 400
+        return jsonify(row), 201
+
+    @app.patch("/api/folders/<int:folder_id>")
+    def folder_update(folder_id: int):
+        body = request.get_json(silent=True)
+        has_name = isinstance(body, dict) and "name" in body
+        supplied, parent = _json_folder_ref(body, "parent_id")
+        if isinstance(body, dict) and "parent_id" in body and not supplied:
+            return jsonify(error="parent_id must be a folder id or null"), 400
+        if not has_name and not supplied:
+            return jsonify(error="nothing to change"), 400
+        name = None
+        if has_name:
+            name, err = _json_name(body)
+            if err:
+                return err
+
+        # One call, so a rejected move cannot leave the rename applied. Doing
+        # them in sequence answered 404 for {"name": "x", "parent_id": 999}
+        # with the folder already renamed.
+        outcome = db.folder_edit(folder_id, name=name, parent_id=parent,
+                                 move=supplied)
+        if outcome == "unknown":
+            return jsonify(error="no such folder"), 404
+        if outcome == "cycle":
+            return jsonify(
+                error="a folder cannot be moved into its own subtree"), 400
+        if outcome == "too deep":
+            return jsonify(
+                error=f"folders may nest {config.MAX_FOLDER_DEPTH} deep"), 400
+        return jsonify(db.folder_get(folder_id))
+
+    @app.delete("/api/folders/<int:folder_id>")
+    def folder_remove(folder_id: int):
+        """Remove a folder. Never removes a track.
+
+        A library row is the only thing keeping its audio alive, so this is a
+        grouping being dissolved, not a container being emptied. `?force`
+        promotes the contents to the folder's own parent; without it a folder
+        holding anything is refused so the client can say what would move.
+        """
+        force = "force" in request.args
+        r = db.folder_delete(folder_id, force=force)
+        if r is None:
+            return jsonify(error="no such folder"), 404
+        if not r["deleted"]:
+            return jsonify(error="not empty", folders=r["folders"],
+                           tracks=r["tracks"]), 409
+        return jsonify(ok=True, to=r["to"],
+                       promoted={"folders": r["folders"], "tracks": r["tracks"]})
 
     @app.get("/api/library/<h>/audio")
     def library_audio(h: str):

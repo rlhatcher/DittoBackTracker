@@ -8,7 +8,9 @@ still referenced) lives in the service, not the route. The `service`, `app` and
 """
 
 import io
+import os
 import threading
+import time
 
 import pytest
 
@@ -650,3 +652,406 @@ def test_a_single_upload_of_a_bad_file_is_still_a_400(app, client, monkeypatch):
     rv = client.post("/api/slots/4", content_type="multipart/form-data",
                      data={"file": _audio()})
     assert rv.status_code == 400
+
+
+# --- folders ----------------------------------------------------------------
+
+def mkfolder(client, name, parent=None):
+    rv = client.post("/api/folders", json={"name": name, "parent_id": parent})
+    assert rv.status_code == 201, rv.get_json()
+    return rv.get_json()
+
+
+def test_folders_start_empty(client):
+    assert client.get("/api/folders").get_json() == []
+
+
+def test_a_new_folder_comes_back_with_its_id(client):
+    body = mkfolder(client, "Standards")
+    assert body["name"] == "Standards"
+    assert body["parent_id"] is None
+    assert body["id"] > 0
+
+
+def test_a_folder_can_be_created_inside_another(client):
+    top = mkfolder(client, "Standards")
+    kid = mkfolder(client, "Ballads", top["id"])
+    assert kid["parent_id"] == top["id"]
+    assert len(client.get("/api/folders").get_json()) == 2
+
+
+def test_creating_a_folder_under_an_unknown_parent_is_404(client):
+    rv = client.post("/api/folders", json={"name": "Orphan", "parent_id": 999})
+    assert rv.status_code == 404
+    assert client.get("/api/folders").get_json() == []
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"name": ""}, {"name": "   "}, {"name": 42}, {"name": None},
+    {"name": "x" * 201},
+])
+def test_a_folder_name_must_be_usable(client, body):
+    assert client.post("/api/folders", json=body).status_code == 400
+
+
+@pytest.mark.parametrize("parent", ["1", 1.5, True, [], {}])
+def test_a_parent_id_that_is_not_a_folder_id_is_400(client, parent):
+    """True is an int in Python and would quietly mean folder 1."""
+    rv = client.post("/api/folders", json={"name": "F", "parent_id": parent})
+    assert rv.status_code == 400
+
+
+def test_folders_nest_only_so_deep(client):
+    parent = None
+    for i in range(config.MAX_FOLDER_DEPTH):
+        parent = mkfolder(client, f"L{i}", parent)["id"]
+    rv = client.post("/api/folders", json={"name": "too deep", "parent_id": parent})
+    assert rv.status_code == 400
+    assert "nest" in rv.get_json()["error"]
+
+
+def test_renaming_a_folder_returns_the_updated_row(client):
+    f = mkfolder(client, "Standards")
+    rv = client.patch(f"/api/folders/{f['id']}", json={"name": "Set list"})
+    assert rv.status_code == 200
+    assert rv.get_json()["name"] == "Set list"
+
+
+def test_renaming_an_unknown_folder_is_404(client):
+    assert client.patch("/api/folders/999", json={"name": "X"}).status_code == 404
+
+
+def test_a_patch_with_nothing_to_change_is_400(client):
+    f = mkfolder(client, "Standards")
+    assert client.patch(f"/api/folders/{f['id']}", json={}).status_code == 400
+
+
+def test_a_patch_can_rename_and_move_in_one_call(client):
+    top = mkfolder(client, "Top")
+    f = mkfolder(client, "Standards")
+
+    rv = client.patch(f"/api/folders/{f['id']}",
+                      json={"name": "Set list", "parent_id": top["id"]})
+
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["name"] == "Set list"
+    assert body["parent_id"] == top["id"]
+
+
+def test_a_folder_can_be_moved_back_to_the_top_level(client):
+    """null and absent mean different things here: move to the top, or leave it
+    where it is."""
+    top = mkfolder(client, "Top")
+    kid = mkfolder(client, "Kid", top["id"])
+
+    rv = client.patch(f"/api/folders/{kid['id']}", json={"parent_id": None})
+
+    assert rv.status_code == 200
+    assert rv.get_json()["parent_id"] is None
+
+
+def test_moving_a_folder_into_its_own_subtree_is_400_and_changes_nothing(client):
+    top = mkfolder(client, "Top")
+    kid = mkfolder(client, "Kid", top["id"])
+
+    rv = client.patch(f"/api/folders/{top['id']}", json={"parent_id": kid["id"]})
+
+    assert rv.status_code == 400
+    assert "subtree" in rv.get_json()["error"]
+    assert client.get("/api/folders").get_json()[0]["parent_id"] is None
+
+
+def test_deleting_an_empty_folder_succeeds(client):
+    f = mkfolder(client, "Empty")
+    rv = client.delete(f"/api/folders/{f['id']}")
+    assert rv.status_code == 200
+    assert rv.get_json()["ok"] is True
+    assert client.get("/api/folders").get_json() == []
+
+
+def test_deleting_an_unknown_folder_is_404(client):
+    assert client.delete("/api/folders/999").status_code == 404
+
+
+def test_deleting_a_folder_that_holds_tracks_is_409_and_changes_nothing(client):
+    f = mkfolder(client, "Standards")
+    seed(H1)
+    db.library_set_folder(H1, f["id"])
+
+    rv = client.delete(f"/api/folders/{f['id']}")
+
+    assert rv.status_code == 409
+    body = rv.get_json()
+    assert body["error"] == "not empty" and body["tracks"] == 1
+    assert client.get("/api/folders").get_json() != []
+
+
+def test_a_forced_delete_promotes_the_contents_and_says_where(client):
+    top = mkfolder(client, "Top")
+    mid = mkfolder(client, "Mid", top["id"])
+    leaf = mkfolder(client, "Leaf", mid["id"])
+    seed(H1)
+    db.library_set_folder(H1, mid["id"])
+
+    rv = client.delete(f"/api/folders/{mid['id']}?force")
+
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["to"] == top["id"]
+    assert body["promoted"] == {"folders": [leaf["id"]], "tracks": 1}
+    assert db.library_get(H1)["folder_id"] == top["id"]
+
+
+def test_a_forced_folder_delete_leaves_the_source_file_alone(client, service):
+    """The one that would destroy something. A library row is the only thing
+    keeping its audio in sources/, so this runs the collector afterwards rather
+    than trusting that the row is still there."""
+    f = mkfolder(client, "Standards")
+    seed(H1, "Blue Bossa")
+    db.library_set_folder(H1, f["id"])
+    source = config.SOURCES / f"{H1}.mp3"
+    assert source.exists()
+
+    client.delete(f"/api/folders/{f['id']}?force")
+    # The collector spares recent files, so age it past the grace period first.
+    old = time.time() - config.GC_GRACE_SECS - 60
+    os.utime(source, (old, old))
+    service._gc()
+
+    assert source.exists(), "the folder delete released the audio"
+    assert db.library_get(H1) is not None
+
+
+def test_a_library_row_carries_its_folder(client):
+    f = mkfolder(client, "Standards")
+    seed(H1)
+    db.library_set_folder(H1, f["id"])
+
+    row = client.get("/api/library").get_json()[0]
+
+    assert row["folder_id"] == f["id"]
+    assert row["position"] == 0
+
+
+def test_the_library_still_lists_newest_first(client):
+    """Pinned because the folder work must not reorder it."""
+    seed(H1, "Older")
+    seed(H2, "Newer")
+    assert [r["name"] for r in client.get("/api/library").get_json()] == \
+        ["Newer", "Older"]
+
+
+def test_the_snapshot_does_not_carry_the_folder_tree(client):
+    """It is pushed several times a second during a conversion and has to stay
+    small. Same reasoning that keeps the library out of it."""
+    mkfolder(client, "Standards")
+    snap = client.get("/api/state").get_json()
+    assert "folders" not in snap
+
+
+@pytest.mark.parametrize("method,path", [
+    ("post", "/api/folders"),
+    ("patch", "/api/folders/1"),
+    ("delete", "/api/folders/1"),
+])
+def test_folder_mutations_are_covered_by_the_cross_site_guard(client, method, path):
+    rv = getattr(client, method)(path, headers={"Origin": "http://evil.example"})
+    assert rv.status_code == 403
+
+
+# --- filing tracks ----------------------------------------------------------
+
+def test_a_patch_can_file_a_track(client):
+    f = mkfolder(client, "Standards")
+    seed(H1, "Blue Bossa")
+
+    rv = client.patch(f"/api/library/{H1}", json={"folder_id": f["id"]})
+
+    assert rv.status_code == 200
+    assert rv.get_json()["folder_id"] == f["id"]
+
+
+def test_filing_a_track_does_not_rename_it(client):
+    f = mkfolder(client, "Standards")
+    seed(H1, "Blue Bossa")
+
+    client.patch(f"/api/library/{H1}", json={"folder_id": f["id"]})
+
+    assert db.library_get(H1)["name"] == "Blue Bossa"
+
+
+def test_a_patch_can_rename_and_file_in_one_call(client):
+    f = mkfolder(client, "Standards")
+    seed(H1, "Before")
+
+    rv = client.patch(f"/api/library/{H1}",
+                      json={"name": "After", "folder_id": f["id"]})
+
+    body = rv.get_json()
+    assert body["name"] == "After"
+    assert body["folder_id"] == f["id"]
+
+
+def test_a_track_can_be_filed_back_to_the_top_level(client):
+    f = mkfolder(client, "Standards")
+    seed(H1)
+    db.library_set_folder(H1, f["id"])
+
+    rv = client.patch(f"/api/library/{H1}", json={"folder_id": None})
+
+    assert rv.status_code == 200
+    assert rv.get_json()["folder_id"] is None
+
+
+def test_filing_into_an_unknown_folder_is_404_and_changes_nothing(client):
+    seed(H1, "Before")
+
+    rv = client.patch(f"/api/library/{H1}",
+                      json={"name": "After", "folder_id": 999})
+
+    assert rv.status_code == 404
+    assert db.library_get(H1)["name"] == "Before", "the rename must not survive"
+
+
+@pytest.mark.parametrize("folder", ["1", 1.5, True, [], {}])
+def test_a_folder_id_that_is_not_a_folder_id_is_400(client, folder):
+    seed(H1)
+    rv = client.patch(f"/api/library/{H1}", json={"folder_id": folder})
+    assert rv.status_code == 400
+
+
+def test_a_patch_with_neither_a_name_nor_a_folder_is_400(client):
+    seed(H1)
+    assert client.patch(f"/api/library/{H1}", json={}).status_code == 400
+
+
+def test_filing_still_works_while_the_device_is_ending(client, service):
+    """One row changes and the pedal is never touched, so this is not work the
+    shutdown has to refuse — the same reasoning as a rename."""
+    f = mkfolder(client, "Standards")
+    seed(H1)
+    service.ending = True
+
+    rv = client.patch(f"/api/library/{H1}", json={"folder_id": f["id"]})
+
+    assert rv.status_code == 200
+
+
+def upload(client, path, name="t.mp3", **form):
+    return client.post(path, data={"file": (io.BytesIO(b"ID3 pretend"), name), **form},
+                       content_type="multipart/form-data")
+
+
+def test_a_library_upload_files_its_track_in_the_named_folder(client, monkeypatch):
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+    f = mkfolder(client, "Standards")
+
+    rv = upload(client, "/api/library", folder_id=str(f["id"]))
+
+    assert rv.status_code == 201
+    added = rv.get_json()["added"]
+    assert len(added) == 1
+    assert db.library_get(added[0]["source_hash"])["folder_id"] == f["id"]
+
+
+def test_an_upload_with_no_folder_lands_at_the_top_level(client, monkeypatch):
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+
+    rv = upload(client, "/api/library")
+
+    h = rv.get_json()["added"][0]["source_hash"]
+    assert db.library_get(h)["folder_id"] is None
+
+
+def test_a_slot_upload_files_its_track_too(client, monkeypatch):
+    """The track reaches the library either way, so it should be filable either
+    way."""
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+    f = mkfolder(client, "Standards")
+
+    rv = upload(client, "/api/slots/3", folder_id=str(f["id"]))
+
+    assert rv.status_code == 201
+    assert db.library_get(rv.get_json()["source_hash"])["folder_id"] == f["id"]
+
+
+@pytest.mark.parametrize("path", ["/api/library", "/api/upload", "/api/slots/3"])
+def test_an_upload_to_an_unknown_folder_lands_nothing(client, monkeypatch, path):
+    """The whole request fails, not each file in it. Every file would fail the
+    same way, and a half-applied batch is worse than a refused one.
+
+    probe is stubbed so the file *would* be accepted. Without that, nothing
+    lands because the bytes are not audio, and the test passes whether the
+    folder is checked before the ingest or after it.
+    """
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+
+    rv = upload(client, path, folder_id="999")
+
+    assert rv.status_code == 404
+    assert db.library_all() == [], "a refused request must not leave a track behind"
+    assert db.all_slots() == []
+
+
+@pytest.mark.parametrize("path", ["/api/library", "/api/upload", "/api/slots/3"])
+def test_an_upload_with_a_junk_folder_id_is_400(client, monkeypatch, path):
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+
+    rv = upload(client, path, folder_id="not-a-number")
+
+    assert rv.status_code == 400
+    assert db.library_all() == []
+
+
+def test_a_rejected_move_does_not_rename_the_folder(client):
+    """The 404 arrives after the rename would have been written, if the two were
+    separate calls."""
+    f = mkfolder(client, "Before")
+
+    rv = client.patch(f"/api/folders/{f['id']}",
+                      json={"name": "After", "parent_id": 999})
+
+    assert rv.status_code == 404
+    assert db.folder_get(f["id"])["name"] == "Before"
+
+
+def test_a_cyclic_move_does_not_rename_the_folder(client):
+    top = mkfolder(client, "Before")
+    kid = mkfolder(client, "Kid", top["id"])
+
+    rv = client.patch(f"/api/folders/{top['id']}",
+                      json={"name": "After", "parent_id": kid["id"]})
+
+    assert rv.status_code == 400
+    assert db.folder_get(top["id"])["name"] == "Before"
+
+
+def test_an_upload_reports_the_folder_the_track_is_actually_in(client, monkeypatch):
+    """The folder is checked before the file is taken, but a forced delete can
+    commit while the upload is being written. The response must describe the
+    database rather than the request."""
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+    f = mkfolder(client, "Standards")
+
+    real_set = db.library_set_folder
+
+    def vanish(h, folder_id):
+        # the folder goes between the check and the filing
+        db.conn().execute("DELETE FROM folders WHERE id=?", (folder_id,))
+        db.conn().commit()
+        return real_set(h, folder_id)
+
+    monkeypatch.setattr(db, "library_set_folder", vanish)
+    rv = upload(client, "/api/library", folder_id=str(f["id"]))
+
+    assert rv.status_code == 201
+    row = rv.get_json()["added"][0]
+    assert row["folder_id"] is None, "reported a folder the track is not in"
+    assert db.library_get(row["source_hash"])["folder_id"] is None
