@@ -570,6 +570,10 @@
   /* The column a folder's caret occupies, kept on track rows so names line up
      under the folder they are in. */
   .librow .caret { visibility: hidden; }
+  /* The label states the range it will write, so it has to be allowed to be as
+     wide as "Assign 09–17" and must not wrap to a second line. */
+  .libbtn.assign { flex: none; white-space: nowrap; font-size: var(--text-meta); }
+
   /* Which folder a row came out of, for rows shown outside the tree. */
   .libpath {
     flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;

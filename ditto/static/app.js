@@ -42,6 +42,20 @@ let folderRev = 0;
    deliberately not persisted — it is where you are looking, not a setting. */
 let openFolders = {};
 
+/* What a folder's Assign button would do, straight from the device's own
+   preview, keyed by folder id. The button's label is rendered from this, and
+   the POST that follows runs the same function on the server — so the range on
+   screen and the range written cannot drift apart.
+
+   folderStart holds uncommitted text in a first-slot field, for the same reason
+   slotDraft does: the rows are rebuilt whenever the snapshot moves. planKey is
+   what each stored plan was asked for, so a render that changes nothing does
+   not re-ask, and planRev puts a new answer into the library's dirty key. */
+let folderPlan = {};
+let folderStart = {};
+let planKey = {};
+let planRev = 0;
+
 /* Say that the library's DOM no longer matches its key, so the next render
    redraws even though the data has not moved.
 
@@ -1149,6 +1163,42 @@ function fold(idx, id){
   return {n, secs};
 }
 
+/* Ask the device what each visible folder's Assign would write.
+
+   The range is not computed here. Which slots hold a loop is knowable only on
+   the device — the set is scanned at mount and emptied on unplug — so a client
+   working it out from a snapshot that can be fifteen seconds old on a
+   keepalive-only stream would put a label on the button that the POST then
+   contradicts. GET and POST run the same function on the server.
+
+   Cheap enough to do per folder on screen: a seven-folder tree is seven tiny
+   GETs next to a stream that emits five times a second during a conversion.
+   planKey is what stops it being per render — nothing is asked again unless the
+   slots, the loops or the typed start actually moved. */
+function refreshPlans(ids){
+  const sig = JSON.stringify([
+    ((state && state.slots) || []).map(s => s.slot),
+    (state && state.loops) || [],
+    state && state.slot_count,
+  ]);
+  ids.forEach(async id => {
+    const start = (folderStart[id] ?? "").trim();
+    const key = sig + "|" + start;
+    if (planKey[id] === key) return;
+    planKey[id] = key;
+    const r = await api(`/api/folders/${id}/assign?start=${encodeURIComponent(start)}`);
+    if (planKey[id] !== key) return;      // a newer ask has already overtaken
+    // A refused start (junk, or out of range) leaves no plan, which is what
+    // disables the button — better than a stale range under a number the
+    // device has already rejected.
+    const next = r.ok ? r.body : null;
+    if (JSON.stringify(next) === JSON.stringify(folderPlan[id] ?? null)) return;
+    if (next) folderPlan[id] = next; else delete folderPlan[id];
+    planRev++;
+    renderLibrary();
+  });
+}
+
 /* "Standards / Ballads", for a track shown outside its place in the tree. */
 function folderPath(id){
   const by = {};
@@ -1271,7 +1321,7 @@ function _renderLibrary(){
   // `selected` used to be here for the "→ 09" button's label, which has gone.
   // pickedTrack takes its place: it changes which row is highlighted.
   const libKey = JSON.stringify([
-    libRev, folderRev, openFolders, pickedTrack, nowPlaying,
+    libRev, folderRev, openFolders, planRev, pickedTrack, nowPlaying,
     ((state && state.slots) || []).map(s => [s.slot, s.source_hash]),
     (state && state.loops) || [],
     state && state.slot_count,
@@ -1295,6 +1345,11 @@ function _renderLibrary(){
   rows.forEach(r => host.appendChild(
     r.folder ? folderRow(r)
              : libraryRow(r.track, bySlot[r.track.source_hash] || [], r)));
+
+  // Only the folders actually on screen, and only after the rows exist — this
+  // is where "the tree loaded" and "the snapshot's slots or loops changed" both
+  // arrive, since both move libKey and neither reaches here otherwise.
+  refreshPlans(rows.filter(r => r.folder).map(r => r.folder.id));
 
   // Only while searching. Tracks tucked inside a collapsed folder are not
   // hidden in the sense this count means, and "1 shown" under a tree that is
@@ -1458,7 +1513,102 @@ function folderRow(row){
   meta.textContent = `${row.fold.n} · ${mmss(row.fold.secs)}`;
   el.appendChild(meta);
 
+  if (row.fold.n) el.appendChild(assignControls(f));
   return el;
+}
+
+/* Where a folder's fill would start, and what it would write.
+
+   The field is uncontrolled in the same way the track slot fields are: typing
+   records the draft and asks for a fresh plan, and the answer coming back is
+   what redraws. Rendering on every keystroke instead would rebuild the tree
+   under the typist several times a word. */
+function assignControls(f){
+  const wrap = document.createElement("span");
+  wrap.className = "slotwrap";
+  wrap.onclick = e => e.stopPropagation();
+  const plan = folderPlan[f.id];
+
+  const start = document.createElement("input");
+  start.type = "text";
+  start.inputMode = "numeric";
+  start.maxLength = 2;
+  start.className = "slotfield";
+  start.placeholder = "––";
+  start.value = folderStart[f.id] !== undefined ? folderStart[f.id]
+              : (plan && plan.start !== null ? pad2(plan.start) : "");
+  start.dataset.fk = "folder:" + f.id + ":start";
+  start.title = `First slot to fill from — leave it empty for the next free slot`;
+  start.setAttribute("aria-label", `First slot for ${f.name}`);
+  start.oninput = () => { folderStart[f.id] = start.value; refreshPlans([f.id]); };
+  start.onkeydown = e => {
+    e.stopPropagation();
+    if (e.key === "Enter"){ e.preventDefault(); start.blur(); }
+    else if (e.key === "Escape"){
+      delete folderStart[f.id];
+      libraryDomDirty();
+      renderLibrary();
+      refreshPlans([f.id]);
+    }
+  };
+  wrap.appendChild(start);
+
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "libbtn assign";
+  go.dataset.fk = "folder:" + f.id + ":assign";
+  const room = plan && plan.assigned.length;
+  // The label is the plan. Reading it off the same response the POST executes
+  // is what makes "Assign 09–17" a promise rather than a guess.
+  go.textContent = room ? `Assign ${pad2(plan.start)}–${pad2(plan.end)}` :
+                   plan ? "No room" : "Assign";
+  go.disabled = !room;
+  const short = room && plan.unplaced.length
+    ? ` — ${plan.unplaced.length} won't fit past slot ${pad2(plan.end)}` : "";
+  go.title = !plan ? "Type a slot number the pedal has"
+           : !room ? "Every slot from here on is taken"
+           : plan.loops_known
+             ? `Put ${f.name} on the pedal, from slot ${pad2(plan.start)}` + short
+             : "No pedal connected, so this range cannot yet skip slots that "
+               + "hold a loop" + short;
+  go.onclick = () => fillFolder(f);
+  wrap.appendChild(go);
+  return wrap;
+}
+
+/* Fill the slots. The response is the plan that ran, so everything said
+   afterwards is read from it rather than from what the label said before. */
+async function fillFolder(f){
+  const raw = (folderStart[f.id] ?? "").trim();
+  const r = await api(`/api/folders/${f.id}/assign`,
+                      jsonBody(raw === "" ? {} : {start: Number(raw)}));
+  if (!r.ok){ failFrom(r, "Could not fill the slots"); return; }
+  const p = r.body;
+  // The pending undo restores one slot. A fill has just overwritten several,
+  // and offering to put one of them back is a worse answer than offering none.
+  $("#undoslot").innerHTML = "";
+  delete folderStart[f.id];
+  if (!p.assigned.length){
+    warn(`No room on the pedal for ${f.name}`);
+    return;
+  }
+  let line = `${f.name} → slots ${pad2(p.start)}–${pad2(p.end)}`;
+  if (p.unplaced.length) line += ` · ${p.unplaced.length} didn't fit`;
+  if (!p.loops_known) line += " · plug the pedal in to skip its loops";
+  // The capacity bar reads from bytes on the card and will not know about this
+  // until the writes land, so the warning has to come from the plan itself.
+  const secs = p.assigned.reduce((t, a) => {
+    const row = (library || []).find(x => x.source_hash === a.source_hash);
+    return t + ((row && row.duration) || 0);
+  }, 0);
+  const total = (state && state.capacity && state.capacity.total_seconds) || 0;
+  if (total && secs > total){
+    warn(`${line} · that is ${mmss(secs)} on a ${mmss(total)} pedal, so some won't fit`);
+  } else if (p.unplaced.length){
+    warn(line);
+  } else {
+    say(line);
+  }
 }
 
 function toggleFolder(id){
