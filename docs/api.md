@@ -227,8 +227,18 @@ Every track on the device, newest first.
 
 ```json
 [ { "source_hash": "b9ecf8c94d007de0a5ae", "name": "Blue Bossa",
-    "duration": 311.0, "added": 1786070717.31 } ]
+    "duration": 311.0, "added": 1786070717.31,
+    "folder_id": null, "position": 0 } ]
 ```
+
+`folder_id` is the folder holding the track, or `null` for the top level. A
+track whose folder has gone reads as `null` too, so it surfaces at the top level
+rather than nowhere.
+
+**Tree order** is depth-first pre-order: a folder's own tracks, ordered by
+`(position, added, source_hash)`, then its subfolders in `(position, id)` order,
+each expanded the same way. Everything that walks the library uses it, so the
+order the tree renders in is the order a folder assign writes in.
 
 The whole list, unpaginated: a few hundred rows is a small response, and
 searching and sorting are the client's business. Deliberately **not** part of

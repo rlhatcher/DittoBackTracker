@@ -30,7 +30,7 @@ _local = threading.local()
 # mode. Held only while opening, which happens once per thread.
 _open_lock = threading.Lock()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Statements rather than one script: the initialiser runs inside BEGIN
 # IMMEDIATE, and executescript() commits any open transaction before it runs,
@@ -40,8 +40,19 @@ _SCHEMA = [
         source_hash TEXT PRIMARY KEY,
         name        TEXT NOT NULL,
         duration    REAL NOT NULL DEFAULT 0,
-        added       REAL NOT NULL
+        added       REAL NOT NULL,
+        folder_id   INTEGER,
+        position    INTEGER NOT NULL DEFAULT 0
     )""",
+    """CREATE TABLE IF NOT EXISTS folders (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        name      TEXT NOT NULL,
+        parent_id INTEGER,
+        position  INTEGER NOT NULL DEFAULT 0,
+        created   REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id)",
+    "CREATE INDEX IF NOT EXISTS library_folder ON library(folder_id)",
     """CREATE TABLE IF NOT EXISTS slots (
         slot        INTEGER PRIMARY KEY,
         source_hash TEXT NOT NULL,
@@ -114,6 +125,46 @@ _V1_TO_V2 = [
 ]
 
 
+# v2 -> v3: the library gains folders.
+#
+# Three DDL statements and two indexes. No INSERT, no SELECT, no table rebuild —
+# which is the property that makes this one safe on a device whose users cannot
+# restore a backup. There is no ordering in which a power cut halfway through
+# loses a row, because no row is ever read or written.
+#
+# It needs no backfill either. Existing tracks want folder_id NULL, which is what
+# ADD COLUMN gives them, and position 0, which is the declared default. Ordering
+# inside a folder is (position, added, source_hash), so rows that all sit at 0
+# tie-break on `added` and keep exactly the order they have today.
+#
+# No "Unfiled" folder is invented for them. The footer would then report a folder
+# the user never made, and the screen after an update should look like the screen
+# before it.
+#
+# AUTOINCREMENT on folders.id for the same reason trash carries its ids across
+# rather than renumbering: a browser tab left open for an hour holds folder ids
+# in its DOM, and if deleting folder 7 let the next create reuse the id, that
+# tab's rename would land on somebody else's folder.
+#
+# No REFERENCES clause, matching the rest of this file. sqlite3 leaves foreign
+# keys off, so it would buy nothing enforced while turning every future rebuild
+# into a twelve-step procedure. Readers tolerate a missing parent instead.
+_V2_TO_V3 = [
+    """CREATE TABLE IF NOT EXISTS folders (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        name      TEXT NOT NULL,
+        parent_id INTEGER,
+        position  INTEGER NOT NULL DEFAULT 0,
+        created   REAL NOT NULL
+    )""",
+    "ALTER TABLE library ADD COLUMN folder_id INTEGER",
+    # Legal despite NOT NULL because the default is a constant.
+    "ALTER TABLE library ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id)",
+    "CREATE INDEX IF NOT EXISTS library_folder ON library(folder_id)",
+]
+
+
 def _needs_v1_migration(c: sqlite3.Connection) -> bool:
     """A v1 file: has the old tables, has never been stamped with a version."""
     if c.execute("PRAGMA user_version").fetchone()[0] >= 2:
@@ -123,17 +174,24 @@ def _needs_v1_migration(c: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
-def _backup_v1(c: sqlite3.Connection) -> None:
-    """Snapshot the database beside itself before the one destructive step.
+def _backup(c: sqlite3.Connection, tag: str) -> None:
+    """Snapshot the database beside itself before migrating it.
 
-    The recovery path if an over-the-air rollback ever strands pre-library code
-    on a post-library file: `mv state.db.v1 state.db`. VACUUM INTO gives a
-    consistent copy of a WAL database and cannot run inside a transaction, so
-    this happens before the lock is taken — which means two threads can race
-    here. The loser gets "output file already exists", which is the outcome we
-    wanted anyway.
+    Named for the version on disk, not the one being migrated to, so the file
+    says what it contains: a device that has been off for two releases migrates
+    1 -> 2 -> 3 in one go and writes `state.db.v1`.
+
+    The recovery path if an over-the-air rollback ever strands old code on a new
+    file: `mv state.db.v1 state.db`. That matters more from v3 on than it did
+    before, because _init refuses a file newer than the build outright, so a
+    rolled-back v2 binary will not read a v3 file even though it could.
+
+    VACUUM INTO gives a consistent copy of a WAL database and cannot run inside a
+    transaction, so this happens before the lock is taken — which means two
+    threads can race here. The loser gets "output file already exists", which is
+    the outcome we wanted anyway.
     """
-    dest = str(config.DB_PATH) + ".v1"
+    dest = f"{config.DB_PATH}.{tag}"
     if os.path.exists(dest):
         return                      # a previous run (or the racing thread) made it
     try:
@@ -142,12 +200,12 @@ def _backup_v1(c: sqlite3.Connection) -> None:
         # Losing the race to another thread is the expected case and benign.
         # A full disk or an unwritable directory is not: the migration still
         # goes ahead, and the rollback path documented against it — restoring
-        # state.db.v1 over state.db — will not be there. Say so, or the absence
+        # the backup over state.db — will not be there. Say so, or the absence
         # is only discovered when it is needed.
         if not os.path.exists(dest):
             log.warning("could not write the pre-migration backup %s: %s. The "
-                        "v1 -> v2 migration will still run, but restoring the "
-                        "old schema will not be possible.", dest, e)
+                        "migration will still run, but restoring the old schema "
+                        "will not be possible.", dest, e)
 
 
 def _init(c: sqlite3.Connection) -> None:
@@ -178,7 +236,9 @@ def _init(c: sqlite3.Connection) -> None:
             f"v{SCHEMA_VERSION}. Deploy the newer code or restore a backup.")
 
     if _needs_v1_migration(c):
-        _backup_v1(c)
+        _backup(c, "v1")
+    elif v > 0:
+        _backup(c, f"v{v}")
 
     c.execute("BEGIN IMMEDIATE")
     try:
@@ -186,11 +246,24 @@ def _init(c: sqlite3.Connection) -> None:
         if v >= SCHEMA_VERSION:
             c.commit()
             return
+        # A chain, not a branch: a device that missed a release migrates through
+        # every step in one transaction, so it is never left stamped at an
+        # intermediate version that no build in the field writes.
         if _needs_v1_migration(c):
             for stmt in _V1_TO_V2:
                 c.execute(stmt)
-        else:
+            v = 2
+        elif v == 0:
+            # A brand-new file. Created at the target shape, so it never runs a
+            # migration step. Not `else`: a v2 file must fall through to the
+            # step below, and _SCHEMA's CREATE TABLE IF NOT EXISTS would leave
+            # its `library` without the new columns while looking like it had
+            # worked.
             for stmt in _SCHEMA:
+                c.execute(stmt)
+            v = SCHEMA_VERSION
+        if v < 3:
+            for stmt in _V2_TO_V3:
                 c.execute(stmt)
         # An int constant, never user input — PRAGMA takes no placeholder.
         c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
