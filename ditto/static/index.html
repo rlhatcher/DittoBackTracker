@@ -28,7 +28,12 @@
     </section>
 
     <section id="slotcard">
-      <h2>Slots</h2>
+      <div class="listhead">
+        <h2>Slots</h2>
+        <!-- aria-hidden: the focused cell's own aria-label already says all of
+             this, and a second copy that lags the pointer is worse than none. -->
+        <span id="slotread" aria-hidden="true">map and list are linked</span>
+      </div>
       <div id="grid"></div>
       <div class="legend">
         <span><i class="k-synced"></i>on pedal</span>
