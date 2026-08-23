@@ -145,6 +145,32 @@ def _form_folder():
     return n, None
 
 
+def _start_slot(raw) -> "tuple[bool, Optional[int]]":
+    """(ok, value) for the optional start slot on a folder assign.
+
+    Absent means "wherever there is room", which is not the same as a value the
+    caller got wrong, so a junk start is refused rather than quietly treated as
+    absent. Range is checked in the service, which owns config.SLOTS.
+
+    An empty query string is the one thing read as absent, and only because the
+    caller of this collapses it first: a cleared first-slot field renders
+    `?start=`, and that means "wherever there is room". An empty string in a
+    JSON body is junk and is refused.
+    """
+    if raw is None:
+        return True, None
+    if isinstance(raw, bool):          # bool is an int subclass; True is not 1
+        return False, None
+    if isinstance(raw, int):
+        return True, raw
+    if isinstance(raw, str):
+        try:
+            return True, int(raw)
+        except ValueError:
+            return False, None
+    return False, None
+
+
 class IngestError(NamedTuple):
     """Why one file could not be taken, and what that means over HTTP.
 
@@ -669,6 +695,51 @@ def create_app(service: Service) -> Flask:
                            tracks=r["tracks"]), 409
         return jsonify(ok=True, to=r["to"],
                        promoted={"folders": r["folders"], "tracks": r["tracks"]})
+
+    @app.get("/api/folders/<int:folder_id>/assign")
+    def folder_assign_preview(folder_id: int):
+        """What POSTing this would do, without doing it.
+
+        The button reads its own label off this — "Assign 09-17", or "No room" —
+        so the range on screen and the range written come from one function.
+        Safe method, so no cross-site guard, and nothing is queued.
+        """
+        ok, start = _start_slot(request.args.get("start") or None)
+        if not ok:
+            return jsonify(error="start must be a slot number"), 400
+        try:
+            plan = service.plan_folder(folder_id, start)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if plan is None:
+            return jsonify(error="no such folder"), 404
+        return jsonify(dict(plan, dry_run=True))
+
+    @app.post("/api/folders/<int:folder_id>/assign")
+    def folder_assign(folder_id: int):
+        """Put a folder's tracks on the pedal, in tree order, from `start`.
+
+        One call rather than N calls to /api/slots/<n>/assign: the loop set it
+        skips is the device's own and is only correct under the lock that queues
+        the work, the whole fill is one admission so a shutdown cannot take half
+        of it, and it broadcasts one snapshot instead of one per track.
+
+        201 with the plan that was executed, as the preview would have returned
+        it. Read the body — like the batch upload, a 201 does not mean every
+        track landed; `unplaced` names the ones that did not fit.
+        """
+        body = request.get_json(silent=True)
+        raw = body.get("start") if isinstance(body, dict) else None
+        ok, start = _start_slot(raw)
+        if not ok:
+            return jsonify(error="start must be a slot number"), 400
+        try:
+            plan = service.assign_folder(folder_id, start)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if plan is None:
+            return jsonify(error="no such folder"), 404
+        return jsonify(dict(plan, dry_run=False)), 201
 
     @app.get("/api/library/<h>/audio")
     def library_audio(h: str):
