@@ -516,3 +516,279 @@ def test_reopening_a_v3_database_takes_no_write_lock(fresh_db):
     finally:
         blocker.rollback()
         blocker.close()
+
+
+# --- folders ----------------------------------------------------------------
+
+def seed_track(h, name="T", duration=1.0):
+    db.library_add(h, name, duration)
+    return h
+
+
+H = [chr(97 + i) * 20 for i in range(8)]        # 'aaaa…', 'bbbb…', …
+
+
+def test_folders_start_empty(fresh_db):
+    assert db.folders_all() == []
+
+
+def test_a_new_folder_comes_back_with_its_id(fresh_db):
+    f = db.folder_add("Standards")
+    assert f["id"] > 0
+    assert f["name"] == "Standards"
+    assert f["parent_id"] is None
+    assert db.folder_get(f["id"]) == f
+
+
+def test_a_new_folder_appends_after_its_siblings(fresh_db):
+    a = db.folder_add("A")
+    b = db.folder_add("B")
+    c = db.folder_add("C")
+    assert [x["position"] for x in (a, b, c)] == [0, 1, 2]
+    assert [x["name"] for x in db.folders_all()] == ["A", "B", "C"]
+
+
+def test_a_folder_can_be_created_inside_another(fresh_db):
+    top = db.folder_add("Standards")
+    kid = db.folder_add("Ballads", top["id"])
+    assert kid["parent_id"] == top["id"]
+
+
+def test_creating_a_folder_under_an_unknown_parent_is_refused(fresh_db):
+    assert db.folder_add("Orphan", 999) is None
+    assert db.folders_all() == []
+
+
+def test_a_folder_cannot_nest_past_the_depth_limit(fresh_db):
+    """The row indents with depth inside a half-width column, so this is a real
+    limit rather than a defensive one."""
+    parent = None
+    for i in range(config.MAX_FOLDER_DEPTH):
+        made = db.folder_add(f"L{i}", parent)
+        assert made is not None, f"level {i} should fit"
+        parent = made["id"]
+    assert db.folder_add("one too deep", parent) is None
+
+
+def test_folder_ids_are_never_reused_after_a_delete(fresh_db):
+    """A browser tab open for an hour holds folder ids in its DOM. If a delete
+    freed an id, that tab's rename would land on somebody else's folder."""
+    first = db.folder_add("Gone")
+    db.folder_delete(first["id"])
+    again = db.folder_add("New")
+    assert again["id"] != first["id"]
+
+
+def test_renaming_a_folder_leaves_it_where_it_was(fresh_db):
+    top = db.folder_add("Standards")
+    kid = db.folder_add("Ballads", top["id"])
+
+    assert db.folder_rename(kid["id"], "Slow ones") is True
+
+    after = db.folder_get(kid["id"])
+    assert after["name"] == "Slow ones"
+    assert after["parent_id"] == top["id"]
+    assert after["position"] == kid["position"]
+
+
+def test_renaming_an_unknown_folder_reports_it(fresh_db):
+    assert db.folder_rename(999, "Nope") is False
+
+
+def test_a_folder_cannot_be_moved_into_its_own_descendant(fresh_db):
+    """A cycle strands the subtree: unreachable from the top level, and every
+    recursive walk over it runs to the limit."""
+    top = db.folder_add("Standards")
+    kid = db.folder_add("Ballads", top["id"])
+    grandkid = db.folder_add("Slow", kid["id"])
+
+    assert db.folder_move(top["id"], grandkid["id"]) == "cycle"
+
+    assert db.folder_get(top["id"])["parent_id"] is None
+    assert db.folder_get(grandkid["id"])["parent_id"] == kid["id"]
+
+
+def test_a_folder_cannot_be_moved_into_itself(fresh_db):
+    f = db.folder_add("Standards")
+    assert db.folder_move(f["id"], f["id"]) == "cycle"
+    assert db.folder_get(f["id"])["parent_id"] is None
+
+
+def test_a_move_that_would_bury_a_subtree_too_deep_is_refused(fresh_db):
+    """The limit is on the deepest leaf after the move, not on the folder moved."""
+    tall = db.folder_add("tall")
+    node = tall
+    for i in range(config.MAX_FOLDER_DEPTH - 1):
+        node = db.folder_add(f"deep{i}", node["id"])
+
+    sibling = db.folder_add("sibling")
+
+    assert db.folder_move(tall["id"], sibling["id"]) == "too deep"
+    assert db.folder_get(tall["id"])["parent_id"] is None
+
+
+def test_moving_a_folder_appends_it_to_its_new_parent(fresh_db):
+    dest = db.folder_add("Dest")
+    db.folder_add("already there", dest["id"])
+    mover = db.folder_add("Mover")
+
+    assert db.folder_move(mover["id"], dest["id"]) == "ok"
+
+    after = db.folder_get(mover["id"])
+    assert after["parent_id"] == dest["id"]
+    assert after["position"] == 1
+
+
+def test_moving_an_unknown_folder_reports_it(fresh_db):
+    f = db.folder_add("Standards")
+    assert db.folder_move(999, f["id"]) == "unknown"
+    assert db.folder_move(f["id"], 999) == "unknown"
+
+
+def test_a_folder_can_be_moved_back_to_the_top_level(fresh_db):
+    top = db.folder_add("Standards")
+    kid = db.folder_add("Ballads", top["id"])
+
+    assert db.folder_move(kid["id"], None) == "ok"
+
+    assert db.folder_get(kid["id"])["parent_id"] is None
+
+
+def test_deleting_an_empty_folder_succeeds(fresh_db):
+    f = db.folder_add("Empty")
+    r = db.folder_delete(f["id"])
+    assert r["deleted"] is True
+    assert db.folder_get(f["id"]) is None
+
+
+def test_deleting_an_unknown_folder_reports_it(fresh_db):
+    assert db.folder_delete(999) is None
+
+
+def test_deleting_a_folder_that_holds_anything_is_refused_and_changes_nothing(fresh_db):
+    f = db.folder_add("Standards")
+    kid = db.folder_add("Ballads", f["id"])
+    seed_track(H[0]); db.library_set_folder(H[0], f["id"])
+
+    r = db.folder_delete(f["id"])
+
+    assert r == {"deleted": False, "folders": [kid["id"]], "tracks": 1}
+    assert db.folder_get(f["id"]) is not None
+    assert db.library_get(H[0])["folder_id"] == f["id"]
+
+
+def test_deleting_a_folder_never_deletes_a_track(fresh_db):
+    """The one that matters. A library row is the only thing keeping its audio
+    alive, so a folder delete that took its contents with it destroys files."""
+    f = db.folder_add("Standards")
+    seed_track(H[0], "Blue Bossa"); db.library_set_folder(H[0], f["id"])
+
+    db.folder_delete(f["id"], force=True)
+
+    assert db.library_get(H[0]) is not None
+    assert db.hash_in_library(H[0]) is True, "the collector would now delete the file"
+
+
+def test_a_forced_delete_promotes_children_to_the_parent(fresh_db):
+    top = db.folder_add("Top")
+    mid = db.folder_add("Mid", top["id"])
+    leaf = db.folder_add("Leaf", mid["id"])
+    seed_track(H[0]); db.library_set_folder(H[0], mid["id"])
+
+    r = db.folder_delete(mid["id"], force=True)
+
+    assert r["deleted"] is True and r["to"] == top["id"]
+    assert db.folder_get(leaf["id"])["parent_id"] == top["id"]
+    assert db.library_get(H[0])["folder_id"] == top["id"]
+
+
+def test_a_forced_delete_at_the_top_promotes_to_the_top(fresh_db):
+    f = db.folder_add("Standards")
+    kid = db.folder_add("Ballads", f["id"])
+    seed_track(H[0]); db.library_set_folder(H[0], f["id"])
+
+    r = db.folder_delete(f["id"], force=True)
+
+    assert r["to"] is None
+    assert db.folder_get(kid["id"])["parent_id"] is None
+    assert db.library_get(H[0])["folder_id"] is None
+
+
+def test_a_track_whose_folder_was_deleted_still_appears_in_the_library(fresh_db):
+    """No foreign keys, so a stale folder_id is possible. It must read as the
+    top level rather than as a folder the tree cannot draw."""
+    f = db.folder_add("Standards")
+    seed_track(H[0]); db.library_set_folder(H[0], f["id"])
+    db.conn().execute("DELETE FROM folders WHERE id=?", (f["id"],))
+    db.conn().commit()
+
+    assert db.library_get(H[0])["folder_id"] is None
+    assert [r["source_hash"] for r in db.library_all()] == [H[0]]
+
+
+def test_a_track_filed_into_a_folder_lands_at_the_end(fresh_db):
+    """Not in upload order: filing an old track into a new set list should
+    append it, and `added` would drop it into the middle."""
+    f = db.folder_add("Set")
+    for i, h in enumerate(H[:3]):
+        seed_track(h, f"T{i}")
+    db.library_set_folder(H[2], f["id"])        # newest first
+    db.library_set_folder(H[0], f["id"])        # oldest last
+
+    assert [t["source_hash"] for t in db.folder_tracks(f["id"])] == [H[2], H[0]]
+
+
+def test_filing_into_an_unknown_folder_is_refused(fresh_db):
+    seed_track(H[0])
+    assert db.library_set_folder(H[0], 999) is False
+    assert db.library_get(H[0])["folder_id"] is None
+
+
+def test_filing_an_unknown_track_reports_it(fresh_db):
+    f = db.folder_add("Set")
+    assert db.library_set_folder("z" * 20, f["id"]) is False
+
+
+def test_the_subtree_walk_puts_a_folders_own_tracks_before_its_subfolders(fresh_db):
+    """The order the tree renders in is the order a folder assign writes in, so
+    this is the definition both of them depend on."""
+    top = db.folder_add("Top")
+    kid = db.folder_add("Kid", top["id"])
+    seed_track(H[0]); db.library_set_folder(H[0], kid["id"])   # deeper, filed first
+    seed_track(H[1]); db.library_set_folder(H[1], top["id"])
+
+    assert [t["source_hash"] for t in db.folder_tracks(top["id"])] == [H[1], H[0]]
+
+
+def test_the_subtree_walk_recurses_through_two_levels_in_position_order(fresh_db):
+    top = db.folder_add("Top")
+    first = db.folder_add("First", top["id"])
+    second = db.folder_add("Second", top["id"])
+    deep = db.folder_add("Deep", first["id"])
+    for h, folder in ((H[0], top), (H[1], second), (H[2], deep), (H[3], first)):
+        seed_track(h)
+        db.library_set_folder(h, folder["id"])
+
+    order = [t["source_hash"] for t in db.folder_tracks(top["id"])]
+
+    assert order == [H[0], H[3], H[2], H[1]], \
+        "own tracks, then First, then First's child, then Second"
+
+
+def test_the_subtree_ids_come_back_in_tree_order(fresh_db):
+    top = db.folder_add("Top")
+    first = db.folder_add("First", top["id"])
+    deep = db.folder_add("Deep", first["id"])
+    second = db.folder_add("Second", top["id"])
+
+    assert db.folder_subtree_ids(top["id"]) == \
+        [top["id"], first["id"], deep["id"], second["id"]]
+
+
+def test_deleting_a_track_leaves_its_folder_standing(fresh_db):
+    f = db.folder_add("Standards")
+    seed_track(H[0]); db.library_set_folder(H[0], f["id"])
+
+    db.library_delete(H[0])
+
+    assert db.folder_get(f["id"]) is not None

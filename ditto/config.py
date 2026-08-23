@@ -65,6 +65,11 @@ SLOTS = 99
 # Measured on a Ditto+. Overridden at runtime by probing a pedal-written file.
 DEFAULT_FORMAT = {"sample_rate": 44100, "channels": 1, "codec": "pcm_s24le"}
 
+# How deep the library tree may nest. The design says folders nest freely, but a
+# row indents 16 + depth*18 px inside a half-width column, so past this the name
+# is behind the meta text. Also bounds every recursive walk in db.py.
+MAX_FOLDER_DEPTH = 8
+
 AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg",
                   ".aif", ".aiff", ".wma", ".opus"}
 

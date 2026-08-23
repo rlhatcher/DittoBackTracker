@@ -477,6 +477,242 @@ def prune_trash(max_age_days: int) -> int:
         return cur.rowcount
 
 
+# ---------------------------------------------------------------- folders
+
+# Every walk of the tree is bounded. A LIMIT inside a recursive CTE stops SQLite
+# adding rows once it is reached, so a file that somehow already contains a cycle
+# returns a wrong answer instead of never returning at all. Nothing here can
+# create one — folder_move refuses it — but a walk that hangs takes the worker
+# thread with it, and this costs nothing.
+_WALK_LIMIT = 500
+
+# Depth-first pre-order over a subtree, as one sort key per folder.
+#
+# A folder's key is its parent's key with its own (position, id) appended, so a
+# parent's key is a strict prefix of every descendant's. Shorter strings sort
+# first, which puts a folder's own tracks ahead of all its subfolders' without
+# any extra machinery, and siblings fall into position order because the segment
+# is zero-padded to a fixed width.
+_SUBTREE = f"""
+WITH RECURSIVE tree(id, ord) AS (
+    SELECT id, printf('%08d/%08d', position, id) FROM folders WHERE id = ?
+  UNION ALL
+    SELECT f.id, tree.ord || '/' || printf('%08d/%08d', f.position, f.id)
+      FROM folders f JOIN tree ON f.parent_id = tree.id
+  LIMIT {_WALK_LIMIT}
+)
+"""
+
+
+def _depth(c: sqlite3.Connection, folder_id: Optional[int]) -> int:
+    """How far below the top level a folder sits. A top-level folder is 0."""
+    if folder_id is None:
+        return -1                   # so a child of "nothing" comes out at 0
+    row = c.execute(f"""
+        WITH RECURSIVE up(id, parent_id, lvl) AS (
+            SELECT id, parent_id, 0 FROM folders WHERE id = ?
+          UNION ALL
+            SELECT f.id, f.parent_id, up.lvl + 1
+              FROM folders f JOIN up ON f.id = up.parent_id
+          LIMIT {_WALK_LIMIT}
+        )
+        SELECT max(lvl) FROM up""", (folder_id,)).fetchone()
+    return row[0] if row and row[0] is not None else -1
+
+
+def folders_all() -> List[Dict]:
+    """Every folder, flat. The client builds the tree and folds the counts.
+
+    Same reasoning as library_all: a few hundred rows is a small response, and
+    the browser already holds every track with its duration, so summing a subtree
+    there costs one pass and no round trip. Aggregating here would also be a
+    second source of truth for "16 tracks, 7 folders" that can disagree with the
+    rows actually on screen, since the client filters and sorts locally.
+    """
+    return [dict(r) for r in conn().execute(
+        "SELECT * FROM folders ORDER BY parent_id IS NOT NULL, parent_id, position, id")]
+
+
+def folder_get(folder_id: int) -> Optional[Dict]:
+    r = conn().execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def folder_add(name: str, parent_id: Optional[int] = None) -> Optional[Dict]:
+    """Create a folder at the end of its parent. None if the parent is unknown
+    or the tree is already as deep as it may go."""
+    c = conn()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        if parent_id is not None and not c.execute(
+                "SELECT 1 FROM folders WHERE id=?", (parent_id,)).fetchone():
+            c.rollback()
+            return None
+        if _depth(c, parent_id) + 1 >= config.MAX_FOLDER_DEPTH:
+            c.rollback()
+            return None
+        pos = c.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM folders WHERE parent_id IS ?",
+            (parent_id,)).fetchone()[0]
+        cur = c.execute(
+            "INSERT INTO folders (name, parent_id, position, created) VALUES (?,?,?,?)",
+            (name, parent_id, pos, time.time()))
+        c.commit()
+        return folder_get(cur.lastrowid)
+    except Exception:
+        c.rollback()
+        raise
+
+
+def folder_rename(folder_id: int, name: str) -> bool:
+    c = conn()
+    with c:
+        cur = c.execute("UPDATE folders SET name=? WHERE id=?", (name, folder_id))
+    return cur.rowcount > 0
+
+
+def folder_move(folder_id: int, parent_id: Optional[int]) -> str:
+    """Reparent a folder. Returns "ok", "unknown", "cycle" or "too deep".
+
+    The cycle check runs inside the same transaction as the UPDATE, never before
+    it. Between a check and a write, another thread's reparent can make the
+    answer stale, and the pair of moves that results leaves a subtree pointing
+    into itself and unreachable from the top level for good.
+    """
+    c = conn()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        if not c.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
+            c.rollback()
+            return "unknown"
+        if parent_id is not None and not c.execute(
+                "SELECT 1 FROM folders WHERE id=?", (parent_id,)).fetchone():
+            c.rollback()
+            return "unknown"
+        # One walk answers both questions a reparent has: is the destination
+        # inside the subtree being moved, and how tall is that subtree.
+        height, contains = c.execute(f"""
+            WITH RECURSIVE sub(id, lvl) AS (
+                SELECT ?, 0
+              UNION ALL
+                SELECT f.id, sub.lvl + 1
+                  FROM folders f JOIN sub ON f.parent_id = sub.id
+              LIMIT {_WALK_LIMIT}
+            )
+            SELECT max(lvl), max(id = ?) FROM sub""",
+            (folder_id, parent_id if parent_id is not None else -1)).fetchone()
+        if contains:
+            c.rollback()
+            return "cycle"
+        if _depth(c, parent_id) + 1 + (height or 0) >= config.MAX_FOLDER_DEPTH:
+            c.rollback()
+            return "too deep"
+        pos = c.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM folders WHERE parent_id IS ?",
+            (parent_id,)).fetchone()[0]
+        c.execute("UPDATE folders SET parent_id=?, position=? WHERE id=?",
+                  (parent_id, pos, folder_id))
+        c.commit()
+        return "ok"
+    except Exception:
+        c.rollback()
+        raise
+
+
+def folder_delete(folder_id: int, force: bool = False) -> Optional[Dict]:
+    """Remove a folder. **Never removes a track.**
+
+    A library row is the only thing keeping its audio alive in sources/, so a
+    folder delete that took its contents with it would destroy files. A folder is
+    a grouping, not a container, and this issues no DELETE against library under
+    any flag. The test that pins it runs the collector afterwards.
+
+    None if there is no such folder. Otherwise a dict saying what it found and
+    whether it acted: without `force` a non-empty folder is reported and left
+    alone; with it, children and tracks are promoted to the folder's own parent
+    and appended there.
+    """
+    c = conn()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        row = c.execute("SELECT parent_id FROM folders WHERE id=?",
+                        (folder_id,)).fetchone()
+        if row is None:
+            c.rollback()
+            return None
+        parent = row["parent_id"]
+        kids = [r["id"] for r in c.execute(
+            "SELECT id FROM folders WHERE parent_id=? ORDER BY position, id",
+            (folder_id,))]
+        tracks = c.execute("SELECT count(*) FROM library WHERE folder_id=?",
+                           (folder_id,)).fetchone()[0]
+        if (kids or tracks) and not force:
+            c.rollback()
+            return {"deleted": False, "folders": kids, "tracks": tracks}
+        pos = c.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM folders WHERE parent_id IS ?",
+            (parent,)).fetchone()[0]
+        for i, kid in enumerate(kids):
+            c.execute("UPDATE folders SET parent_id=?, position=? WHERE id=?",
+                      (parent, pos + i, kid))
+        tpos = c.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM library WHERE folder_id IS ?",
+            (parent,)).fetchone()[0]
+        c.execute("""UPDATE library SET folder_id=?,
+                        position = ? + (SELECT count(*) FROM library l2
+                                         WHERE l2.folder_id = library.folder_id
+                                           AND (l2.added, l2.source_hash)
+                                             < (library.added, library.source_hash))
+                      WHERE folder_id=?""", (parent, tpos, folder_id))
+        c.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+        c.commit()
+        return {"deleted": True, "folders": kids, "tracks": tracks, "to": parent}
+    except Exception:
+        c.rollback()
+        raise
+
+
+def folder_tracks(folder_id: int) -> List[Dict]:
+    """Every track in a folder and its descendants, in tree order."""
+    return [dict(r) for r in conn().execute(
+        _SUBTREE + """
+        SELECT l.*, tree.ord FROM tree JOIN library l ON l.folder_id = tree.id
+         ORDER BY tree.ord, l.position, l.added, l.source_hash""",
+        (folder_id,))]
+
+
+def folder_subtree_ids(folder_id: int) -> List[int]:
+    """A folder and every folder under it, in tree order."""
+    return [r["id"] for r in conn().execute(
+        _SUBTREE + "SELECT id FROM tree ORDER BY ord", (folder_id,))]
+
+
+def library_set_folder(source_hash: str, folder_id: Optional[int]) -> bool:
+    """File a track, at the end of its new folder.
+
+    The end, not wherever `added` puts it: filing an old track into a new set
+    list should append it, and ordering by upload time would drop it into the
+    middle.
+    """
+    c = conn()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        if folder_id is not None and not c.execute(
+                "SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
+            c.rollback()
+            return False
+        pos = c.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM library WHERE folder_id IS ?",
+            (folder_id,)).fetchone()[0]
+        cur = c.execute("UPDATE library SET folder_id=?, position=? WHERE source_hash=?",
+                        (folder_id, pos, source_hash))
+        c.commit()
+        return cur.rowcount > 0
+    except Exception:
+        c.rollback()
+        raise
+
+
 # ---------------------------------------------------------------- library
 
 def library_add(source_hash: str, name: str, duration: float) -> bool:
@@ -498,15 +734,28 @@ def library_add(source_hash: str, name: str, duration: float) -> bool:
     return cur.rowcount > 0
 
 
+# The LEFT JOIN is what makes a missing folder harmless. This file declares no
+# foreign keys, so nothing stops library.folder_id outliving the folder it names;
+# taking the id from the join rather than the column reports NULL when the folder
+# has gone, and the track shows up at the top level instead of in a folder the
+# tree cannot draw. Same idiom as _SLOT_SELECT, where a slot whose library row
+# vanished still appears.
+_LIBRARY_SELECT = """
+    SELECT l.source_hash, l.name, l.duration, l.added, l.position,
+           f.id AS folder_id
+      FROM library l LEFT JOIN folders f ON f.id = l.folder_id
+"""
+
+
 def library_all() -> List[Dict]:
     """Newest first. Searching, sorting and filtering happen in the browser —
     a few hundred rows is a small response and no round trip."""
     return [dict(r) for r in conn().execute(
-        "SELECT * FROM library ORDER BY added DESC")]
+        _LIBRARY_SELECT + "ORDER BY l.added DESC")]
 
 
 def library_get(source_hash: str) -> Optional[Dict]:
-    r = conn().execute("SELECT * FROM library WHERE source_hash=?",
+    r = conn().execute(_LIBRARY_SELECT + "WHERE l.source_hash=?",
                        (source_hash,)).fetchone()
     return dict(r) if r else None
 
