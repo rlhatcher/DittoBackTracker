@@ -191,19 +191,27 @@ def _ingest(f, name: str, store):
         raise
 
 
-def _file_row(row, folder_id) -> None:
+def _file_row(row, folder_id):
     """File a freshly ingested track, if the request named a folder.
 
     Done after the ingest rather than inside it so the three routes and the
     service keep the shapes they already have: a slot upload returns a slot row
-    and a library upload returns a library row, and both carry the hash this
-    needs.
+    and a library upload returns a library row, and both carry the hash.
+
+    Returns the row as it now stands, re-read rather than assumed. The folder
+    was checked before the file was taken, but a forced delete elsewhere can
+    commit while the upload is being written, and then the filing quietly does
+    nothing. Reporting the requested folder in that case would be the response
+    describing a state the database is not in.
     """
     if folder_id is None or not row:
-        return
+        return row
     h = row.get("source_hash")
-    if h:
-        db.library_set_folder(h, folder_id)
+    if not h:
+        return row
+    db.library_set_folder(h, folder_id)
+    stored = db.library_get(h)
+    return dict(row, folder_id=stored["folder_id"]) if stored else row
 
 
 def create_app(service: Service) -> Flask:
@@ -284,7 +292,7 @@ def create_app(service: Service) -> Flask:
         row, err = _ingest(f, name, lambda p, stem: service.upload(slot, p, stem))
         if err:
             return jsonify(error=err.message), err.status
-        _file_row(row, folder)
+        row = _file_row(row, folder)
         return jsonify(row), 201
 
     @app.post("/api/upload")
@@ -381,8 +389,7 @@ def create_app(service: Service) -> Flask:
             if err:
                 errors.append({"name": name, "error": err.message})
             else:
-                _file_row(row, folder)
-                results.append(row)
+                results.append(_file_row(row, folder))
 
         return jsonify(added=results, errors=errors), 201
 
@@ -515,8 +522,7 @@ def create_app(service: Service) -> Flask:
             if err:
                 errors.append({"name": name, "error": err.message})
             else:
-                _file_row(row, folder)
-                added.append(dict(row, folder_id=folder) if folder else row)
+                added.append(_file_row(row, folder))
         return jsonify(added=added, errors=errors), 201
 
     @app.patch("/api/library/<h>")
@@ -624,25 +630,25 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="parent_id must be a folder id or null"), 400
         if not has_name and not supplied:
             return jsonify(error="nothing to change"), 400
-        if db.folder_get(folder_id) is None:
-            return jsonify(error="no such folder"), 404
-
+        name = None
         if has_name:
             name, err = _json_name(body)
             if err:
                 return err
-            if not db.folder_rename(folder_id, name):
-                return jsonify(error="no such folder"), 404
-        if supplied:
-            outcome = db.folder_move(folder_id, parent)
-            if outcome == "unknown":
-                return jsonify(error="no such folder"), 404
-            if outcome == "cycle":
-                return jsonify(
-                    error="a folder cannot be moved into its own subtree"), 400
-            if outcome == "too deep":
-                return jsonify(
-                    error=f"folders may nest {config.MAX_FOLDER_DEPTH} deep"), 400
+
+        # One call, so a rejected move cannot leave the rename applied. Doing
+        # them in sequence answered 404 for {"name": "x", "parent_id": 999}
+        # with the folder already renamed.
+        outcome = db.folder_edit(folder_id, name=name, parent_id=parent,
+                                 move=supplied)
+        if outcome == "unknown":
+            return jsonify(error="no such folder"), 404
+        if outcome == "cycle":
+            return jsonify(
+                error="a folder cannot be moved into its own subtree"), 400
+        if outcome == "too deep":
+            return jsonify(
+                error=f"folders may nest {config.MAX_FOLDER_DEPTH} deep"), 400
         return jsonify(db.folder_get(folder_id))
 
     @app.delete("/api/folders/<int:folder_id>")

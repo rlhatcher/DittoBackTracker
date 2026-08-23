@@ -1007,3 +1007,51 @@ def test_an_upload_with_a_junk_folder_id_is_400(client, monkeypatch, path):
 
     assert rv.status_code == 400
     assert db.library_all() == []
+
+
+def test_a_rejected_move_does_not_rename_the_folder(client):
+    """The 404 arrives after the rename would have been written, if the two were
+    separate calls."""
+    f = mkfolder(client, "Before")
+
+    rv = client.patch(f"/api/folders/{f['id']}",
+                      json={"name": "After", "parent_id": 999})
+
+    assert rv.status_code == 404
+    assert db.folder_get(f["id"])["name"] == "Before"
+
+
+def test_a_cyclic_move_does_not_rename_the_folder(client):
+    top = mkfolder(client, "Before")
+    kid = mkfolder(client, "Kid", top["id"])
+
+    rv = client.patch(f"/api/folders/{top['id']}",
+                      json={"name": "After", "parent_id": kid["id"]})
+
+    assert rv.status_code == 400
+    assert db.folder_get(top["id"])["name"] == "Before"
+
+
+def test_an_upload_reports_the_folder_the_track_is_actually_in(client, monkeypatch):
+    """The folder is checked before the file is taken, but a forced delete can
+    commit while the upload is being written. The response must describe the
+    database rather than the request."""
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+    f = mkfolder(client, "Standards")
+
+    real_set = db.library_set_folder
+
+    def vanish(h, folder_id):
+        # the folder goes between the check and the filing
+        db.conn().execute("DELETE FROM folders WHERE id=?", (folder_id,))
+        db.conn().commit()
+        return real_set(h, folder_id)
+
+    monkeypatch.setattr(db, "library_set_folder", vanish)
+    rv = upload(client, "/api/library", folder_id=str(f["id"]))
+
+    assert rv.status_code == 201
+    row = rv.get_json()["added"][0]
+    assert row["folder_id"] is None, "reported a folder the track is not in"
+    assert db.library_get(row["source_hash"])["folder_id"] is None

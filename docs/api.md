@@ -238,14 +238,25 @@ Every track on the device, newest first.
     "folder_id": null, "position": 0 } ]
 ```
 
+**This endpoint returns newest first**, as it always has. `position` is not its
+order; see tree order below.
+
 `folder_id` is the folder holding the track, or `null` for the top level. A
 track whose folder has gone reads as `null` too, so it surfaces at the top level
 rather than nowhere.
 
-**Tree order** is depth-first pre-order: a folder's own tracks, ordered by
-`(position, added, source_hash)`, then its subfolders in `(position, id)` order,
-each expanded the same way. Everything that walks the library uses it, so the
-order the tree renders in is the order a folder assign writes in.
+### Tree order
+
+A second, derived order, and not the order of any response body. It is how the
+client should render the tree, and how a folder's contents are walked
+server-side:
+
+> Depth-first pre-order: a folder's own tracks, ordered by
+> `(position, added, source_hash)`, then its subfolders in `(position, id)`
+> order, each expanded the same way.
+
+Both places use the same definition, so the order the tree draws in is the order
+a folder assign writes in.
 
 The whole list, unpaginated: a few hundred rows is a small response, and
 searching and sorting are the client's business. Deliberately **not** part of

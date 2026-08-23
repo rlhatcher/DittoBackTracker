@@ -572,12 +572,23 @@ def folder_rename(folder_id: int, name: str) -> bool:
 
 
 def folder_move(folder_id: int, parent_id: Optional[int]) -> str:
-    """Reparent a folder. Returns "ok", "unknown", "cycle" or "too deep".
+    """Reparent a folder. See folder_edit."""
+    return folder_edit(folder_id, parent_id=parent_id, move=True)
 
-    The cycle check runs inside the same transaction as the UPDATE, never before
-    it. Between a check and a write, another thread's reparent can make the
-    answer stale, and the pair of moves that results leaves a subtree pointing
-    into itself and unreachable from the top level for good.
+
+def folder_edit(folder_id: int, name: Optional[str] = None,
+                parent_id: Optional[int] = None, move: bool = False) -> str:
+    """Rename a folder, reparent it, or both. Returns "ok", "unknown", "cycle"
+    or "too deep".
+
+    Both in one transaction, because a caller doing them separately gets a
+    rename that survives a rejected move: PATCH with a new name and a parent
+    that turns out to be a cycle answers 400 with the folder already renamed.
+
+    The cycle check runs inside that same transaction, never before it. Between
+    a check and a write, another thread's reparent can make the answer stale,
+    and the pair of moves that results leaves a subtree pointing into itself and
+    unreachable from the top level for good.
     """
     c = conn()
     c.execute("BEGIN IMMEDIATE")
@@ -585,6 +596,11 @@ def folder_move(folder_id: int, parent_id: Optional[int]) -> str:
         if not c.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
             c.rollback()
             return "unknown"
+        if not move:
+            if name is not None:
+                c.execute("UPDATE folders SET name=? WHERE id=?", (name, folder_id))
+            c.commit()
+            return "ok"
         if parent_id is not None and not c.execute(
                 "SELECT 1 FROM folders WHERE id=?", (parent_id,)).fetchone():
             c.rollback()
@@ -610,6 +626,10 @@ def folder_move(folder_id: int, parent_id: Optional[int]) -> str:
         pos = c.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM folders WHERE parent_id IS ?",
             (parent_id,)).fetchone()[0]
+        # Every rejection above has rolled back, so the rename lands only once
+        # the move is known to be legal.
+        if name is not None:
+            c.execute("UPDATE folders SET name=? WHERE id=?", (name, folder_id))
         c.execute("UPDATE folders SET parent_id=?, position=? WHERE id=?",
                   (parent_id, pos, folder_id))
         c.commit()
@@ -644,8 +664,10 @@ def folder_delete(folder_id: int, force: bool = False) -> Optional[Dict]:
         kids = [r["id"] for r in c.execute(
             "SELECT id FROM folders WHERE parent_id=? ORDER BY position, id",
             (folder_id,))]
-        tracks = c.execute("SELECT count(*) FROM library WHERE folder_id=?",
-                           (folder_id,)).fetchone()[0]
+        moving = [r["source_hash"] for r in c.execute(
+            """SELECT source_hash FROM library WHERE folder_id=?
+                ORDER BY position, added, source_hash""", (folder_id,))]
+        tracks = len(moving)
         if (kids or tracks) and not force:
             c.rollback()
             return {"deleted": False, "folders": kids, "tracks": tracks}
@@ -655,15 +677,17 @@ def folder_delete(folder_id: int, force: bool = False) -> Optional[Dict]:
         for i, kid in enumerate(kids):
             c.execute("UPDATE folders SET parent_id=?, position=? WHERE id=?",
                       (parent, pos + i, kid))
+        # One statement cannot number these. A correlated subquery counting
+        # siblings sees folder_id already set to the destination, so every
+        # promoted track counts the same pre-existing rows and they all land on
+        # one position. Numbering them here keeps them distinct and contiguous,
+        # the same way the child folders above are handled.
         tpos = c.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM library WHERE folder_id IS ?",
             (parent,)).fetchone()[0]
-        c.execute("""UPDATE library SET folder_id=?,
-                        position = ? + (SELECT count(*) FROM library l2
-                                         WHERE l2.folder_id = library.folder_id
-                                           AND (l2.added, l2.source_hash)
-                                             < (library.added, library.source_hash))
-                      WHERE folder_id=?""", (parent, tpos, folder_id))
+        for i, h in enumerate(moving):
+            c.execute("UPDATE library SET folder_id=?, position=? WHERE source_hash=?",
+                      (parent, tpos + i, h))
         c.execute("DELETE FROM folders WHERE id=?", (folder_id,))
         c.commit()
         return {"deleted": True, "folders": kids, "tracks": tracks, "to": parent}

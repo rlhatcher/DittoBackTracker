@@ -668,7 +668,8 @@ def test_deleting_an_unknown_folder_reports_it(fresh_db):
 def test_deleting_a_folder_that_holds_anything_is_refused_and_changes_nothing(fresh_db):
     f = db.folder_add("Standards")
     kid = db.folder_add("Ballads", f["id"])
-    seed_track(H[0]); db.library_set_folder(H[0], f["id"])
+    seed_track(H[0])
+    db.library_set_folder(H[0], f["id"])
 
     r = db.folder_delete(f["id"])
 
@@ -681,7 +682,8 @@ def test_deleting_a_folder_never_deletes_a_track(fresh_db):
     """The one that matters. A library row is the only thing keeping its audio
     alive, so a folder delete that took its contents with it destroys files."""
     f = db.folder_add("Standards")
-    seed_track(H[0], "Blue Bossa"); db.library_set_folder(H[0], f["id"])
+    seed_track(H[0], "Blue Bossa")
+    db.library_set_folder(H[0], f["id"])
 
     db.folder_delete(f["id"], force=True)
 
@@ -693,7 +695,8 @@ def test_a_forced_delete_promotes_children_to_the_parent(fresh_db):
     top = db.folder_add("Top")
     mid = db.folder_add("Mid", top["id"])
     leaf = db.folder_add("Leaf", mid["id"])
-    seed_track(H[0]); db.library_set_folder(H[0], mid["id"])
+    seed_track(H[0])
+    db.library_set_folder(H[0], mid["id"])
 
     r = db.folder_delete(mid["id"], force=True)
 
@@ -705,7 +708,8 @@ def test_a_forced_delete_promotes_children_to_the_parent(fresh_db):
 def test_a_forced_delete_at_the_top_promotes_to_the_top(fresh_db):
     f = db.folder_add("Standards")
     kid = db.folder_add("Ballads", f["id"])
-    seed_track(H[0]); db.library_set_folder(H[0], f["id"])
+    seed_track(H[0])
+    db.library_set_folder(H[0], f["id"])
 
     r = db.folder_delete(f["id"], force=True)
 
@@ -718,7 +722,8 @@ def test_a_track_whose_folder_was_deleted_still_appears_in_the_library(fresh_db)
     """No foreign keys, so a stale folder_id is possible. It must read as the
     top level rather than as a folder the tree cannot draw."""
     f = db.folder_add("Standards")
-    seed_track(H[0]); db.library_set_folder(H[0], f["id"])
+    seed_track(H[0])
+    db.library_set_folder(H[0], f["id"])
     db.conn().execute("DELETE FROM folders WHERE id=?", (f["id"],))
     db.conn().commit()
 
@@ -754,8 +759,10 @@ def test_the_subtree_walk_puts_a_folders_own_tracks_before_its_subfolders(fresh_
     this is the definition both of them depend on."""
     top = db.folder_add("Top")
     kid = db.folder_add("Kid", top["id"])
-    seed_track(H[0]); db.library_set_folder(H[0], kid["id"])   # deeper, filed first
-    seed_track(H[1]); db.library_set_folder(H[1], top["id"])
+    seed_track(H[0])
+    db.library_set_folder(H[0], kid["id"])      # deeper, and filed first
+    seed_track(H[1])
+    db.library_set_folder(H[1], top["id"])
 
     assert [t["source_hash"] for t in db.folder_tracks(top["id"])] == [H[1], H[0]]
 
@@ -787,8 +794,69 @@ def test_the_subtree_ids_come_back_in_tree_order(fresh_db):
 
 def test_deleting_a_track_leaves_its_folder_standing(fresh_db):
     f = db.folder_add("Standards")
-    seed_track(H[0]); db.library_set_folder(H[0], f["id"])
+    seed_track(H[0])
+    db.library_set_folder(H[0], f["id"])
 
     db.library_delete(H[0])
 
     assert db.folder_get(f["id"]) is not None
+
+
+def test_a_forced_delete_gives_every_promoted_track_its_own_position(fresh_db):
+    """One UPDATE cannot number these. A correlated subquery counting siblings
+    sees folder_id already set to the destination, so all of them land on the
+    same position and the stored order is lost."""
+    dest = db.folder_add("Dest")
+    doomed = db.folder_add("Doomed", dest["id"])
+    for h in H[:2]:
+        seed_track(h)
+        db.library_set_folder(h, dest["id"])        # already at the destination
+    for h in H[2:5]:
+        seed_track(h)
+        db.library_set_folder(h, doomed["id"])
+
+    db.folder_delete(doomed["id"], force=True)
+
+    moved = [r for r in db.library_all() if r["source_hash"] in H[2:5]]
+    positions = sorted(r["position"] for r in moved)
+    assert positions == [2, 3, 4], "distinct and contiguous, after the two already there"
+
+
+def test_a_forced_delete_keeps_the_promoted_tracks_in_order(fresh_db):
+    dest = db.folder_add("Dest")
+    doomed = db.folder_add("Doomed", dest["id"])
+    for h in H[:3]:
+        seed_track(h)
+        db.library_set_folder(h, doomed["id"])
+
+    db.folder_delete(doomed["id"], force=True)
+
+    assert [t["source_hash"] for t in db.folder_tracks(dest["id"])] == H[:3]
+
+
+def test_a_rejected_move_does_not_leave_the_rename_applied(fresh_db):
+    """Rename and move are one call precisely so this cannot happen."""
+    top = db.folder_add("Before")
+    kid = db.folder_add("Kid", top["id"])
+
+    assert db.folder_edit(top["id"], name="After", parent_id=kid["id"],
+                          move=True) == "cycle"
+
+    assert db.folder_get(top["id"])["name"] == "Before"
+
+
+def test_a_rename_without_a_move_still_applies(fresh_db):
+    f = db.folder_add("Before")
+    assert db.folder_edit(f["id"], name="After") == "ok"
+    assert db.folder_get(f["id"])["name"] == "After"
+
+
+def test_a_rename_and_a_move_together_both_apply(fresh_db):
+    dest = db.folder_add("Dest")
+    f = db.folder_add("Before")
+
+    assert db.folder_edit(f["id"], name="After", parent_id=dest["id"],
+                          move=True) == "ok"
+
+    after = db.folder_get(f["id"])
+    assert (after["name"], after["parent_id"]) == ("After", dest["id"])
