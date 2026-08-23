@@ -161,14 +161,30 @@ function selectSlot(n){
    With an empty slot already selected the question "where?" is already
    answered, so a click on a track fills it rather than starting a pickup —
    otherwise the user would have to say where twice. */
+/* Redraw after a change to UI-only state, when there may be no snapshot yet.
+
+   /api/library is fetched at load and does not wait for the event stream, and
+   the last line of this file says so: the card fills "even if the event stream
+   is slow or never comes up". So the library can have rows on screen while
+   `state` is still null, and render() dereferences the snapshot from its second
+   line. A row click in that window threw on `s.pedal` and left pickedTrack set
+   with nothing painted.
+
+   The other render(state) callers are reachable only after a cell or a list row
+   exists, and both are built by render(), so they cannot run before the first
+   snapshot. */
+function repaint(){
+  if (state) render(state); else renderLibrary();
+}
+
 function pickUp(r){
-  if (selected !== null && !(state.slots || []).some(x => x.slot === selected)){
+  if (selected !== null && !((state && state.slots) || []).some(x => x.slot === selected)){
     assignToSlot(r, selected);
     return;
   }
   const same = pickedTrack === r.source_hash;
   pickedTrack = same ? null : r.source_hash;
-  render(state);
+  repaint();
   // render() has just rewritten #msg from the snapshot, so this goes after it.
   if (!same) say(`Choose a slot for “${r.name}”`);
 }
@@ -176,7 +192,7 @@ function pickUp(r){
 function cancelPickup(){
   if (pickedTrack === null) return;
   pickedTrack = null;
-  render(state);
+  repaint();
 }
 
 /* What the drop zone's note says, which is always about what you can do next.
@@ -682,9 +698,12 @@ function say(text){ setText($("#msg"), text); $("#msg").className = "msg"; holdM
 function warn(text){ setText($("#msg"), text); $("#msg").className = "msg warn"; holdMsg(); }
 function fail(text){ setText($("#msg"), text); $("#msg").className = "msg err"; holdMsg(); }
 
+// Returns whether it landed. Most callers ignore that; the slot field needs it
+// to know whether the number the user typed is now true.
 async function moveTo(src, dst){
   const r = await api(`/api/slots/${src}/move`, jsonBody({to: dst}));
   if (!r.ok) failFrom(r, "Move failed");
+  return r.ok;
 }
 
 async function send(files, start){
@@ -1197,8 +1216,13 @@ function revertSlotField(r){
   renderLibrary();
 }
 
-/* Enter or blur commits what was typed. Every branch clears the draft first, so
-   a failure leaves the field showing the truth rather than the attempt. */
+/* Enter or blur commits what was typed.
+
+   Clearing the draft is not enough to put a rejected number back. The field's
+   value is in the DOM, and only a rebuild reconstructs it — which happens when
+   libKey moves, which happens when the snapshot changes. A refused move or
+   assign changes nothing, so without an explicit revert the field would sit
+   there showing a number the pedal never accepted. */
 async function commitSlotField(r, slots){
   const raw = (slotDraft[r.source_hash] ?? "").trim();
   if (slotDraft[r.source_hash] === undefined) return;    // nothing was typed
@@ -1236,9 +1260,9 @@ async function commitSlotField(r, slots){
     // One call, not assign-then-delete: two calls can fail between them and
     // leave the track in both slots. move already does move-or-swap, which is
     // also the better reading of "vacating whatever slot it held".
-    await moveTo(lowest, n);
+    if (!await moveTo(lowest, n)) revertSlotField(r);
   } else {
-    await assignToSlot(r, n);
+    if (!await assignToSlot(r, n)) revertSlotField(r);
   }
 }
 
@@ -1379,7 +1403,7 @@ async function assignToSlot(r, slot){
 
   const resp = await api(`/api/slots/${slot}/assign`,
                          jsonBody({hash: r.source_hash}));
-  if (!resp.ok){ failFrom(resp, `Couldn't put that in slot ${pad}`); return; }
+  if (!resp.ok){ failFrom(resp, `Couldn't put that in slot ${pad}`); return false; }
   pickedTrack = null;
   selected = null;      // consumed; the next click picks its own target
 
@@ -1395,6 +1419,7 @@ async function assignToSlot(r, slot){
 
   loadLibrary();        // the slot badges come from the snapshot, but `added`
                         // ordering and any server-side change do not
+  return true;
 }
 
 async function forget(r, force){
