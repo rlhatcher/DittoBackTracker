@@ -20,7 +20,8 @@ format and writes them to the right slots.
 
 ## What it does
 
-- Drag and drop from any browser
+- Drag and drop from any browser: files land in the library, and a leading
+  number — "07 Blue Bossa.mp3" — sends one straight to that slot
 - Converts to the pedal's format
 - 99-slot map showing what is loaded, converting or written
 - Drag between slots to reorder; dropping onto an occupied slot swaps them
@@ -29,6 +30,7 @@ format and writes them to the right slots.
 - Capacity shown in minutes, because the pedal holds about 63 minutes in total
 - Keep a library on the device: uploads stay until you delete them, so you can
   swap what the pedal carries without uploading again
+- Group the library into folders, and fill a run of slots from one in a click
 - Rename, search and preview library tracks in the browser
 - Download or remove a loop the pedal recorded
 - Never writes `LOOP.WAV`, so recorded loops are safe
