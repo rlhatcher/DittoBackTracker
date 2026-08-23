@@ -307,6 +307,93 @@ slots are cleared regardless, and reporting an empty result would hide it.
 
 ---
 
+## GET /api/folders
+
+Every folder on the device, flat. The client builds the tree.
+
+```json
+[ { "id": 1, "name": "Standards", "parent_id": null, "position": 0,
+    "created": 1786070001.0 } ]
+```
+
+`parent_id` is `null` for a top-level folder. Ordered top level first, then by
+`parent_id`, `position`, `id`.
+
+No counts or durations. The client already holds every track with its duration
+and its folder from `GET /api/library`, so folding a subtree costs one pass and
+no round trip, and it stays correct while the search box is filtering. Computing
+it here would be a recursive query per render, and a second source of truth that
+can disagree with the rows on screen.
+
+Folders are deliberately **not** in the state snapshot, for the same reason the
+library is not: that object is pushed several times a second during a conversion
+and has to stay small. Refetch this and `/api/library` when the event stream
+connects.
+
+---
+
+## POST /api/folders
+
+```json
+{ "name": "Standards", "parent_id": null }
+```
+
+`parent_id` is optional and may be `null` for the top level. `201` with the new
+row.
+
+| Status | Meaning |
+|---|---|
+| `400` | Empty name, a name over 200 characters, a `parent_id` that is not an integer or `null`, or a nesting depth past `MAX_FOLDER_DEPTH` (8) |
+| `404` | `parent_id` names no folder |
+
+---
+
+## PATCH /api/folders/&lt;id&gt;
+
+```json
+{ "name": "Set list", "parent_id": 4 }
+```
+
+Both fields optional, at least one required. A body with neither is `400`.
+`parent_id: null` moves the folder to the top level, which is why absent and
+`null` cannot mean the same thing. A move appends the folder to the end of its
+new parent. Returns the updated row.
+
+| Status | Meaning |
+|---|---|
+| `400` | Nothing to change, a bad name, a bad `parent_id`, a move into the folder's own subtree, or a move that would push the subtree past the depth limit |
+| `404` | No such folder, or no such new parent |
+
+The depth limit applies to the deepest leaf after the move, not to the folder
+being moved, so a shallow move of a tall subtree can be refused.
+
+---
+
+## DELETE /api/folders/&lt;id&gt;[?force]
+
+Dissolve a folder. **Never deletes a track**, under any flag. A library row is
+the only thing keeping its audio alive, and a folder is a grouping rather than a
+container.
+
+Without `force`, a folder holding anything is refused so the client can say what
+would move:
+
+```json
+{ "error": "not empty", "folders": [4, 5], "tracks": 9 }
+```
+
+With `force`, the contents are promoted to the folder's own parent and appended
+there:
+
+```json
+{ "ok": true, "to": 1, "promoted": { "folders": [4, 5], "tracks": 9 } }
+```
+
+`to` is the folder the contents moved to, or `null` for the top level. `404` if
+there is no such folder.
+
+---
+
 ## POST /api/slots/&lt;n&gt;/assign
 
 Put a track that is already in the library into slot `n`, without uploading it

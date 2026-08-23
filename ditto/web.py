@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 from flask import (Flask, Response, abort, jsonify, request, send_file,
                    send_from_directory, stream_with_context)
@@ -91,6 +91,36 @@ def _json_str(body, field: str):
         return None
     value = body.get(field)
     return value if isinstance(value, str) else None
+
+
+def _json_name(body) -> "tuple[Optional[str], Optional[tuple]]":
+    """A trimmed, length-checked name, or the error response to return.
+
+    Same rules as a track rename, because a folder in the tree and a track in a
+    row sit next to each other and there is no reason one may be longer.
+    """
+    name = (_json_str(body, "name") or "").strip()
+    if not name:
+        return None, (jsonify(error="name must not be empty"), 400)
+    if len(name) > MAX_NAME_LEN:
+        return None, (jsonify(
+            error=f"name must be {MAX_NAME_LEN} characters or fewer"), 400)
+    return name, None
+
+
+def _json_parent(body) -> "tuple[bool, Optional[int]]":
+    """(supplied, value) for a parent_id field.
+
+    Absent and null mean different things — leave the folder where it is, or
+    move it to the top level — so a caller cannot use None for both.
+    """
+    if not isinstance(body, dict) or "parent_id" not in body:
+        return False, None
+    v = body["parent_id"]
+    if v is None:
+        return True, None
+    # bool is an int subclass, and True would silently mean folder 1.
+    return (True, v) if isinstance(v, int) and not isinstance(v, bool) else (False, None)
 
 
 class IngestError(NamedTuple):
@@ -469,6 +499,96 @@ def create_app(service: Service) -> Flask:
             # assignments changed underneath it.
             return jsonify(error="not found", cleared=slots), 404
         return jsonify(ok=True, cleared=slots)
+
+    # -- folders ---------------------------------------------------------
+    #
+    # These talk to db directly rather than through the service. There is no
+    # device I/O to admit and nothing to queue, and folders do not ride the
+    # state snapshot, so calling library_changed() would rebuild and broadcast a
+    # full snapshot that says nothing new. They also keep working while the
+    # device is shutting down, for the same reason a rename does: one row
+    # changes and the pedal is never touched.
+
+    @app.get("/api/folders")
+    def folders():
+        """Every folder, flat. The client builds the tree and folds the counts.
+
+        No counts or durations here on purpose. The browser already holds every
+        track with its duration and its folder, so summing a subtree is one pass
+        with no round trip, and it stays right when the search box filters the
+        rows. Aggregating here would be a recursive CTE per render on a Pi Zero,
+        and a second source of truth for "16 tracks, 7 folders" that can
+        disagree with what is actually on screen.
+        """
+        return jsonify(db.folders_all())
+
+    @app.post("/api/folders")
+    def folder_create():
+        body = request.get_json(silent=True)
+        name, err = _json_name(body)
+        if err:
+            return err
+        supplied, parent = _json_parent(body)
+        if isinstance(body, dict) and "parent_id" in body and not supplied:
+            return jsonify(error="parent_id must be a folder id or null"), 400
+        if parent is not None and db.folder_get(parent) is None:
+            return jsonify(error="no such folder"), 404
+        row = db.folder_add(name, parent)
+        if row is None:
+            # folder_add re-checks the parent under its own lock, so a None here
+            # with a parent that existed a moment ago is the depth limit.
+            return jsonify(
+                error=f"folders may nest {config.MAX_FOLDER_DEPTH} deep"), 400
+        return jsonify(row), 201
+
+    @app.patch("/api/folders/<int:folder_id>")
+    def folder_update(folder_id: int):
+        body = request.get_json(silent=True)
+        has_name = isinstance(body, dict) and "name" in body
+        supplied, parent = _json_parent(body)
+        if isinstance(body, dict) and "parent_id" in body and not supplied:
+            return jsonify(error="parent_id must be a folder id or null"), 400
+        if not has_name and not supplied:
+            return jsonify(error="nothing to change"), 400
+        if db.folder_get(folder_id) is None:
+            return jsonify(error="no such folder"), 404
+
+        if has_name:
+            name, err = _json_name(body)
+            if err:
+                return err
+            if not db.folder_rename(folder_id, name):
+                return jsonify(error="no such folder"), 404
+        if supplied:
+            outcome = db.folder_move(folder_id, parent)
+            if outcome == "unknown":
+                return jsonify(error="no such folder"), 404
+            if outcome == "cycle":
+                return jsonify(
+                    error="a folder cannot be moved into its own subtree"), 400
+            if outcome == "too deep":
+                return jsonify(
+                    error=f"folders may nest {config.MAX_FOLDER_DEPTH} deep"), 400
+        return jsonify(db.folder_get(folder_id))
+
+    @app.delete("/api/folders/<int:folder_id>")
+    def folder_remove(folder_id: int):
+        """Remove a folder. Never removes a track.
+
+        A library row is the only thing keeping its audio alive, so this is a
+        grouping being dissolved, not a container being emptied. `?force`
+        promotes the contents to the folder's own parent; without it a folder
+        holding anything is refused so the client can say what would move.
+        """
+        force = "force" in request.args
+        r = db.folder_delete(folder_id, force=force)
+        if r is None:
+            return jsonify(error="no such folder"), 404
+        if not r["deleted"]:
+            return jsonify(error="not empty", folders=r["folders"],
+                           tracks=r["tracks"]), 409
+        return jsonify(ok=True, to=r["to"],
+                       promoted={"folders": r["folders"], "tracks": r["tracks"]})
 
     @app.get("/api/library/<h>/audio")
     def library_audio(h: str):
