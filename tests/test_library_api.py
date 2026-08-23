@@ -858,3 +858,152 @@ def test_the_snapshot_does_not_carry_the_folder_tree(client):
 def test_folder_mutations_are_covered_by_the_cross_site_guard(client, method, path):
     rv = getattr(client, method)(path, headers={"Origin": "http://evil.example"})
     assert rv.status_code == 403
+
+
+# --- filing tracks ----------------------------------------------------------
+
+def test_a_patch_can_file_a_track(client):
+    f = mkfolder(client, "Standards")
+    seed(H1, "Blue Bossa")
+
+    rv = client.patch(f"/api/library/{H1}", json={"folder_id": f["id"]})
+
+    assert rv.status_code == 200
+    assert rv.get_json()["folder_id"] == f["id"]
+
+
+def test_filing_a_track_does_not_rename_it(client):
+    f = mkfolder(client, "Standards")
+    seed(H1, "Blue Bossa")
+
+    client.patch(f"/api/library/{H1}", json={"folder_id": f["id"]})
+
+    assert db.library_get(H1)["name"] == "Blue Bossa"
+
+
+def test_a_patch_can_rename_and_file_in_one_call(client):
+    f = mkfolder(client, "Standards")
+    seed(H1, "Before")
+
+    rv = client.patch(f"/api/library/{H1}",
+                      json={"name": "After", "folder_id": f["id"]})
+
+    body = rv.get_json()
+    assert body["name"] == "After"
+    assert body["folder_id"] == f["id"]
+
+
+def test_a_track_can_be_filed_back_to_the_top_level(client):
+    f = mkfolder(client, "Standards")
+    seed(H1)
+    db.library_set_folder(H1, f["id"])
+
+    rv = client.patch(f"/api/library/{H1}", json={"folder_id": None})
+
+    assert rv.status_code == 200
+    assert rv.get_json()["folder_id"] is None
+
+
+def test_filing_into_an_unknown_folder_is_404_and_changes_nothing(client):
+    seed(H1, "Before")
+
+    rv = client.patch(f"/api/library/{H1}",
+                      json={"name": "After", "folder_id": 999})
+
+    assert rv.status_code == 404
+    assert db.library_get(H1)["name"] == "Before", "the rename must not survive"
+
+
+@pytest.mark.parametrize("folder", ["1", 1.5, True, [], {}])
+def test_a_folder_id_that_is_not_a_folder_id_is_400(client, folder):
+    seed(H1)
+    rv = client.patch(f"/api/library/{H1}", json={"folder_id": folder})
+    assert rv.status_code == 400
+
+
+def test_a_patch_with_neither_a_name_nor_a_folder_is_400(client):
+    seed(H1)
+    assert client.patch(f"/api/library/{H1}", json={}).status_code == 400
+
+
+def test_filing_still_works_while_the_device_is_ending(client, service):
+    """One row changes and the pedal is never touched, so this is not work the
+    shutdown has to refuse — the same reasoning as a rename."""
+    f = mkfolder(client, "Standards")
+    seed(H1)
+    service.ending = True
+
+    rv = client.patch(f"/api/library/{H1}", json={"folder_id": f["id"]})
+
+    assert rv.status_code == 200
+
+
+def upload(client, path, name="t.mp3", **form):
+    return client.post(path, data={"file": (io.BytesIO(b"ID3 pretend"), name), **form},
+                       content_type="multipart/form-data")
+
+
+def test_a_library_upload_files_its_track_in_the_named_folder(client, monkeypatch):
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+    f = mkfolder(client, "Standards")
+
+    rv = upload(client, "/api/library", folder_id=str(f["id"]))
+
+    assert rv.status_code == 201
+    added = rv.get_json()["added"]
+    assert len(added) == 1
+    assert db.library_get(added[0]["source_hash"])["folder_id"] == f["id"]
+
+
+def test_an_upload_with_no_folder_lands_at_the_top_level(client, monkeypatch):
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+
+    rv = upload(client, "/api/library")
+
+    h = rv.get_json()["added"][0]["source_hash"]
+    assert db.library_get(h)["folder_id"] is None
+
+
+def test_a_slot_upload_files_its_track_too(client, monkeypatch):
+    """The track reaches the library either way, so it should be filable either
+    way."""
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+    f = mkfolder(client, "Standards")
+
+    rv = upload(client, "/api/slots/3", folder_id=str(f["id"]))
+
+    assert rv.status_code == 201
+    assert db.library_get(rv.get_json()["source_hash"])["folder_id"] == f["id"]
+
+
+@pytest.mark.parametrize("path", ["/api/library", "/api/upload", "/api/slots/3"])
+def test_an_upload_to_an_unknown_folder_lands_nothing(client, monkeypatch, path):
+    """The whole request fails, not each file in it. Every file would fail the
+    same way, and a half-applied batch is worse than a refused one.
+
+    probe is stubbed so the file *would* be accepted. Without that, nothing
+    lands because the bytes are not audio, and the test passes whether the
+    folder is checked before the ingest or after it.
+    """
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+
+    rv = upload(client, path, folder_id="999")
+
+    assert rv.status_code == 404
+    assert db.library_all() == [], "a refused request must not leave a track behind"
+    assert db.all_slots() == []
+
+
+@pytest.mark.parametrize("path", ["/api/library", "/api/upload", "/api/slots/3"])
+def test_an_upload_with_a_junk_folder_id_is_400(client, monkeypatch, path):
+    monkeypatch.setattr(core.media, "probe", lambda p: core.media.AudioInfo(
+        "mp3", 44100, 2, 12.0))
+
+    rv = upload(client, path, folder_id="not-a-number")
+
+    assert rv.status_code == 400
+    assert db.library_all() == []

@@ -93,6 +93,13 @@ Multipart. One or more `file` parts. This is what the UI uses.
 |---|---|
 | `file` | Repeatable |
 | `start` | Optional, 1–`slot_count` (99 today). Files fill consecutive slots from here |
+| `folder_id` | Optional. Files the uploaded tracks in this folder. Also accepted by `POST /api/library` and `POST /api/slots/<n>` |
+
+Both targeting fields are checked before any file is taken, so a request aimed
+somewhere that does not exist lands nothing rather than half a batch. An unknown
+`folder_id` is `404` for the whole request rather than an error per file: every
+file would fail identically, and the client's tree is stale, which is one
+problem and not N.
 
 Without `start`, a leading number in the filename picks the slot
 (`07 Blue Bossa.mp3` → slot 7). Files without one, or whose number is taken,
@@ -270,11 +277,26 @@ the whole request was unusable (no `file` part at all).
 
 ## PATCH /api/library/&lt;hash&gt;
 
-Rename a track. Body `{"name": "..."}`; 1–200 characters after trimming.
+Rename a track, file it in a folder, or both.
 
-Returns the updated row. `400` for an empty or overlong name, `404` if the
-track is unknown. The new name appears in the slot list, the grid tooltips and
-the print view immediately — there is only one copy of it.
+```json
+{ "name": "Blue Bossa", "folder_id": 3 }
+```
+
+Both fields optional, at least one required. `name` is 1–200 characters after
+trimming. `folder_id: null` files the track at the top level, which is why
+absent and `null` cannot mean the same thing. Returns the updated row.
+
+| Status | Meaning |
+|---|---|
+| `400` | Nothing to change, an empty or overlong name, or a `folder_id` that is not an integer or `null` |
+| `404` | No such track, or no such folder |
+
+The folder is checked before anything is written, so a request naming a missing
+folder does not leave a rename applied.
+
+The new name appears in the slot list, the grid tooltips and the print view
+immediately — there is only one copy of it.
 
 ---
 
