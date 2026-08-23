@@ -48,8 +48,8 @@
       <label id="drop" for="file">
         <span id="drophead">Drop audio here, or choose a file</span>
         <span id="dropnote">
-          Drop straight onto a slot to target it, or use a leading number —
-          “07 Blue Bossa.mp3”
+          Files land in the library; a leading number sends one straight to that
+          slot — “07 Blue Bossa.mp3”
         </span>
       </label>
       <input type="file" id="file" multiple accept="audio/*" class="vh">
@@ -70,13 +70,18 @@
     <section id="libcard">
       <div class="listhead">
         <h2>Library — stays on the device</h2>
-        <label class="libbtn" for="libfile" id="libadd" title="Add tracks without putting them on the pedal">Add files</label>
+        <span class="libhead-acts">
+          <button class="libbtn" id="tolevel" type="button" title="Take the track you picked up out of its folder" hidden>Out of folder</button>
+          <button class="libbtn" id="newfolder" type="button" title="Group tracks into a folder">New folder</button>
+          <label class="libbtn" for="libfile" id="libadd" title="Add tracks without putting them on the pedal">Add files</label>
+        </span>
       </div>
       <input type="file" id="libfile" multiple accept="audio/*" class="vh">
       <div class="libtools" id="libtools" hidden>
-        <input type="search" id="libq" placeholder="Search the library" aria-label="Search the library"
+        <input type="search" id="libq" placeholder="Search every folder" aria-label="Search every folder"
                autocomplete="off" autocorrect="off" spellcheck="false">
         <select id="libsort" aria-label="Sort the library">
+          <option value="folder">Folder order</option>
           <option value="added">Newest first</option>
           <option value="name">Name</option>
           <option value="duration">Length</option>

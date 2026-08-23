@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from ditto import web
+
 STATIC = Path(__file__).resolve().parent.parent / "ditto" / "static"
 CSS = (STATIC / "app.css").read_text()
 JS = (STATIC / "app.js").read_text()
@@ -139,6 +141,10 @@ TEXT = [
     # the per-track slot field, and the marker for a track in several slots
     ("--color-text",     "--color-surface",     12, 800, "a slot field"),
     ("--text-faint",     "--color-surface",     11, 400, "the extra-slots marker"),
+    # A top-level folder row is tinted, so it is a third ground, same as the
+    # hovered and selected rows above.
+    ("--color-text",     "--surface-group",     14, 800, "a folder name"),
+    ("--text-faint",     "--surface-group",     11, 400, "a folder's count"),
     # the slot numbers printed in the map, one per cell state
     ("--text-faint",     "--color-bg",          10, 400, "an empty slot number"),
     ("--on-state",       "--state-synced",      10, 400, "an on-pedal slot number"),
@@ -222,6 +228,16 @@ def test_only_the_token_layer_names_a_raw_ramp_step():
               for m in re.finditer(r"color-(?:accent|neutral)-[0-9]00", body)
               if not start <= m.start() < end]
     assert not strays, f"raw ramp steps used outside @layer tokens, near lines {strays}"
+
+
+def test_the_page_reads_a_leading_slot_number_the_way_the_server_does():
+    """app.js keeps its own copy of LEADING_NUM, because it decides which of the
+    two endpoints a dropped file is sent to while the server decides which slot
+    it lands in. Let them drift and an unnumbered file quietly takes a slot, or
+    a numbered one quietly does not — no error either way."""
+    js = re.search(r"const LEADING_NUM\s*=\s*/(.+?)/;", _strip_comments(JS)).group(1)
+    assert js == web.LEADING_NUM.pattern, (
+        f"app.js matches {js!r}, web.py matches {web.LEADING_NUM.pattern!r}")
 
 
 def test_the_arrow_keys_step_the_same_grid_the_css_draws():

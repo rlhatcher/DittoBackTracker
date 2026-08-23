@@ -406,6 +406,99 @@ class Service:
                 return
             self._work.put(("convert", slot, source_hash, src))
 
+    def plan_folder(self, folder_id: int,
+                    start: Optional[int] = None) -> Optional[Dict]:
+        """Which slots a folder's tracks would fill. Writes nothing, queues nothing.
+
+        The preview and the assignment run this same function, so the label on
+        the button and the fill it performs are one computation at two moments
+        rather than two that can drift apart.
+
+        Tracks arrive in tree order and go into consecutive slots, skipping any
+        that holds a loop — the automatic-placement rule, the same one an
+        unnumbered upload follows. `start` and `end` are the first and last slot
+        actually written, so they span those skips: a nine-track folder starting
+        at 09 over one loop reads 09-18.
+
+        None if there is no such folder.
+        """
+        folder = db.folder_get(folder_id)
+        if folder is None:
+            return None
+        if start is not None:
+            self._check_slot(start)
+
+        # Read once, before placing. Re-reading the loop set part way through
+        # would produce a plan that no single moment agrees with.
+        loops = self._loops
+        tracks = db.folder_tracks(folder_id)
+        if start is None:
+            taken = {s["slot"] for s in db.all_slots()} | loops
+            start = next((n for n in range(1, config.SLOTS + 1) if n not in taken),
+                         config.SLOTS + 1)
+
+        assigned: List[Dict] = []
+        unplaced: List[Dict] = []
+        n = start
+        for t in tracks:
+            while n <= config.SLOTS and n in loops:
+                n += 1
+            if n > config.SLOTS:
+                # Reported, never silent. Dropping the overflow would put nine
+                # tracks on the pedal, lose four, and say nothing about it.
+                unplaced.append({"source_hash": t["source_hash"],
+                                 "name": t["name"],
+                                 "error": f"no room past slot {config.SLOTS}"})
+                continue
+            assigned.append({"slot": n, "source_hash": t["source_hash"],
+                             "name": t["name"]})
+            n += 1
+
+        end = assigned[-1]["slot"] if assigned else None
+        return {
+            "folder_id": folder_id,
+            "folder": folder["name"],
+            "start": assigned[0]["slot"] if assigned else None,
+            "end": end,
+            "assigned": assigned,
+            # Every loop between where the fill was asked to begin and where it
+            # ended. Asking for 09 and being told the fill starts at 10 is only
+            # legible with the 09 in here.
+            "skipped_loops": sorted(x for x in loops
+                                    if end is not None and start <= x <= end),
+            "unplaced": unplaced,
+            # _loops is empty whenever the pedal is absent — presence is only
+            # knowable mounted — so an unmounted plan cannot skip loop slots and
+            # says so rather than letting a client believe it did.
+            "loops_known": self.pedal_state == "mounted",
+        }
+
+    def assign_folder(self, folder_id: int,
+                      start: Optional[int] = None) -> Optional[Dict]:
+        """Fill a run of slots with a folder's tracks, as one admitted step.
+
+        One admission for the whole fill rather than one per track. `_admitting`
+        is what makes shutdown safe, and nine admissions let end_session land
+        between the fourth and the fifth: half a set list on the pedal, with a
+        success reported for each half. One `_emit` at the end for the same
+        reason in reverse — nine would each rebuild a full snapshot and
+        broadcast 99 slots to every subscriber.
+
+        The plan is recomputed inside the admission, so the loop set it skips is
+        the one this device holds now and not the one a preview saw fifteen
+        seconds ago on a keepalive-only stream.
+        """
+        self._check_accepting()
+        with self._admitting():
+            plan = self.plan_folder(folder_id, start)
+            if plan is None:
+                return None
+            for item in plan["assigned"]:
+                self._assign(item["slot"], item["source_hash"])
+        if plan["assigned"]:
+            self._emit()
+        return plan
+
     def clear(self, slot: int) -> Optional[int]:
         self._check_slot(slot)
         with self._admitting():
@@ -1073,6 +1166,12 @@ class Service:
         would be ruinous here: mono 24-bit at 44.1 kHz is 132 kB/s, so a
         four-minute track stages to ~32 MB, and a hundred of them would be ~3 GB
         of cache standing behind a few hundred MB of actual music.
+
+        A folder assign makes that bound ordinary rather than pathological: one
+        click can queue forty conversions, so ~1.3 GB of cache can stand behind
+        a pedal that holds an hour of audio, until the next pass. It is still
+        bounded by slot_count and not by the library, which is the property that
+        matters.
 
         Runs at startup and at session end. The startup pass is the one that
         matters after a pulled plug, because _halt never ran.

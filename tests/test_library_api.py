@@ -7,6 +7,7 @@ still referenced) lives in the service, not the route. The `service`, `app` and
 `client` fixtures come from conftest.
 """
 
+import hashlib
 import io
 import os
 import threading
@@ -1055,3 +1056,325 @@ def test_an_upload_reports_the_folder_the_track_is_actually_in(client, monkeypat
     row = rv.get_json()["added"][0]
     assert row["folder_id"] is None, "reported a folder the track is not in"
     assert db.library_get(row["source_hash"])["folder_id"] is None
+
+
+# --- folder assign ----------------------------------------------------------
+
+def fill(client, folder_id, *names):
+    """Seed tracks and file them into a folder, in the order given.
+
+    The hash is derived from the name so a test reads the same twice; str.hash
+    is salted per process and would make the fixture different every run.
+    """
+    hashes = []
+    for name in names:
+        h = hashlib.sha1(name.encode()).hexdigest()[:20]
+        seed(h, name)
+        assert client.patch(f"/api/library/{h}",
+                            json={"folder_id": folder_id}).status_code == 200
+        hashes.append(h)
+    return hashes
+
+
+def test_a_folder_fills_consecutive_slots_in_tree_order(client):
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves", "Blue Bossa", "Ceora")
+
+    rv = client.post(f"/api/folders/{f['id']}/assign", json={"start": 9})
+
+    assert rv.status_code == 201
+    body = rv.get_json()
+    assert (body["start"], body["end"]) == (9, 11)
+    assert [a["name"] for a in body["assigned"]] == \
+        ["Autumn Leaves", "Blue Bossa", "Ceora"]
+    assert [db.get_slot(n)["display_name"] for n in (9, 10, 11)] == \
+        ["Autumn Leaves", "Blue Bossa", "Ceora"]
+
+
+def test_a_fill_takes_the_tracks_in_subfolders_too(client):
+    """Tree order: a folder's own tracks, then each subfolder expanded."""
+    top = mkfolder(client, "Set one")
+    sub = mkfolder(client, "Encores", parent=top["id"])
+    fill(client, top["id"], "Autumn Leaves")
+    fill(client, sub["id"], "Ceora")
+
+    rv = client.post(f"/api/folders/{top['id']}/assign", json={"start": 1})
+
+    assert [a["name"] for a in rv.get_json()["assigned"]] == \
+        ["Autumn Leaves", "Ceora"]
+
+
+def test_a_fill_with_no_start_takes_the_first_slot_with_room(client):
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves", "Blue Bossa")
+    seed(H1)
+    client.post("/api/slots/1/assign", json={"hash": H1})
+
+    body = client.post(f"/api/folders/{f['id']}/assign").get_json()
+
+    assert (body["start"], body["end"]) == (2, 3)
+
+
+def test_folder_assign_uses_the_devices_own_loop_set_and_not_the_clients(
+        client, service):
+    """The loop set is scanned at mount and lives only on the device. A client
+    working from a snapshot that can be fifteen seconds old would lose a replug
+    race, so the skip happens here, under the lock that queues the work."""
+    service.pedal_state = "mounted"
+    service._loops = frozenset({10})
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves", "Blue Bossa")
+
+    body = client.post(f"/api/folders/{f['id']}/assign",
+                       json={"start": 9}).get_json()
+
+    assert [a["slot"] for a in body["assigned"]] == [9, 11]
+    assert body["skipped_loops"] == [10]
+    assert (body["start"], body["end"]) == (9, 11), "the range spans the skip"
+    assert body["loops_known"] is True
+    assert db.get_slot(10) is None, "wrote over a loop slot"
+
+
+def test_a_loop_at_the_requested_start_is_reported_as_skipped(client, service):
+    service.pedal_state = "mounted"
+    service._loops = frozenset({9})
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    body = client.get(f"/api/folders/{f['id']}/assign?start=9").get_json()
+
+    assert body["start"] == 10
+    assert body["skipped_loops"] == [9], \
+        "asking for 09 and getting 10 is only legible with the 09 in here"
+
+
+def test_folder_assign_cannot_skip_loops_while_the_pedal_is_absent(client,
+                                                                   service):
+    """Loop presence is only knowable mounted, so an unmounted plan says its
+    range is provisional rather than letting a client believe it skipped."""
+    assert service.pedal_state == "absent"
+    service._loops = frozenset()
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    body = client.post(f"/api/folders/{f['id']}/assign",
+                       json={"start": 9}).get_json()
+
+    assert body["loops_known"] is False
+    assert body["skipped_loops"] == []
+
+
+def test_the_preview_returns_the_plan_the_assign_then_writes(client):
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves", "Blue Bossa")
+
+    preview = client.get(f"/api/folders/{f['id']}/assign?start=4").get_json()
+    written = client.post(f"/api/folders/{f['id']}/assign",
+                          json={"start": 4}).get_json()
+
+    assert preview.pop("dry_run") is True
+    assert written.pop("dry_run") is False
+    assert preview == written
+
+
+def test_the_preview_writes_nothing(client):
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    client.get(f"/api/folders/{f['id']}/assign?start=4")
+
+    assert db.all_slots() == []
+
+
+def test_a_fill_reports_the_tracks_that_did_not_fit(client):
+    """Silent truncation would put two tracks on the pedal and lose two."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves", "Blue Bossa", "Ceora")
+
+    body = client.post(f"/api/folders/{f['id']}/assign",
+                       json={"start": config.SLOTS - 1}).get_json()
+
+    assert [a["slot"] for a in body["assigned"]] == \
+        [config.SLOTS - 1, config.SLOTS]
+    assert [u["name"] for u in body["unplaced"]] == ["Ceora"]
+    assert body["unplaced"][0]["error"] == f"no room past slot {config.SLOTS}"
+
+
+def test_a_fill_with_no_room_at_all_places_nothing(client):
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+    seed(H1)
+    for n in range(1, config.SLOTS + 1):
+        db.put_slot(n, H1, state="synced")
+
+    body = client.post(f"/api/folders/{f['id']}/assign").get_json()
+
+    assert body["assigned"] == []
+    assert (body["start"], body["end"]) == (None, None)
+    assert len(body["unplaced"]) == 1
+
+
+def test_an_empty_folder_assigns_nothing(client):
+    f = mkfolder(client, "Standards")
+
+    body = client.post(f"/api/folders/{f['id']}/assign").get_json()
+
+    assert body["assigned"] == [] and body["unplaced"] == []
+    assert (body["start"], body["end"]) == (None, None)
+
+
+def test_a_fill_is_refused_once_the_device_is_ending(client, service):
+    """It queues pedal work, so it stops when every other pedal operation
+    does — otherwise the API reports slots that poweroff will discard."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves", "Blue Bossa")
+    service.ending = True
+
+    rv = client.post(f"/api/folders/{f['id']}/assign", json={"start": 9})
+
+    assert rv.status_code == 503
+    assert db.all_slots() == []
+
+
+def test_folder_assign_writes_the_whole_plan_or_none_of_it(client, service,
+                                                           monkeypatch):
+    """end_session sets `ending` under the admission lock, so holding that lock
+    across the whole fill is what stops a shutdown landing between the fourth
+    track and the fifth and leaving half a set list on the pedal. Probed with a
+    non-blocking acquire from another thread, which is the mechanism itself —
+    asserting on the outcome of a race would only sometimes run the race."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves", "Blue Bossa", "Ceora")
+    real = service._assign
+    held = []
+
+    def watched(slot, h):
+        got = []
+
+        def probe():
+            # An RLock is reentrant for its owner, so this has to be asked from
+            # a thread that is not the one running the fill.
+            ok = service._admit.acquire(blocking=False)
+            if ok:
+                service._admit.release()
+            got.append(ok)
+
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join()
+        held.append(not got[0])
+        real(slot, h)
+
+    monkeypatch.setattr(service, "_assign", watched)
+    client.post(f"/api/folders/{f['id']}/assign", json={"start": 9})
+
+    assert held == [True, True, True], "the fill let go of the admission"
+
+
+def test_folder_assign_emits_one_snapshot_for_the_whole_fill(client, service,
+                                                             monkeypatch):
+    """Nine emits would each rebuild a full snapshot and broadcast 99 slots to
+    every subscriber. Counted on the request's own thread — the worker emits on
+    its own as the conversions it queued run."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves", "Blue Bossa", "Ceora")
+    caller = threading.current_thread()
+    emits = []
+    real = service._emit
+
+    def counting():
+        if threading.current_thread() is caller:
+            emits.append(1)
+        real()
+
+    monkeypatch.setattr(service, "_emit", counting)
+    client.post(f"/api/folders/{f['id']}/assign", json={"start": 9})
+
+    assert len(emits) == 1
+
+
+def test_a_fill_that_places_nothing_emits_nothing(client, service, monkeypatch):
+    f = mkfolder(client, "Standards")
+    caller = threading.current_thread()
+    emits = []
+    real = service._emit
+    monkeypatch.setattr(service, "_emit",
+                        lambda: (emits.append(1)
+                                 if threading.current_thread() is caller
+                                 else None, real())[1])
+
+    client.post(f"/api/folders/{f['id']}/assign")
+
+    assert emits == []
+
+
+def test_a_fill_over_an_occupied_slot_keeps_an_undo(client):
+    seed(H1, "Was here")
+    client.post("/api/slots/9/assign", json={"hash": H1})
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    client.post(f"/api/folders/{f['id']}/assign", json={"start": 9})
+
+    assert db.get_slot(9)["display_name"] == "Autumn Leaves"
+    assert [t["display_name"] for t in db.trash_items()] == ["Was here"]
+
+
+def test_assigning_an_unknown_folder_is_404(client):
+    assert client.post("/api/folders/99/assign").status_code == 404
+    assert client.get("/api/folders/99/assign").status_code == 404
+
+
+@pytest.mark.parametrize("start", ["abc", "", True, 0, 200, -1])
+def test_a_start_that_is_not_a_slot_number_is_400(client, start):
+    """Absent means "wherever there is room". A start the caller got wrong is a
+    different thing and is refused rather than quietly treated as absent."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    rv = client.post(f"/api/folders/{f['id']}/assign", json={"start": start})
+
+    assert rv.status_code == 400, f"{start!r} was accepted"
+    assert db.all_slots() == []
+
+
+def test_a_start_may_be_the_string_the_user_typed(client):
+    """The page sends the field's text rather than a number, because converting
+    it turns junk into NaN, JSON writes NaN as null, and null here means
+    "wherever there is room" — a junk start would fill from the next free slot
+    instead of being refused."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    rv = client.post(f"/api/folders/{f['id']}/assign", json={"start": "09"})
+
+    assert rv.status_code == 201
+    assert rv.get_json()["start"] == 9
+
+
+def test_a_null_start_means_wherever_there_is_room(client):
+    """Absent and null are the same thing here, unlike folder_id elsewhere:
+    there is no third state for a start slot to be in."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    body = client.post(f"/api/folders/{f['id']}/assign",
+                       json={"start": None}).get_json()
+
+    assert body["start"] == 1
+
+
+def test_a_cleared_start_field_means_wherever_there_is_room(client):
+    """`?start=` is what a cleared first-slot field renders."""
+    f = mkfolder(client, "Standards")
+    fill(client, f["id"], "Autumn Leaves")
+
+    body = client.get(f"/api/folders/{f['id']}/assign?start=").get_json()
+
+    assert body["start"] == 1
+
+
+def test_folder_assign_is_covered_by_the_cross_site_guard(client):
+    rv = client.post("/api/folders/1/assign",
+                     headers={"Sec-Fetch-Site": "cross-site"})
+    assert rv.status_code == 403

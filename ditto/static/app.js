@@ -13,7 +13,8 @@ let updating = false, updatingFromRev = null, updateTimer = null, checking = fal
    They meet in one place: which slots hold a track is read from `state.slots`,
    not from the library response, so those badges stay live for free. */
 let library = null;
-let editingHash = null;    // a rename in progress; freezes renderLibrary
+let editingHash = null;    // a track rename in progress; freezes renderLibrary
+let editingFolder = null;  // a folder rename, for the same reason
 let nowPlaying = null;     // hash being auditioned, for the row's play button
 
 /* Both lists rebuild from scratch, and render() runs on every SSE frame — up to
@@ -31,6 +32,35 @@ let nowPlaying = null;     // hash being auditioned, for the row's play button
    row is edited in place. */
 let libRev = 0;
 let lastListKey = null, lastLibKey = null;
+
+/* The folder tree, on its own endpoint for the same reason the library is: it
+   must not ride a snapshot that emits five times a second during a conversion.
+   folderRev plays libRev's part in the dirty key. */
+let folders = null;
+let folderRev = 0;
+
+/* Which folders are expanded, by id. Collapsed is the default, and this is
+   deliberately not persisted — it is where you are looking, not a setting. */
+let openFolders = {};
+
+/* The folder the last thing happened in, or null for the top level. It is where
+   a new upload lands, so it is stated in the drop zone rather than left to be
+   inferred — invisible state that decides where your files go is a trap. */
+let currentFolder = null;
+
+/* What a folder's Assign button would do, straight from the device's own
+   preview, keyed by folder id. The button's label is rendered from this, and
+   the POST that follows runs the same function on the server — so the range on
+   screen and the range written cannot drift apart.
+
+   folderStart holds uncommitted text in a first-slot field, for the same reason
+   slotDraft does: the rows are rebuilt whenever the snapshot moves. planKey is
+   what each stored plan was asked for, so a render that changes nothing does
+   not re-ask, and planRev puts a new answer into the library's dirty key. */
+let folderPlan = {};
+let folderStart = {};
+let planKey = {};
+let planRev = 0;
 
 /* Say that the library's DOM no longer matches its key, so the next render
    redraws even though the data has not moved.
@@ -211,15 +241,16 @@ function hintText(byslot){
     const r = (library || []).find(x => x.source_hash === pickedTrack);
     const t = assignTarget();
     return `Choose a slot for “${r ? r.name : "that track"}”`
-         + (t !== null ? ` — next free is ${pad2(t)}` : " — the pedal is full");
+         + (t !== null ? ` — next free is ${pad2(t)}` : " — the pedal is full")
+         + ((folders || []).length ? ", or a folder to file it in" : "");
   }
   if (selected !== null){
     return byslot[selected]
       ? `Slot ${pad2(selected)} selected — click another slot or row to move or swap`
       : `Slot ${pad2(selected)} selected — click a track to fill it`;
   }
-  return "Hover to link map and list · drag a track onto a slot · "
-       + "drag slot to slot to swap";
+  return "Hover to link map and list · a leading number sends a file "
+       + "straight to that slot · drag slot to slot to swap";
 }
 
 /* Drag behaviour for anything that stands for a slot. A map cell and a list row
@@ -507,9 +538,13 @@ function render(s){
   } else {
     // textContent throughout: these strings now carry a track name, and the
     // previous version of this block built one of them with innerHTML.
+    // Where a drop lands is not something to leave the user to infer, now that
+    // it depends on which folder is open.
     setText($("#drophead"), selected != null
       ? `Drop here to fill slot ${pad2(selected)}`
-      : "Drop audio here, or choose a file");
+      : currentFolder !== null
+        ? `Drop audio here — it lands in “${folderName(currentFolder)}”`
+        : "Drop audio here, or choose a file");
     setText($("#dropnote"), hintText(byslot));
   }
 
@@ -713,36 +748,106 @@ async function moveTo(src, dst){
   return r.ok;
 }
 
+/* Does this filename carry a leading slot number?
+
+   The pattern, the stem and the range check mirror web.py's LEADING_NUM and
+   slot_from_name, and the two have to stay in step: this decides which of the
+   two endpoints a dropped file is sent to, and the server decides which slot it
+   then lands in. Duplicating it is the price of splitting the drop here rather
+   than changing what /api/upload means for everyone else. */
+const LEADING_NUM = /^\D*?0*(\d{1,2})(?:\D|$)/;
+function slotFromName(name){
+  const m = LEADING_NUM.exec(name.replace(/\.[^./\\]*$/, ""));
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  const max = (state && state.slot_count) || 99;
+  return n >= 1 && n <= max ? n : null;
+}
+
+/* One multipart POST, with the two answer shapes flattened into one.
+
+   A 413 or a 500 carries no `errors` list, and a dropped connection carries no
+   body at all, so both become an error entry here — otherwise a whole batch can
+   fail and leave the status line on "Uploading…". */
+async function postFiles(url, files, extra){
+  const fd = new FormData();
+  files.forEach(f => fd.append("file", f));
+  Object.entries(extra || {}).forEach(([k, v]) => {
+    if (v !== null && v !== undefined) fd.append(k, v);
+  });
+  try {
+    const r = await fetch(url, {method: "POST", body: fd});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok && !(j.errors && j.errors.length)){
+      return {added: [], errors: [{error: j.error || `Upload failed (${r.status})`}]};
+    }
+    return {added: j.added || [], errors: j.errors || []};
+  } catch {
+    return {added: [], errors: [{error: "Upload failed — check the connection"}]};
+  }
+}
+
+const folderName = id =>
+  ((folders || []).find(f => f.id === id) || {}).name || "the library";
+
+/* Where a dropped file goes.
+
+   Pointing at a slot wins over everything else — that is what the pointing was
+   for. Otherwise a leading number is the only thing that means "put this on the
+   pedal", and every other file goes to the library, into whichever folder is
+   open. The pedal holds about twelve tracks and the card holds as many as you
+   like, so filling slots is a choice rather than what a drop does by default.
+
+   This is a change in what an unnumbered drop does: it used to take the lowest
+   free slot. /api/upload still behaves exactly as documented for anyone calling
+   it directly — the routing moved into the page, not into the contract. */
 async function send(files, start){
   if (!files || !files.length) return;
-  const fd = new FormData();
-  [...files].forEach(f => fd.append("file", f));
-  if (start != null) fd.append("start", start);
-  setText($("#msg"), start != null
-    ? `Uploading to slot ${pad2(start)}…` : "Uploading…");
-  let r;
-  try {
-    r = await fetch("/api/upload", {method:"POST", body:fd});
-  } catch {
+  const list = [...files];
+
+  if (start != null){
+    setText($("#msg"), `Uploading to slot ${pad2(start)}…`);
+    const res = await postFiles("/api/upload", list,
+                                {start, folder_id: currentFolder});
     selected = null;
-    fail("Upload failed — check the connection");
+    reportUpload(res, list.length, 0);
+    // A slot upload creates a library row too. Without this the new track is
+    // missing from the Library card until the next reconnect — in the common
+    // case the five-minute stream rotation.
+    loadLibrary();
     return;
   }
-  const j = await r.json().catch(()=>({}));
+
+  const toPedal = list.filter(f => slotFromName(f.name || "") !== null);
+  const toLib = list.filter(f => slotFromName(f.name || "") === null);
+  setText($("#msg"), "Uploading…");
+  const res = {added: [], errors: []};
+  for (const [url, batch] of [["/api/upload", toPedal], ["/api/library", toLib]]){
+    if (!batch.length) continue;
+    const one = await postFiles(url, batch, {folder_id: currentFolder});
+    res.added.push(...one.added);
+    res.errors.push(...one.errors);
+  }
   selected = null;
-  // A 413 or a 500 carries no `errors` list, so an ok check has to come first
-  // or the message stays on "Uploading…" forever.
-  if (!r.ok && !(j.errors && j.errors.length)){
-    fail(j.error || `Upload failed (${r.status})`);
+  reportUpload(res, toPedal.length, toLib.length);
+  loadLibrary();
+}
+
+/* Errors win the line: a batch that half landed is the case a confirmation
+   would paper over. A pedal upload announces itself through busy and the
+   progress bar, but a library one changes nothing visible in the left pane, so
+   it has to say where the tracks went. */
+function reportUpload(res, nped, nlib){
+  if (res.errors.length){
+    fail(res.errors.map(e => e.name ? `${e.name}: ${e.error}` : e.error).join("; "));
     return;
   }
-  if (j.errors && j.errors.length){
-    fail(j.errors.map(e=>`${e.name}: ${e.error}`).join("; "));
-  }
-  // A slot upload creates a library row too. Without this the new track is
-  // missing from the Library card until the next reconnect — in the common
-  // case the five-minute stream rotation.
-  loadLibrary();
+  if (!nlib) return;
+  const where = currentFolder !== null ? `“${folderName(currentFolder)}”`
+                                       : "the library";
+  const n = res.added.length - nped;
+  say(`${n} track${n === 1 ? "" : "s"} added to ${where}`
+      + (nped ? ` · ${nped} to the pedal` : ""));
 }
 
 /* Arrow-key movement inside the slot grid.
@@ -1004,6 +1109,7 @@ es.onopen = () => {
   // behind another tab's rename or delete, without the snapshot having to
   // carry a change counter.
   loadLibrary();
+  loadFolders();
 };
 es.onmessage = e => render(JSON.parse(e.data));
 es.onerror = () => {
@@ -1075,6 +1181,131 @@ async function loadLibrary(){
   renderLibrary();
 }
 
+let folderSeq = 0;
+
+async function loadFolders(){
+  const mine = ++folderSeq;
+  try {
+    const r = await fetch("/api/folders");
+    if (!r.ok) return;
+    const rows = await r.json();
+    if (mine !== folderSeq) return;     // a newer request has already answered
+    const changed = JSON.stringify(rows) !== JSON.stringify(folders);
+    folders = rows;
+    if (changed) folderRev++;
+    // A folder dissolved in another tab would otherwise stay the upload target
+    // here, and _form_folder fails the whole request on a folder that has gone
+    // — so a drop would 404 with nothing landing.
+    if (currentFolder !== null && !rows.some(f => f.id === currentFolder)){
+      currentFolder = null;
+      // The drop zone names it, and the drop zone is written from the snapshot
+      // — which folders do not ride, so it has to be told.
+      if (state) render(state);
+    }
+  } catch {
+    return;                             // a later refetch will put it right
+  }
+  renderLibrary();
+}
+
+/* The tree, from the two flat lists the server sends.
+
+   Children by parent, tracks by folder, both keyed with 0 standing for the top
+   level so one walk covers everything. A track whose folder_id names a folder
+   this client has not heard of goes to the top level rather than nowhere —
+   the two lists are fetched separately and can be one request out of step. */
+function folderIndex(){
+  const kids = {0: []}, tracks = {0: []};
+  (folders || []).forEach(f => {
+    const p = f.parent_id === null ? 0 : f.parent_id;
+    (kids[p] = kids[p] || []).push(f);
+    kids[f.id] = kids[f.id] || [];
+    tracks[f.id] = tracks[f.id] || [];
+  });
+  (library || []).forEach(r => {
+    const k = r.folder_id !== null && tracks[r.folder_id] ? r.folder_id : 0;
+    tracks[k].push(r);
+  });
+  // /api/library answers newest-first; inside a folder the order is
+  // (position, added, source_hash), which is docs/api.md's tree order and what
+  // a folder assign writes in. Sorting here is what keeps the rows on screen in
+  // the same order as the fill the Assign button describes.
+  Object.values(tracks).forEach(list => list.sort(
+    (a, b) => a.position - b.position || a.added - b.added
+              || (a.source_hash < b.source_hash ? -1 : 1)));
+  return {kids, tracks};
+}
+
+/* A folder's recursive track count and total duration.
+
+   Folded here rather than asked of the server: the browser already holds every
+   track with its duration, so this is one pass over a few hundred objects with
+   no round trip. Asking the server would also be a recursive query per render
+   on a Pi Zero, and a second source of truth for "9 · 34:12" that can disagree
+   with the rows underneath it. */
+function fold(idx, id){
+  let n = (idx.tracks[id] || []).length;
+  let secs = (idx.tracks[id] || []).reduce((t, r) => t + (r.duration || 0), 0);
+  (idx.kids[id] || []).forEach(f => {
+    const s = fold(idx, f.id);
+    n += s.n; secs += s.secs;
+  });
+  return {n, secs};
+}
+
+/* Ask the device what each visible folder's Assign would write.
+
+   The range is not computed here. Which slots hold a loop is knowable only on
+   the device — the set is scanned at mount and emptied on unplug — so a client
+   working it out from a snapshot that can be fifteen seconds old on a
+   keepalive-only stream would put a label on the button that the POST then
+   contradicts. GET and POST run the same function on the server.
+
+   Cheap enough to do per folder on screen: a seven-folder tree is seven tiny
+   GETs next to a stream that emits five times a second during a conversion.
+   planKey is what stops it being per render — nothing is asked again unless the
+   slots, the loops or the typed start actually moved. */
+function refreshPlans(ids){
+  // libRev and folderRev are in here because a plan is a function of what the
+  // folder holds as much as of where there is room: filing a track into a
+  // folder changes the range its button promises, and without these the label
+  // would keep the count it had before.
+  const sig = JSON.stringify([
+    libRev, folderRev,
+    ((state && state.slots) || []).map(s => s.slot),
+    (state && state.loops) || [],
+    state && state.slot_count,
+  ]);
+  ids.forEach(async id => {
+    const start = (folderStart[id] ?? "").trim();
+    const key = sig + "|" + start;
+    if (planKey[id] === key) return;
+    planKey[id] = key;
+    const r = await api(`/api/folders/${id}/assign?start=${encodeURIComponent(start)}`);
+    if (planKey[id] !== key) return;      // a newer ask has already overtaken
+    // A refused start (junk, or out of range) leaves no plan, which is what
+    // disables the button — better than a stale range under a number the
+    // device has already rejected.
+    const next = r.ok ? r.body : null;
+    if (JSON.stringify(next) === JSON.stringify(folderPlan[id] ?? null)) return;
+    if (next) folderPlan[id] = next; else delete folderPlan[id];
+    planRev++;
+    renderLibrary();
+  });
+}
+
+/* "Standards / Ballads", for a track shown outside its place in the tree. */
+function folderPath(id){
+  const by = {};
+  (folders || []).forEach(f => { by[f.id] = f; });
+  const parts = [];
+  for (let f = by[id]; f; f = f.parent_id === null ? null : by[f.parent_id]){
+    parts.unshift(f.name);
+    if (parts.length > 16) break;       // a cycle cannot be created, but a walk
+  }                                     // that hangs takes the page with it
+  return parts.join(" / ");
+}
+
 // Where an "add to the pedal" click would land: the selected slot if there is
 // one, else the lowest free slot. Loop-bearing slots are left alone — we don't
 // put a backing track under someone's recording by accident.
@@ -1089,18 +1320,58 @@ function assignTarget(){
   return null;
 }
 
+/* What the library pane draws, as one flat list of row descriptors.
+
+   Two shapes come out of here. In folder order with no search it is the tree:
+   folder rows carrying their depth and their fold, with a folder's contents
+   following it only while it is open. Anything else — a search, or a sort by
+   name, length or date — flattens it to tracks alone, each labelled with the
+   folder it came from. Neither "every match, wherever it is" nor "longest
+   first" can be said with folders still on screen, and a collapsed folder
+   hiding a match is worse than no tree at all. */
 function libraryView(){
   const q = ($("#libq").value || "").trim().toLowerCase();
   const sort = $("#libsort").value;
-  const rows = (library || []).filter(
-    r => !q || r.name.toLowerCase().includes(q));
-  if (sort === "name"){
-    rows.sort((a,b) => a.name.localeCompare(b.name, undefined,
-                                            {sensitivity:"base"}));
-  } else if (sort === "duration"){
-    rows.sort((a,b) => b.duration - a.duration);
-  }                     // "added" is the order the server already returned
-  return rows;
+  const idx = folderIndex();
+
+  if (q || sort !== "folder"){
+    const rows = (library || []).filter(
+      r => !q || r.name.toLowerCase().includes(q));
+    if (sort === "name"){
+      rows.sort((a,b) => a.name.localeCompare(b.name, undefined,
+                                              {sensitivity:"base"}));
+    } else if (sort === "duration"){
+      rows.sort((a,b) => b.duration - a.duration);
+    } else if (sort === "folder"){
+      // Searching without leaving folder order: the tree, flattened.
+      const ord = {};
+      flatten(idx, 0, 0, [], true).forEach((row, i) => {
+        if (row.track) ord[row.track.source_hash] = i;
+      });
+      rows.sort((a,b) => ord[a.source_hash] - ord[b.source_hash]);
+    }                   // "added" is the order the server already returned
+    return rows.map(r => ({track: r, depth: 0, path: folderPath(r.folder_id)}));
+  }
+  return flatten(idx, 0, 0, [], false);
+}
+
+/* One folder's worth of rows, then its children's, depth first.
+
+   Inside a folder, tracks come before subfolders — the server's tree order, so
+   the rows read in the order a fill of that folder writes them. The top level
+   is the one exception: folders come first there, because nothing fills the top
+   level, and a device upgraded with forty unfiled tracks would otherwise put
+   every folder below all of them. */
+function flatten(idx, id, depth, out, all){
+  const folderRows = () => (idx.kids[id] || []).forEach(f => {
+    out.push({folder: f, depth, fold: fold(idx, f.id)});
+    if (all || openFolders[f.id]) flatten(idx, f.id, depth + 1, out, all);
+  });
+  const trackRows = () => (idx.tracks[id] || []).forEach(
+    t => out.push({track: t, depth, tree: true}));
+  if (id === 0){ folderRows(); trackRows(); }
+  else { trackRows(); folderRows(); }
+  return out;
 }
 
 function renderLibrary(){
@@ -1111,14 +1382,20 @@ function _renderLibrary(){
   // An inline rename owns the row it's in. Freezing at most a screenful of
   // static rows for the few seconds an edit takes is free, and far more robust
   // than trying to preserve the editing node across a rebuild.
-  if (editingHash !== null) return;
+  if (editingHash !== null || editingFolder !== null) return;
 
   const host = $("#librows");
   if (!host) return;
   if (library === null){ host.innerHTML = ""; return; }
 
   const all = library.length;
-  const hideTools = all < 2;         // nothing to search or sort through yet
+  const nfolders = (folders || []).length;
+  const held = pickedTrack !== null
+    && (library || []).find(x => x.source_hash === pickedTrack);
+  $("#tolevel").hidden = !(held && held.folder_id !== null);
+  // Nothing to search or sort through yet. One folder counts: it is the thing
+  // "Folder order" and a search across folders are for.
+  const hideTools = all < 2 && !nfolders;
   // The one place this function writes the search box. The standing rule is
   // that it never does — that is what stops a snapshot arriving mid-keystroke
   // from wiping what is being typed — but the field is about to be hidden, so
@@ -1142,7 +1419,7 @@ function _renderLibrary(){
   // `selected` used to be here for the "→ 09" button's label, which has gone.
   // pickedTrack takes its place: it changes which row is highlighted.
   const libKey = JSON.stringify([
-    libRev, pickedTrack, nowPlaying,
+    libRev, folderRev, openFolders, planRev, pickedTrack, nowPlaying,
     ((state && state.slots) || []).map(s => [s.slot, s.source_hash]),
     (state && state.loops) || [],
     state && state.slot_count,
@@ -1153,7 +1430,7 @@ function _renderLibrary(){
 
   const rows = libraryView();
   host.innerHTML = "";
-  if (!all){
+  if (!all && !nfolders){
     host.innerHTML = '<div class="empty">Nothing in the library yet. '
       + 'Anything you upload stays here until you delete it.</div>';
     $("#libfoot").textContent = "";
@@ -1163,12 +1440,26 @@ function _renderLibrary(){
     host.innerHTML = '<div class="empty">Nothing matches that search.</div>';
   }
 
-  rows.forEach(r => host.appendChild(libraryRow(r, bySlot[r.source_hash] || [])));
+  rows.forEach(r => host.appendChild(
+    r.folder ? folderRow(r)
+             : libraryRow(r.track, bySlot[r.track.source_hash] || [], r)));
 
+  // Only the folders actually on screen, and only after the rows exist — this
+  // is where "the tree loaded" and "the snapshot's slots or loops changed" both
+  // arrive, since both move libKey and neither reaches here otherwise.
+  refreshPlans(rows.filter(r => r.folder).map(r => r.folder.id));
+
+  // Only while searching. Tracks tucked inside a collapsed folder are not
+  // hidden in the sense this count means, and "1 shown" under a tree that is
+  // simply folded up reads as though the other five had gone somewhere.
+  const q = ($("#libq").value || "").trim();
+  const shown = rows.filter(r => r.track).length;
   const mins = library.reduce((t, r) => t + (r.duration || 0), 0);
   $("#libfoot").innerHTML =
-    `<span>${all} track${all === 1 ? "" : "s"} · ${mmss(mins)}</span>`
-    + (rows.length === all ? "" : `<span>${rows.length} shown</span>`);
+    `<span>${all} track${all === 1 ? "" : "s"}`
+    + (nfolders ? ` · ${nfolders} folder${nfolders === 1 ? "" : "s"}` : "")
+    + ` · ${mmss(mins)}</span>`
+    + (q ? `<span>${shown} match${shown === 1 ? "" : "es"}</span>` : "");
 }
 
 /* The slot a track occupies, as an editable field.
@@ -1280,9 +1571,321 @@ async function commitSlotField(r, slots){
   }
 }
 
-function libraryRow(r, slots){
+/* A folder: a disclosure that carries the name, then what it holds.
+
+   The caret and the name are one <button> rather than a clickable div. It is a
+   real disclosure — aria-expanded and Enter/Space come with the element, and
+   the alternative is a div with role, tabindex and two key handlers that will
+   drift. The controls to its right sit outside the button, because a button
+   inside a button is not a thing. */
+function folderRow(row){
+  const f = row.folder;
+  const el = document.createElement("div");
+  el.className = "folderrow" + (row.depth ? "" : " top");
+  el.dataset.folder = f.id;
+  el.style.paddingLeft = (row.depth * 18) + "px";
+
+  // Built like a track row, and for the same reasons: the body of the row is
+  // the big target, the name is the way to rename, controls at the right stop
+  // propagation so a new one cannot silently start toggling things.
+  el.onclick = () => toggleFolder(f.id);
+
+  const open = !!openFolders[f.id];
+  const caret = document.createElement("button");
+  caret.type = "button";
+  caret.className = "caret";
+  caret.textContent = open ? "−" : "+";
+  caret.dataset.fk = "folder:" + f.id + ":toggle";
+  caret.setAttribute("aria-expanded", open ? "true" : "false");
+  caret.setAttribute("aria-label", (open ? "Collapse " : "Expand ") + f.name);
+  caret.onclick = e => { e.stopPropagation(); toggleFolder(f.id); };
+  el.appendChild(caret);
+
+  const nm = document.createElement("span");
+  nm.className = "foldername";
+  nm.textContent = f.name;
+  nm.title = "Click to rename";
+  nm.tabIndex = 0;
+  nm.setAttribute("role", "button");
+  nm.dataset.fk = "folder:" + f.id + ":name";
+  const edit = () => startFolderRename(el, nm, f);
+  nm.onclick = e => { e.stopPropagation(); edit(); };
+  nm.onkeydown = e => {
+    if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); }
+  };
+  el.appendChild(nm);
+
+  const meta = document.createElement("span");
+  meta.className = "foldermeta";
+  // Folded over the subtree, so a collapsed folder still says what is in it.
+  meta.textContent = `${row.fold.n} · ${mmss(row.fold.secs)}`;
+  el.appendChild(meta);
+
+  // A pickup is modal: while one is in flight this row's job is to be a
+  // destination, and offering to fill the pedal at the same time invites the
+  // wrong click. The controls come back when the pickup ends.
+  if (pickedTrack !== null) el.appendChild(fileHere(f));
+  else if (row.fold.n) el.appendChild(assignControls(f));
+
+  const del = document.createElement("button");
+  del.className = "libbtn danger";
+  del.type = "button";
+  del.textContent = "×";
+  // Never the same act as a track's ×, so it must never read like one.
+  del.title = `Dissolve “${f.name}” — the tracks in it stay in the library`;
+  del.setAttribute("aria-label", "Dissolve folder " + f.name);
+  del.dataset.fk = "folder:" + f.id + ":del";
+  del.onclick = e => { e.stopPropagation(); dissolve(f); };
+  el.appendChild(del);
+  return el;
+}
+
+/* Put the track that is currently picked up into this folder.
+
+   Filing reuses the pickup rather than introducing a drag from the library:
+   pick a track up and the map offers its slots while the tree offers its
+   folders, which is one gesture with two kinds of destination instead of two
+   gestures that have to be discovered separately. */
+function fileHere(f){
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "libbtn assign";
+  b.textContent = "File here";
+  b.dataset.fk = "folder:" + f.id + ":file";
+  b.title = `Move the track you picked up into “${f.name}”`;
+  b.onclick = e => { e.stopPropagation(); fileInto(f.id, f.name); };
+  return b;
+}
+
+async function fileInto(id, label){
+  const h = pickedTrack;
+  if (h === null) return;
+  const r = (library || []).find(x => x.source_hash === h);
+  const resp = await api(`/api/library/${h}`,
+                         {...jsonBody({folder_id: id}), method: "PATCH"});
+  if (!resp.ok){ failFrom(resp, "Could not file the track"); return; }
+  cancelPickup();
+  if (id !== null) openFolders[id] = true;   // or it files into somewhere unseen
+  currentFolder = id;
+  say(`“${r ? r.name : "Track"}” filed in ${label}`);
+  loadLibrary();
+}
+
+async function dissolve(f){
+  // Never a delete, under any flag — the server refuses to remove a library row
+  // here — so the question is only ever about the grouping.
+  let r = await api(`/api/folders/${f.id}`, {method: "DELETE"});
+  if (r.status === 409){
+    const kids = r.body.folders ? r.body.folders.length : 0;
+    const what = [r.body.tracks ? `${r.body.tracks} track${r.body.tracks === 1 ? "" : "s"}` : "",
+                  kids ? `${kids} folder${kids === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
+    if (!confirm(`“${f.name}” holds ${what}. Dissolve it anyway? `
+                 + `Nothing is deleted — they move up a level.`)) return;
+    r = await api(`/api/folders/${f.id}?force`, {method: "DELETE"});
+  }
+  if (!r.ok){ failFrom(r, "Could not dissolve the folder"); return; }
+  delete openFolders[f.id];
+  if (currentFolder === f.id) currentFolder = r.body.to ?? null;
+  say(`Folder “${f.name}” dissolved`);
+  loadFolders();
+  loadLibrary();       // its tracks now report a different folder_id
+}
+
+/* Swap a name for an input, commit on Enter or blur, revert on Escape.
+
+   One implementation for tracks and folders. They differ in what they freeze,
+   what they PATCH and what they refetch, and in nothing else — and the
+   focus-key discipline in here is the part that is easy to get subtly wrong
+   twice. */
+function inlineRename(row, nm, opts){
+  const input = document.createElement("input");
+  input.className = "libedit";
+  input.type = "text";
+  input.value = opts.name;
+  input.maxLength = 200;
+  input.setAttribute("aria-label", "Rename " + opts.name);
+  // The same focus key as the span it replaces. Ending an edit rebuilds the
+  // row, and rebuild() can only restore focus to a key it can find — without
+  // this the input is focused, then removed, and focus falls to the document,
+  // which is the exact failure the rebuild helper exists to prevent.
+  input.dataset.fk = nm.dataset.fk;
+  row.replaceChild(input, nm);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) return;
+    settled = true;
+    const name = input.value.trim();
+    opts.release();
+    // This replaced a span with an input, so the DOM is dirty on every path out
+    // of here — including the two that change no data at all.
+    libraryDomDirty();
+    if (!save || !name || name === opts.name){ renderLibrary(); return; }
+    await opts.commit(name);
+  };
+
+  input.onblur = () => finish(true);
+  input.onkeydown = e => {
+    e.stopPropagation();
+    if (e.key === "Enter"){ e.preventDefault(); finish(true); }
+    else if (e.key === "Escape"){ e.preventDefault(); finish(false); }
+  };
+}
+
+function startFolderRename(row, nm, f){
+  if (editingHash !== null || editingFolder !== null) return;
+  editingFolder = f.id;
+  inlineRename(row, nm, {
+    name: f.name,
+    release: () => { editingFolder = null; },
+    commit: async (name) => {
+      // Not optimistic, unlike a track rename: the tree is refetched whole
+      // rather than edited in place, so there is no captured row object to keep
+      // in step and the round trip is one small GET.
+      const resp = await api(`/api/folders/${f.id}`,
+                             {...jsonBody({name}), method: "PATCH"});
+      if (!resp.ok) failFrom(resp, "Rename failed");
+      loadFolders();
+    },
+  });
+}
+
+/* Where a folder's fill would start, and what it would write.
+
+   The field is uncontrolled in the same way the track slot fields are: typing
+   records the draft and asks for a fresh plan, and the answer coming back is
+   what redraws. Rendering on every keystroke instead would rebuild the tree
+   under the typist several times a word. */
+function assignControls(f){
+  const wrap = document.createElement("span");
+  wrap.className = "slotwrap";
+  wrap.onclick = e => e.stopPropagation();
+  const plan = folderPlan[f.id];
+
+  const start = document.createElement("input");
+  start.type = "text";
+  start.inputMode = "numeric";
+  start.maxLength = 2;
+  start.className = "slotfield";
+  start.placeholder = "––";
+  start.value = folderStart[f.id] !== undefined ? folderStart[f.id]
+              : (plan && plan.start !== null ? pad2(plan.start) : "");
+  start.dataset.fk = "folder:" + f.id + ":start";
+  start.title = `First slot to fill from — leave it empty for the next free slot`;
+  start.setAttribute("aria-label", `First slot for ${f.name}`);
+  start.oninput = () => { folderStart[f.id] = start.value; refreshPlans([f.id]); };
+  start.onkeydown = e => {
+    e.stopPropagation();
+    if (e.key === "Enter"){ e.preventDefault(); start.blur(); }
+    else if (e.key === "Escape"){
+      delete folderStart[f.id];
+      libraryDomDirty();
+      renderLibrary();
+      refreshPlans([f.id]);
+    }
+  };
+  wrap.appendChild(start);
+
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "libbtn assign";
+  go.dataset.fk = "folder:" + f.id + ":assign";
+  const room = plan && plan.assigned.length;
+  // The label is the plan. Reading it off the same response the POST executes
+  // is what makes "Assign 09–17" a promise rather than a guess.
+  go.textContent = room ? `Assign ${pad2(plan.start)}–${pad2(plan.end)}` :
+                   plan ? "No room" : "Assign";
+  go.disabled = !room;
+  const short = room && plan.unplaced.length
+    ? ` — ${plan.unplaced.length} won't fit past slot ${pad2(plan.end)}` : "";
+  go.title = !plan ? "Type a slot number the pedal has"
+           : !room ? "Every slot from here on is taken"
+           : plan.loops_known
+             ? `Put ${f.name} on the pedal, from slot ${pad2(plan.start)}` + short
+             : "No pedal connected, so this range cannot yet skip slots that "
+               + "hold a loop" + short;
+  go.onclick = () => fillFolder(f);
+  wrap.appendChild(go);
+  return wrap;
+}
+
+/* Fill the slots. The response is the plan that ran, so everything said
+   afterwards is read from it rather than from what the label said before. */
+async function fillFolder(f){
+  const raw = (folderStart[f.id] ?? "").trim();
+  // What was typed, not Number(it). JSON.stringify writes NaN as null, and null
+  // is how this API says "wherever there is room" — so a junk start would have
+  // filled from the next free slot instead of being refused. The button is
+  // normally disabled by then, but refreshPlans is a round trip and a click
+  // inside that window still carries the old plan's enabled state.
+  const r = await api(`/api/folders/${f.id}/assign`,
+                      jsonBody(raw === "" ? {} : {start: raw}));
+  if (!r.ok){ failFrom(r, "Could not fill the slots"); return; }
+  const p = r.body;
+  // The pending undo restores one slot. A fill has just overwritten several,
+  // and offering to put one of them back is a worse answer than offering none.
+  $("#undoslot").innerHTML = "";
+  delete folderStart[f.id];
+  if (!p.assigned.length){
+    warn(`No room on the pedal for ${f.name}`);
+    return;
+  }
+  let line = `${f.name} → slots ${pad2(p.start)}–${pad2(p.end)}`;
+  if (p.unplaced.length) line += ` · ${p.unplaced.length} didn't fit`;
+  if (!p.loops_known) line += " · plug the pedal in to skip its loops";
+  // The capacity bar reads from bytes on the card and will not know about this
+  // until the writes land, so the warning has to come from the plan itself.
+  const secs = p.assigned.reduce((t, a) => {
+    const row = (library || []).find(x => x.source_hash === a.source_hash);
+    return t + ((row && row.duration) || 0);
+  }, 0);
+  const total = (state && state.capacity && state.capacity.total_seconds) || 0;
+  if (total && secs > total){
+    warn(`${line} · that is ${mmss(secs)} on a ${mmss(total)} pedal, so some won't fit`);
+  } else if (p.unplaced.length){
+    warn(line);
+  } else {
+    say(line);
+  }
+}
+
+function toggleFolder(id){
+  if (openFolders[id]){
+    delete openFolders[id];
+    if (currentFolder === id) currentFolder = null;
+  } else {
+    openFolders[id] = true;
+    currentFolder = id;
+  }
+  renderLibrary();
+  if (state) render(state);      // the drop zone names the open folder
+}
+
+async function newFolder(){
+  const name = (prompt("Name the folder") || "").trim();
+  if (!name) return;
+  const r = await api("/api/folders", jsonBody({name}));
+  if (!r.ok){ failFrom(r, "Could not create the folder"); return; }
+  openFolders[r.body.id] = true;
+  currentFolder = r.body.id;
+  say(`Folder “${r.body.name}” created`);
+  loadFolders();
+}
+
+function libraryRow(r, slots, row){
   const el = document.createElement("div");
   el.className = "librow" + (pickedTrack === r.source_hash ? " picked" : "");
+  if (row && row.depth) el.style.paddingLeft = (row.depth * 18) + "px";
+  // The column a folder's caret occupies, so names line up under the folder
+  // they are in. Only in the tree — a flattened list has no carets to align to.
+  if (row && row.tree){
+    const gap = document.createElement("span");
+    gap.className = "caret";
+    gap.setAttribute("aria-hidden", "true");
+    el.appendChild(gap);
+  }
   // Clicking the row lifts the track; clicking a control in it does not. Every
   // control stops propagation rather than this checking what was hit, so a new
   // control cannot forget to opt out and silently start picking things up.
@@ -1299,6 +1902,15 @@ function libraryRow(r, slots){
   nm.onclick = e => { e.stopPropagation(); edit(); };
   nm.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); } };
   el.appendChild(nm);
+
+  // Where it lives, for a row shown outside the tree. Without it a search
+  // result is a name with no way to tell which folder it came out of.
+  if (row && row.path){
+    const path = document.createElement("span");
+    path.className = "libpath";
+    path.textContent = row.path;
+    el.appendChild(path);
+  }
 
   const dur = document.createElement("span");
   dur.className = "libdur";
@@ -1332,59 +1944,29 @@ function libraryRow(r, slots){
 }
 
 function startRename(row, nm, r){
-  if (editingHash !== null) return;
+  if (editingHash !== null || editingFolder !== null) return;
   editingHash = r.source_hash;
-  const input = document.createElement("input");
-  input.className = "libedit";
-  input.type = "text";
-  input.value = r.name;
-  input.maxLength = 200;
-  input.setAttribute("aria-label", "Rename " + r.name);
-  // The same focus key as the span it replaces. Ending an edit rebuilds the
-  // row, and rebuild() can only restore focus to a key it can find — without
-  // this the input is focused, then removed, and focus falls to the document,
-  // which is the exact failure the rebuild helper exists to prevent.
-  input.dataset.fk = nm.dataset.fk;
-  row.replaceChild(input, nm);
-  input.focus();
-  input.select();
-
-  let settled = false;
-  const finish = async (save) => {
-    if (settled) return;
-    settled = true;
-    const name = input.value.trim();
-    editingHash = null;
-    // This function replaced a span with an input, so the DOM is dirty on every
-    // path out of here — including the two that change no data at all.
-    libraryDomDirty();
-    if (!save || !name || name === r.name){ renderLibrary(); return; }
-    // Optimistic: the row already reads the new name, and a failure re-reads
-    // the server's version rather than leaving a lie on screen.
-    r.name = name;
-    libRev++;          // edited in place, so the key must move
-    renderLibrary();
-    const resp = await api(`/api/library/${r.source_hash}`,
-                           {...jsonBody({name}), method: "PATCH"});
-    if (!resp.ok){
-      failFrom(resp, "Rename failed");
+  inlineRename(row, nm, {
+    name: r.name,
+    release: () => { editingHash = null; },
+    commit: async (name) => {
+      // Optimistic: the row already reads the new name, and a failure re-reads
+      // the server's version rather than leaving a lie on screen.
+      r.name = name;
+      libRev++;        // edited in place, so the key must move
+      renderLibrary();
+      const resp = await api(`/api/library/${r.source_hash}`,
+                             {...jsonBody({name}), method: "PATCH"});
+      if (!resp.ok) failFrom(resp, "Rename failed");
+      // The optimistic write went to the row object we captured, but
+      // renderLibrary is only frozen during the edit — loadLibrary is not, and
+      // es.onopen fires on the five-minute rotation. If it replaced `library`
+      // while this was in flight, that object is detached and the row would
+      // render the old name until some later refresh. Re-read from the server
+      // so the rendered name is the committed one either way.
       loadLibrary();
-      return;
-    }
-    // The optimistic write went to the row object we captured, but
-    // renderLibrary is only frozen during the edit — loadLibrary is not, and
-    // es.onopen fires on the five-minute rotation. If it replaced `library`
-    // while this was in flight, that object is detached and the row would
-    // render the old name until some later refresh. Re-read from the server
-    // so the rendered name is the committed one either way.
-    loadLibrary();
-  };
-
-  input.onblur = () => finish(true);
-  input.onkeydown = e => {
-    if (e.key === "Enter"){ e.preventDefault(); finish(true); }
-    else if (e.key === "Escape"){ e.preventDefault(); finish(false); }
-  };
+    },
+  });
 }
 
 function audition(r){
@@ -1475,24 +2057,10 @@ async function forget(r, force){
 
 async function sendToLibrary(files){
   if (!files || !files.length) return;
-  const fd = new FormData();
-  [...files].forEach(f => fd.append("file", f));
+  const list = [...files];
   setText($("#msg"), "Adding to the library…");
-  let r, j;
-  try {
-    r = await fetch("/api/library", {method:"POST", body:fd});
-    j = await r.json().catch(()=>({}));
-  } catch {
-    fail("Upload failed — check the connection");
-    return;
-  }
-  if (!r.ok && !(j.errors && j.errors.length)){
-    fail(j.error || `Upload failed (${r.status})`);
-    return;
-  }
-  if (j.errors && j.errors.length){
-    fail(j.errors.map(e => `${e.name}: ${e.error}`).join("; "));
-  }
+  const res = await postFiles("/api/library", list, {folder_id: currentFolder});
+  reportUpload(res, 0, list.length);
   loadLibrary();
 }
 
@@ -1502,6 +2070,14 @@ $("#libfile").onchange = e => { sendToLibrary(e.target.files); e.target.value=""
 $("#libq").oninput = renderLibrary;
 $("#libsort").onchange = renderLibrary;
 
-// es.onopen also loads it, but only once the stream handshake completes. Ask
+$("#newfolder").onclick = newFolder;
+
+/* The one destination with no row of its own. It appears only while a track
+   that is in a folder is picked up, so it is never a button with nothing to
+   act on. */
+$("#tolevel").onclick = () => fileInto(null, "the top level");
+
+// es.onopen also loads these, but only once the stream handshake completes. Ask
 // now so the card fills even if the event stream is slow or never comes up.
 loadLibrary();
+loadFolders();

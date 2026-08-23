@@ -427,6 +427,62 @@ there is no such folder.
 
 ---
 
+## GET /api/folders/&lt;id&gt;/assign[?start=n]
+
+The plan a `POST` to the same path would carry out. Writes nothing, queues
+nothing, and is what the Assign button reads its own label from.
+
+## POST /api/folders/&lt;id&gt;/assign
+
+Put a folder's tracks on the pedal in one call. Body `{"start": 9}`, or no body
+at all for the first slot with room. Both methods answer with the same object:
+
+```json
+{ "folder_id": 3, "folder": "Standards",
+  "start": 9, "end": 18,
+  "assigned": [ { "slot": 9, "source_hash": "b9ec...", "name": "Autumn Leaves" } ],
+  "skipped_loops": [ 12 ],
+  "unplaced": [ { "source_hash": "ff02...", "name": "Ceora",
+                  "error": "no room past slot 99" } ],
+  "loops_known": true,
+  "dry_run": false }
+```
+
+Tracks go in tree order into consecutive slots, skipping any slot that holds a
+loop — the same automatic-placement rule an unnumbered upload follows. `start`
+and `end` are the first and last slot **actually written**, so they span those
+skips: nine tracks from 09 over one loop reads 09-18. Both are `null` when
+nothing was placed. Whatever was in a slot moves to the trash, as with a single
+assign.
+
+`201`, `404` if there is no such folder, `400` if `start` is not a slot number
+or is out of range. `start` may be a number or a numeric string — the page sends
+what was typed rather than converting it, because a conversion turns junk into
+`null`, and `null` here means "wherever there is room" rather than "refuse
+this". `?start=` with nothing after it means the same as no
+`start` at all, because that is what a cleared first-slot field renders; an
+empty string in the JSON body is junk and is refused.
+
+**Read the body.** Like `POST /api/upload`, a `201` does not mean everything
+landed: `unplaced` names the tracks that ran out of pedal. Individual writes can
+still fail afterwards for capacity — a slot goes to `error` with
+`won't fit — over capacity by m:ss`, which arrives on the event stream, not
+here.
+
+**`loops_known: false` means the range is provisional.** The loop set is scanned
+at mount and emptied on unplug, so with no pedal connected the device cannot
+know which slots hold loops and cannot skip them. The harm is bounded — a
+backing track lands under a loop, which is a slot the pedal plays together and
+not a recording destroyed — but the plan says so rather than letting a client
+believe otherwise.
+
+This is one endpoint rather than N calls to `POST /api/slots/<n>/assign` for
+reasons a client cannot work around: the loop set is only correct under the lock
+that queues the work, the whole fill is one admission so a shutdown cannot take
+half of it, and it broadcasts one snapshot instead of one per track.
+
+---
+
 ## POST /api/slots/&lt;n&gt;/assign
 
 Put a track that is already in the library into slot `n`, without uploading it
