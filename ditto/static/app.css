@@ -228,6 +228,14 @@
   :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   ::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
 
+  /* The [hidden] attribute is a UA rule, and every author rule in a layer beats
+     it — so any class that sets display, .libbtn and .libtools among them, was
+     quietly overriding it and leaving hidden elements on screen. An !important
+     in the lowest layer is what wins that: for important declarations the layer
+     order is reversed, so this outranks the components layer without needing to
+     out-specify anything in it. */
+  [hidden] { display: none !important; }
+
   /* Kept in the accessibility tree and focusable — display:none would take the
      file input out of the tab order and off screen readers. */
   .vh {
@@ -549,27 +557,28 @@
   /* Depth 0 only. Nested folders stay transparent, so the tint reads as "this
      is where a top-level group starts" rather than as decoration. */
   .folderrow.top { background: var(--surface-group); }
-  .foldertoggle {
-    display: flex; align-items: center; gap: var(--space-2);
-    flex: 1; min-width: 0; padding: 0; border: 0; background: none;
-    color: inherit; font: inherit; text-align: left; cursor: pointer;
-  }
-  .caret {
-    width: 12px; flex: none; text-align: center;
+  .folderrow { cursor: pointer; }
+  /* A real button, so the disclosure is announced and keyboard-reachable. The
+     glyph is 12px wide; the padding is what gets the target to a size a thumb
+     can hit, without moving the column the names line up on. */
+  button.caret {
+    width: 12px; flex: none; padding: 6px 0; margin: -6px 0;
+    border: 0; background: none; text-align: center; cursor: pointer;
     font: var(--text-label) var(--font-mono); font-weight: var(--font-heading-weight);
     color: var(--text-faint);
   }
   .foldername {
     flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; font-size: var(--text-control);
-    font-weight: var(--font-heading-weight);
+    font-weight: var(--font-heading-weight); cursor: text;
   }
+  .foldername:hover { text-decoration: underline dotted var(--text-faint); }
   .foldermeta {
     flex: none; font: var(--text-meta) var(--font-mono); color: var(--text-faint);
   }
   /* The column a folder's caret occupies, kept on track rows so names line up
      under the folder they are in. */
-  .librow .caret { visibility: hidden; }
+  .librow .caret { width: 12px; flex: none; }
   /* The label states the range it will write, so it has to be allowed to be as
      wide as "Assign 09–17" and must not wrap to a second line. */
   .libbtn.assign { flex: none; white-space: nowrap; font-size: var(--text-meta); }
