@@ -113,6 +113,9 @@
        ramp — and because "the selected row" is the thing that has a colour,
        not "accent 100". */
     --surface-hover: var(--color-neutral-200);
+    /* The ground a top-level folder sits on. A tint rather than a rule, because
+       the tree already has one rule per row and a second would fight it. */
+    --surface-group: var(--color-neutral-100);
     --surface-selected: var(--color-accent-100);
     --link-ring: var(--color-accent-400);
 
@@ -531,6 +534,47 @@
   .slotfield:focus-visible { border-color: var(--color-accent); outline-offset: 0; }
   /* A track can be in more than one slot and the field can only show one. */
   .slotmore { font: var(--text-meta) var(--font-mono); color: var(--text-faint); }
+
+  /* -- the folder tree ----------------------------------------------------
+
+     One flat list of rows carrying their own indent, not nested containers.
+     Rows are rebuilt from scratch on every library change, and a tree of divs
+     would have to be diffed to keep that cheap; a flat list is what rebuild()
+     already knows how to restore focus into. */
+  .libhead-acts { display: flex; gap: var(--space-2); }
+  .folderrow {
+    display: flex; align-items: center; gap: var(--space-2); padding: 9px 0;
+    border-bottom: var(--rule-minor) solid var(--rule);
+  }
+  /* Depth 0 only. Nested folders stay transparent, so the tint reads as "this
+     is where a top-level group starts" rather than as decoration. */
+  .folderrow.top { background: var(--surface-group); }
+  .foldertoggle {
+    display: flex; align-items: center; gap: var(--space-2);
+    flex: 1; min-width: 0; padding: 0; border: 0; background: none;
+    color: inherit; font: inherit; text-align: left; cursor: pointer;
+  }
+  .caret {
+    width: 12px; flex: none; text-align: center;
+    font: var(--text-label) var(--font-mono); font-weight: var(--font-heading-weight);
+    color: var(--text-faint);
+  }
+  .foldername {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-size: var(--text-control);
+    font-weight: var(--font-heading-weight);
+  }
+  .foldermeta {
+    flex: none; font: var(--text-meta) var(--font-mono); color: var(--text-faint);
+  }
+  /* The column a folder's caret occupies, kept on track rows so names line up
+     under the folder they are in. */
+  .librow .caret { visibility: hidden; }
+  /* Which folder a row came out of, for rows shown outside the tree. */
+  .libpath {
+    flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-size: var(--text-meta); color: var(--text-faint);
+  }
 
   /* A track lifted out of the library, waiting for a slot. */
   .librow.picked { background: var(--surface-selected); }

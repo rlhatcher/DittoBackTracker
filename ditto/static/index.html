@@ -70,13 +70,17 @@
     <section id="libcard">
       <div class="listhead">
         <h2>Library — stays on the device</h2>
-        <label class="libbtn" for="libfile" id="libadd" title="Add tracks without putting them on the pedal">Add files</label>
+        <span class="libhead-acts">
+          <button class="libbtn" id="newfolder" type="button" title="Group tracks into a folder">New folder</button>
+          <label class="libbtn" for="libfile" id="libadd" title="Add tracks without putting them on the pedal">Add files</label>
+        </span>
       </div>
       <input type="file" id="libfile" multiple accept="audio/*" class="vh">
       <div class="libtools" id="libtools" hidden>
-        <input type="search" id="libq" placeholder="Search the library" aria-label="Search the library"
+        <input type="search" id="libq" placeholder="Search every folder" aria-label="Search every folder"
                autocomplete="off" autocorrect="off" spellcheck="false">
         <select id="libsort" aria-label="Sort the library">
+          <option value="folder">Folder order</option>
           <option value="added">Newest first</option>
           <option value="name">Name</option>
           <option value="duration">Length</option>

@@ -32,6 +32,16 @@ let nowPlaying = null;     // hash being auditioned, for the row's play button
 let libRev = 0;
 let lastListKey = null, lastLibKey = null;
 
+/* The folder tree, on its own endpoint for the same reason the library is: it
+   must not ride a snapshot that emits five times a second during a conversion.
+   folderRev plays libRev's part in the dirty key. */
+let folders = null;
+let folderRev = 0;
+
+/* Which folders are expanded, by id. Collapsed is the default, and this is
+   deliberately not persisted — it is where you are looking, not a setting. */
+let openFolders = {};
+
 /* Say that the library's DOM no longer matches its key, so the next render
    redraws even though the data has not moved.
 
@@ -1004,6 +1014,7 @@ es.onopen = () => {
   // behind another tab's rename or delete, without the snapshot having to
   // carry a change counter.
   loadLibrary();
+  loadFolders();
 };
 es.onmessage = e => render(JSON.parse(e.data));
 es.onerror = () => {
@@ -1075,6 +1086,81 @@ async function loadLibrary(){
   renderLibrary();
 }
 
+let folderSeq = 0;
+
+async function loadFolders(){
+  const mine = ++folderSeq;
+  try {
+    const r = await fetch("/api/folders");
+    if (!r.ok) return;
+    const rows = await r.json();
+    if (mine !== folderSeq) return;     // a newer request has already answered
+    const changed = JSON.stringify(rows) !== JSON.stringify(folders);
+    folders = rows;
+    if (changed) folderRev++;
+  } catch {
+    return;                             // a later refetch will put it right
+  }
+  renderLibrary();
+}
+
+/* The tree, from the two flat lists the server sends.
+
+   Children by parent, tracks by folder, both keyed with 0 standing for the top
+   level so one walk covers everything. A track whose folder_id names a folder
+   this client has not heard of goes to the top level rather than nowhere —
+   the two lists are fetched separately and can be one request out of step. */
+function folderIndex(){
+  const kids = {0: []}, tracks = {0: []};
+  (folders || []).forEach(f => {
+    const p = f.parent_id === null ? 0 : f.parent_id;
+    (kids[p] = kids[p] || []).push(f);
+    kids[f.id] = kids[f.id] || [];
+    tracks[f.id] = tracks[f.id] || [];
+  });
+  (library || []).forEach(r => {
+    const k = r.folder_id !== null && tracks[r.folder_id] ? r.folder_id : 0;
+    tracks[k].push(r);
+  });
+  // /api/library answers newest-first; inside a folder the order is
+  // (position, added, source_hash), which is docs/api.md's tree order and what
+  // a folder assign writes in. Sorting here is what keeps the rows on screen in
+  // the same order as the fill the Assign button describes.
+  Object.values(tracks).forEach(list => list.sort(
+    (a, b) => a.position - b.position || a.added - b.added
+              || (a.source_hash < b.source_hash ? -1 : 1)));
+  return {kids, tracks};
+}
+
+/* A folder's recursive track count and total duration.
+
+   Folded here rather than asked of the server: the browser already holds every
+   track with its duration, so this is one pass over a few hundred objects with
+   no round trip. Asking the server would also be a recursive query per render
+   on a Pi Zero, and a second source of truth for "9 · 34:12" that can disagree
+   with the rows underneath it. */
+function fold(idx, id){
+  let n = (idx.tracks[id] || []).length;
+  let secs = (idx.tracks[id] || []).reduce((t, r) => t + (r.duration || 0), 0);
+  (idx.kids[id] || []).forEach(f => {
+    const s = fold(idx, f.id);
+    n += s.n; secs += s.secs;
+  });
+  return {n, secs};
+}
+
+/* "Standards / Ballads", for a track shown outside its place in the tree. */
+function folderPath(id){
+  const by = {};
+  (folders || []).forEach(f => { by[f.id] = f; });
+  const parts = [];
+  for (let f = by[id]; f; f = f.parent_id === null ? null : by[f.parent_id]){
+    parts.unshift(f.name);
+    if (parts.length > 16) break;       // a cycle cannot be created, but a walk
+  }                                     // that hangs takes the page with it
+  return parts.join(" / ");
+}
+
 // Where an "add to the pedal" click would land: the selected slot if there is
 // one, else the lowest free slot. Loop-bearing slots are left alone — we don't
 // put a backing track under someone's recording by accident.
@@ -1089,18 +1175,58 @@ function assignTarget(){
   return null;
 }
 
+/* What the library pane draws, as one flat list of row descriptors.
+
+   Two shapes come out of here. In folder order with no search it is the tree:
+   folder rows carrying their depth and their fold, with a folder's contents
+   following it only while it is open. Anything else — a search, or a sort by
+   name, length or date — flattens it to tracks alone, each labelled with the
+   folder it came from. Neither "every match, wherever it is" nor "longest
+   first" can be said with folders still on screen, and a collapsed folder
+   hiding a match is worse than no tree at all. */
 function libraryView(){
   const q = ($("#libq").value || "").trim().toLowerCase();
   const sort = $("#libsort").value;
-  const rows = (library || []).filter(
-    r => !q || r.name.toLowerCase().includes(q));
-  if (sort === "name"){
-    rows.sort((a,b) => a.name.localeCompare(b.name, undefined,
-                                            {sensitivity:"base"}));
-  } else if (sort === "duration"){
-    rows.sort((a,b) => b.duration - a.duration);
-  }                     // "added" is the order the server already returned
-  return rows;
+  const idx = folderIndex();
+
+  if (q || sort !== "folder"){
+    const rows = (library || []).filter(
+      r => !q || r.name.toLowerCase().includes(q));
+    if (sort === "name"){
+      rows.sort((a,b) => a.name.localeCompare(b.name, undefined,
+                                              {sensitivity:"base"}));
+    } else if (sort === "duration"){
+      rows.sort((a,b) => b.duration - a.duration);
+    } else if (sort === "folder"){
+      // Searching without leaving folder order: the tree, flattened.
+      const ord = {};
+      flatten(idx, 0, 0, [], true).forEach((row, i) => {
+        if (row.track) ord[row.track.source_hash] = i;
+      });
+      rows.sort((a,b) => ord[a.source_hash] - ord[b.source_hash]);
+    }                   // "added" is the order the server already returned
+    return rows.map(r => ({track: r, depth: 0, path: folderPath(r.folder_id)}));
+  }
+  return flatten(idx, 0, 0, [], false);
+}
+
+/* One folder's worth of rows, then its children's, depth first.
+
+   Inside a folder, tracks come before subfolders — the server's tree order, so
+   the rows read in the order a fill of that folder writes them. The top level
+   is the one exception: folders come first there, because nothing fills the top
+   level, and a device upgraded with forty unfiled tracks would otherwise put
+   every folder below all of them. */
+function flatten(idx, id, depth, out, all){
+  const folderRows = () => (idx.kids[id] || []).forEach(f => {
+    out.push({folder: f, depth, fold: fold(idx, f.id)});
+    if (all || openFolders[f.id]) flatten(idx, f.id, depth + 1, out, all);
+  });
+  const trackRows = () => (idx.tracks[id] || []).forEach(
+    t => out.push({track: t, depth, tree: true}));
+  if (id === 0){ folderRows(); trackRows(); }
+  else { trackRows(); folderRows(); }
+  return out;
 }
 
 function renderLibrary(){
@@ -1118,7 +1244,10 @@ function _renderLibrary(){
   if (library === null){ host.innerHTML = ""; return; }
 
   const all = library.length;
-  const hideTools = all < 2;         // nothing to search or sort through yet
+  const nfolders = (folders || []).length;
+  // Nothing to search or sort through yet. One folder counts: it is the thing
+  // "Folder order" and a search across folders are for.
+  const hideTools = all < 2 && !nfolders;
   // The one place this function writes the search box. The standing rule is
   // that it never does — that is what stops a snapshot arriving mid-keystroke
   // from wiping what is being typed — but the field is about to be hidden, so
@@ -1142,7 +1271,7 @@ function _renderLibrary(){
   // `selected` used to be here for the "→ 09" button's label, which has gone.
   // pickedTrack takes its place: it changes which row is highlighted.
   const libKey = JSON.stringify([
-    libRev, pickedTrack, nowPlaying,
+    libRev, folderRev, openFolders, pickedTrack, nowPlaying,
     ((state && state.slots) || []).map(s => [s.slot, s.source_hash]),
     (state && state.loops) || [],
     state && state.slot_count,
@@ -1153,7 +1282,7 @@ function _renderLibrary(){
 
   const rows = libraryView();
   host.innerHTML = "";
-  if (!all){
+  if (!all && !nfolders){
     host.innerHTML = '<div class="empty">Nothing in the library yet. '
       + 'Anything you upload stays here until you delete it.</div>';
     $("#libfoot").textContent = "";
@@ -1163,12 +1292,21 @@ function _renderLibrary(){
     host.innerHTML = '<div class="empty">Nothing matches that search.</div>';
   }
 
-  rows.forEach(r => host.appendChild(libraryRow(r, bySlot[r.source_hash] || [])));
+  rows.forEach(r => host.appendChild(
+    r.folder ? folderRow(r)
+             : libraryRow(r.track, bySlot[r.track.source_hash] || [], r)));
 
+  // Only while searching. Tracks tucked inside a collapsed folder are not
+  // hidden in the sense this count means, and "1 shown" under a tree that is
+  // simply folded up reads as though the other five had gone somewhere.
+  const q = ($("#libq").value || "").trim();
+  const shown = rows.filter(r => r.track).length;
   const mins = library.reduce((t, r) => t + (r.duration || 0), 0);
   $("#libfoot").innerHTML =
-    `<span>${all} track${all === 1 ? "" : "s"} · ${mmss(mins)}</span>`
-    + (rows.length === all ? "" : `<span>${rows.length} shown</span>`);
+    `<span>${all} track${all === 1 ? "" : "s"}`
+    + (nfolders ? ` · ${nfolders} folder${nfolders === 1 ? "" : "s"}` : "")
+    + ` · ${mmss(mins)}</span>`
+    + (q ? `<span>${shown} match${shown === 1 ? "" : "es"}</span>` : "");
 }
 
 /* The slot a track occupies, as an editable field.
@@ -1280,9 +1418,77 @@ async function commitSlotField(r, slots){
   }
 }
 
-function libraryRow(r, slots){
+/* A folder: a disclosure that carries the name, then what it holds.
+
+   The caret and the name are one <button> rather than a clickable div. It is a
+   real disclosure — aria-expanded and Enter/Space come with the element, and
+   the alternative is a div with role, tabindex and two key handlers that will
+   drift. The controls to its right sit outside the button, because a button
+   inside a button is not a thing. */
+function folderRow(row){
+  const f = row.folder;
+  const el = document.createElement("div");
+  el.className = "folderrow" + (row.depth ? "" : " top");
+  el.dataset.folder = f.id;
+  el.style.paddingLeft = (row.depth * 18) + "px";
+
+  const open = !!openFolders[f.id];
+  const tog = document.createElement("button");
+  tog.type = "button";
+  tog.className = "foldertoggle";
+  tog.dataset.fk = "folder:" + f.id + ":toggle";
+  tog.setAttribute("aria-expanded", open ? "true" : "false");
+  tog.onclick = () => toggleFolder(f.id);
+
+  const caret = document.createElement("span");
+  caret.className = "caret";
+  caret.textContent = open ? "−" : "+";
+  caret.setAttribute("aria-hidden", "true");
+  tog.appendChild(caret);
+
+  const nm = document.createElement("span");
+  nm.className = "foldername";
+  nm.textContent = f.name;
+  tog.appendChild(nm);
+  el.appendChild(tog);
+
+  const meta = document.createElement("span");
+  meta.className = "foldermeta";
+  // Folded over the subtree, so a collapsed folder still says what is in it.
+  meta.textContent = `${row.fold.n} · ${mmss(row.fold.secs)}`;
+  el.appendChild(meta);
+
+  return el;
+}
+
+function toggleFolder(id){
+  if (openFolders[id]) delete openFolders[id];
+  else openFolders[id] = true;
+  renderLibrary();
+}
+
+async function newFolder(){
+  const name = (prompt("Name the folder") || "").trim();
+  if (!name) return;
+  const r = await api("/api/folders", jsonBody({name}));
+  if (!r.ok){ failFrom(r, "Could not create the folder"); return; }
+  openFolders[r.body.id] = true;
+  say(`Folder “${r.body.name}” created`);
+  loadFolders();
+}
+
+function libraryRow(r, slots, row){
   const el = document.createElement("div");
   el.className = "librow" + (pickedTrack === r.source_hash ? " picked" : "");
+  if (row && row.depth) el.style.paddingLeft = (row.depth * 18) + "px";
+  // The column a folder's caret occupies, so names line up under the folder
+  // they are in. Only in the tree — a flattened list has no carets to align to.
+  if (row && row.tree){
+    const gap = document.createElement("span");
+    gap.className = "caret";
+    gap.setAttribute("aria-hidden", "true");
+    el.appendChild(gap);
+  }
   // Clicking the row lifts the track; clicking a control in it does not. Every
   // control stops propagation rather than this checking what was hit, so a new
   // control cannot forget to opt out and silently start picking things up.
@@ -1299,6 +1505,15 @@ function libraryRow(r, slots){
   nm.onclick = e => { e.stopPropagation(); edit(); };
   nm.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); } };
   el.appendChild(nm);
+
+  // Where it lives, for a row shown outside the tree. Without it a search
+  // result is a name with no way to tell which folder it came out of.
+  if (row && row.path){
+    const path = document.createElement("span");
+    path.className = "libpath";
+    path.textContent = row.path;
+    el.appendChild(path);
+  }
 
   const dur = document.createElement("span");
   dur.className = "libdur";
@@ -1502,6 +1717,9 @@ $("#libfile").onchange = e => { sendToLibrary(e.target.files); e.target.value=""
 $("#libq").oninput = renderLibrary;
 $("#libsort").onchange = renderLibrary;
 
-// es.onopen also loads it, but only once the stream handshake completes. Ask
+$("#newfolder").onclick = newFolder;
+
+// es.onopen also loads these, but only once the stream handshake completes. Ask
 // now so the card fills even if the event stream is slow or never comes up.
 loadLibrary();
+loadFolders();
