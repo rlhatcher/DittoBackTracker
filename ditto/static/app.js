@@ -1005,9 +1005,18 @@ paneL.addEventListener("drop", e => {
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("drop", e => e.preventDefault());
 
+/* The one button on this page whose failure the user must not have to guess at.
+   Ending the session is what unmounts the pedal and flushes the data
+   partition; the README tells people to press this rather than pull the power
+   for exactly that reason. A bare fetch here swallowed both failures it can
+   have — an unreachable device threw an unhandled rejection, and a 503 from an
+   already-ending device returned quietly — so the page looked the same whether
+   the shutdown had started or never been asked for, and the next thing the user
+   does is unplug it. */
 $("#done").onclick = async () => {
   if (!confirm("End the session? The pedal will be unmounted and the device will shut down.")) return;
-  await fetch("/api/session/end", {method:"POST"});
+  const r = await api("/api/session/end", {method:"POST"});
+  if (!r.ok) failFrom(r, "could not end the session — do not unplug yet");
 };
 
 $("#print").onclick = printList;
