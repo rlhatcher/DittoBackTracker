@@ -3,7 +3,7 @@ duck-typed fake Service — no worker threads, no hardware, no real pedal."""
 
 import pytest
 
-from ditto import config, core, pedal, web
+from ditto import config, core, web
 
 
 class FakeService:
@@ -12,9 +12,12 @@ class FakeService:
     def __init__(self, tmp, loops=frozenset()):
         self._tmp = tmp
         self._loops = set(loops)
+        # core.Service.mounted is a property over pedal_state; the routes only
+        # read it, so a plain attribute stands in.
+        self.mounted = True
 
     @staticmethod
-    def _check_slot(slot):
+    def check_slot(slot):
         if not (1 <= slot <= config.SLOTS):
             raise ValueError(f"slot must be 1-{config.SLOTS}")
 
@@ -38,17 +41,16 @@ class FakeService:
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
+def env(tmp_path):
     svc = FakeService(tmp_path, loops={5})
-    monkeypatch.setattr(pedal, "mounted", lambda: True)
     app = web.create_app(svc)
     app.config.update(TESTING=True)
     return app.test_client(), svc, tmp_path
 
 
-def test_get_no_pedal_503(env, monkeypatch):
-    client, _, _ = env
-    monkeypatch.setattr(pedal, "mounted", lambda: False)
+def test_get_no_pedal_503(env):
+    client, svc, _ = env
+    svc.mounted = False
     assert client.get("/api/loops/5").status_code == 503
 
 

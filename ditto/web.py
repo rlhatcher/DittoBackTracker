@@ -13,10 +13,18 @@ import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from flask import (Flask, Response, abort, jsonify, request, send_file,
-                   send_from_directory, stream_with_context)
+from flask import (
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    request,
+    send_file,
+    send_from_directory,
+    stream_with_context,
+)
 
-from . import config, db, pedal
+from . import config, db
 from .core import Service, ShuttingDown
 
 log = logging.getLogger(__name__)
@@ -26,7 +34,7 @@ LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
 
 # media.file_hash is sha256().hexdigest()[:20] — exactly 20 lowercase hex chars.
 # This has to be a whitelist match rather than a resolve()-and-contain check,
-# because _source_for *globs* sources/{h}.*: a `*`, `?` or `[` in the hash would
+# because source_for *globs* sources/{h}.*: a `*`, `?` or `[` in the hash would
 # make the glob match some other library file entirely, which no amount of path
 # containment checking would catch.
 HASH_RE = re.compile(r"\A[0-9a-f]{20}\Z")
@@ -93,27 +101,58 @@ def _json_str(body, field: str):
     return value if isinstance(value, str) else None
 
 
-def _json_name(body) -> "tuple[Optional[str], Optional[tuple]]":
-    """A trimmed, length-checked name, or the error response to return.
+class ApiError(Exception):
+    """A refusal a request helper can raise instead of returning.
+
+    The five helpers below used to hand back four different shapes — a value or
+    None, a (value, error) pair, a (supplied, value) pair, an (ok, value) pair —
+    and every call site had to remember which. That is the kind of difference
+    that produces a bug which reads as correct: `name, err = _json_name(body)`
+    and `ok, start = _start_slot(raw)` look alike and mean opposite things in
+    the first slot.
+
+    Now they return the value or raise, and the handler turns it into JSON.
+
+    Deliberately narrow. There is no @app.errorhandler(ValueError): the eight
+    routes that catch ValueError name which call can raise it, and a blanket
+    handler would also catch a genuine bug in core or db and answer 400 where a
+    500 is the honest reply.
+
+    Not usable from the SSE or loop-download generators. Once a response has
+    started streaming the headers are gone and Flask cannot re-route the error.
+    No helper is called from either generator today; this note is what keeps
+    that true.
+    """
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _json_name(body) -> str:
+    """A trimmed, length-checked name.
 
     Same rules as a track rename, because a folder in the tree and a track in a
     row sit next to each other and there is no reason one may be longer.
     """
     name = (_json_str(body, "name") or "").strip()
     if not name:
-        return None, (jsonify(error="name must not be empty"), 400)
+        raise ApiError(400, "name must not be empty")
     if len(name) > MAX_NAME_LEN:
-        return None, (jsonify(
-            error=f"name must be {MAX_NAME_LEN} characters or fewer"), 400)
-    return name, None
+        raise ApiError(400, f"name must be {MAX_NAME_LEN} characters or fewer")
+    return name
 
 
 def _json_folder_ref(body, field: str) -> "tuple[bool, Optional[int]]":
     """(supplied, value) for a field naming a folder, or null for the top level.
 
-    Absent and null mean different things — leave it where it is, or move it to
-    the top level — so a caller cannot express one with the other, and the
-    caller of this cannot collapse them either.
+    The one helper that keeps a pair, because absent and null genuinely mean
+    different things — leave it where it is, or move it to the top level — and
+    collapsing them would lose that. What it no longer does is return a third
+    state for "supplied but malformed": that is now a raise, which deletes the
+    `if field in body and not supplied: 400` line that stood at three call
+    sites in identical form.
     """
     if not isinstance(body, dict) or field not in body:
         return False, None
@@ -121,54 +160,71 @@ def _json_folder_ref(body, field: str) -> "tuple[bool, Optional[int]]":
     if v is None:
         return True, None
     # bool is an int subclass, and True would silently mean folder 1.
-    return (True, v) if isinstance(v, int) and not isinstance(v, bool) else (False, None)
+    if not isinstance(v, int) or isinstance(v, bool):
+        raise ApiError(400, f"{field} must be a folder id or null")
+    return True, v
 
 
-def _form_folder():
+def _require_hash(h: str) -> None:
+    """Refuse anything that is not a library hash, before it reaches a glob.
+
+    Four routes did this inline. See HASH_RE above for why it has to be a
+    whitelist rather than a containment check.
+    """
+    if not HASH_RE.match(h):
+        raise ApiError(404, "not found")
+
+
+def _is_audio(name: str) -> bool:
+    """Whether the suffix is one ffmpeg is asked to open at all."""
+    return Path(name).suffix.lower() in config.AUDIO_SUFFIXES
+
+
+def _form_folder() -> Optional[int]:
     """The optional folder_id form field on the three ingest routes.
 
-    Returns (folder_id, error_response). An unknown folder fails the whole
-    request rather than each file in it: every file would fail identically, and
-    the client's tree is stale, which is one problem and not N. 404 rather than
-    400 to match POST /api/slots/<n>/assign, where naming a track that does not
-    exist is already a 404.
+    An unknown folder fails the whole request rather than each file in it: every
+    file would fail identically, and the client's tree is stale, which is one
+    problem and not N. 404 rather than 400 to match POST /api/slots/<n>/assign,
+    where naming a track that does not exist is already a 404.
     """
     raw = request.form.get("folder_id")
     if raw is None or raw == "":
-        return None, None
+        return None
     try:
         n = int(raw)
     except ValueError:
-        return None, (jsonify(error="folder_id must be a folder id"), 400)
+        raise ApiError(400, "folder_id must be a folder id") from None
     if db.folder_get(n) is None:
-        return None, (jsonify(error="no such folder"), 404)
-    return n, None
+        raise ApiError(404, "no such folder")
+    return n
 
 
-def _start_slot(raw) -> "tuple[bool, Optional[int]]":
-    """(ok, value) for the optional start slot on a folder assign.
+def _start_slot(raw) -> Optional[int]:
+    """The optional start slot on a folder assign, or None for "wherever there
+    is room".
 
-    Absent means "wherever there is room", which is not the same as a value the
-    caller got wrong, so a junk start is refused rather than quietly treated as
-    absent. Range is checked in the service, which owns config.SLOTS.
+    Absent is not the same as a value the caller got wrong, so a junk start is
+    refused rather than quietly treated as absent. Range is checked in the
+    service, which owns config.SLOTS.
 
     An empty query string is the one thing read as absent, and only because the
-    caller of this collapses it first: a cleared first-slot field renders
-    `?start=`, and that means "wherever there is room". An empty string in a
-    JSON body is junk and is refused.
+    caller collapses it first: a cleared first-slot field renders `?start=`, and
+    that means "wherever there is room". An empty string in a JSON body is junk
+    and is refused.
     """
     if raw is None:
-        return True, None
+        return None
     if isinstance(raw, bool):          # bool is an int subclass; True is not 1
-        return False, None
+        raise ApiError(400, "start must be a slot number")
     if isinstance(raw, int):
-        return True, raw
+        return raw
     if isinstance(raw, str):
         try:
-            return True, int(raw)
+            return int(raw)
         except ValueError:
-            return False, None
-    return False, None
+            raise ApiError(400, "start must be a slot number") from None
+    raise ApiError(400, "start must be a slot number")
 
 
 class IngestError(NamedTuple):
@@ -246,6 +302,11 @@ def create_app(service: Service) -> Flask:
     # a body exceeds it, before it can fill the data partition.
     app.config["MAX_CONTENT_LENGTH"] = config.MAX_UPLOAD_BYTES
 
+    @app.errorhandler(ApiError)
+    def _api_error(e):
+        """Every refusal a request helper raises, in one place."""
+        return jsonify(error=e.message), e.status
+
     @app.errorhandler(ShuttingDown)
     def _shutting_down(e):
         """503, not 400: the request was fine, the device just isn't taking
@@ -308,12 +369,10 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="no file"), 400
         f = request.files["file"]
         name = f.filename or "track"
-        if Path(name).suffix.lower() not in config.AUDIO_SUFFIXES:
+        if not _is_audio(name):
             return jsonify(error=f"{Path(name).suffix} is not an audio file"), 400
 
-        folder, ferr = _form_folder()
-        if ferr:
-            return ferr
+        folder = _form_folder()
 
         row, err = _ingest(f, name, lambda p, stem: service.upload(slot, p, stem))
         if err:
@@ -341,16 +400,14 @@ def create_app(service: Service) -> Flask:
         # Both targeting fields are checked before any file is taken, so a
         # request aimed at somewhere that does not exist lands nothing at all
         # rather than half a batch.
-        folder, ferr = _form_folder()
-        if ferr:
-            return ferr
+        folder = _form_folder()
 
         # A slot holding a recorded LOOP.WAV counts as taken for the purposes
         # of auto-assignment. An explicitly targeted slot may still be used —
         # the two files coexist — but we don't put a backing track under
         # someone's performance by accident.
         reserved = {s["slot"] for s in db.all_slots()}
-        if pedal.mounted():
+        if service.mounted:
             # service.has_loop reads the cache built once per mount. Calling
             # pedal.has_loop here instead would stat 99 directories over a
             # ~1 MB/s USB link on every upload request — the exact cost the
@@ -376,7 +433,7 @@ def create_app(service: Service) -> Flask:
                 # Reject the suffix here, before a numbered non-audio file
                 # (e.g. "07 notes.txt") can reserve slot 7 and block it for
                 # the rest of the batch. It still gets its per-file error below.
-                if Path(name).suffix.lower() not in config.AUDIO_SUFFIXES:
+                if not _is_audio(name):
                     planned.append((None, f, name))
                     continue
                 n = slot_from_name(name)
@@ -396,7 +453,7 @@ def create_app(service: Service) -> Flask:
         for n, f, name in planned:
             # Rejected before slot resolution: a file we won't accept must not
             # consume a free slot on its way out.
-            if Path(name).suffix.lower() not in config.AUDIO_SUFFIXES:
+            if not _is_audio(name):
                 errors.append({"name": name, "error": "not an audio file"})
                 continue
             if n is None:
@@ -435,10 +492,10 @@ def create_app(service: Service) -> Flask:
         transient. No cross-site guard because it is a safe method.
         """
         try:
-            service._check_slot(slot)
+            service.check_slot(slot)
         except ValueError as e:
             return jsonify(error=str(e)), 400
-        if not pedal.mounted():
+        if not service.mounted:
             return jsonify(error="no pedal connected"), 503
         if not service.has_loop(slot):
             return jsonify(error="no loop in that slot"), 404
@@ -530,14 +587,11 @@ def create_app(service: Service) -> Flask:
         files = request.files.getlist("file")
         if not files:
             return jsonify(error="no files"), 400
-        folder, ferr = _form_folder()
-        if ferr:
-            return ferr
+        folder = _form_folder()
         added, errors = [], []
         for f in files:
             name = f.filename or "track"
-            suffix = Path(name).suffix.lower()
-            if suffix not in config.AUDIO_SUFFIXES:
+            if not _is_audio(name):
                 errors.append({"name": name, "error": "not an audio file"})
                 continue
             try:
@@ -560,13 +614,10 @@ def create_app(service: Service) -> Flask:
         cross-site guard are already here. Doing both at once is also what a
         "new folder from these tracks" gesture wants.
         """
-        if not HASH_RE.match(h):
-            return jsonify(error="not found"), 404
+        _require_hash(h)
         body = request.get_json(silent=True)
         has_name = isinstance(body, dict) and "name" in body
         supplied, folder = _json_folder_ref(body, "folder_id")
-        if isinstance(body, dict) and "folder_id" in body and not supplied:
-            return jsonify(error="folder_id must be a folder id or null"), 400
         if not has_name and not supplied:
             return jsonify(error="nothing to change"), 400
         if db.library_get(h) is None:
@@ -577,10 +628,7 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="no such folder"), 404
 
         if has_name:
-            name, err = _json_name(body)
-            if err:
-                return err
-            if service.rename(h, name) is None:
+            if service.rename(h, _json_name(body)) is None:
                 return jsonify(error="not found"), 404
         if supplied:
             db.library_set_folder(h, folder)
@@ -593,8 +641,7 @@ def create_app(service: Service) -> Flask:
         Refuses while a slot still holds it, naming the slots, unless the caller
         confirms with ?force — in which case those slots are cleared first.
         """
-        if not HASH_RE.match(h):
-            return jsonify(error="not found"), 404
+        _require_hash(h)
         force = request.args.get("force") is not None
         outcome, slots = service.forget(h, force=force)
         if outcome == "in_use":
@@ -614,6 +661,15 @@ def create_app(service: Service) -> Flask:
     # full snapshot that says nothing new. They also keep working while the
     # device is shutting down, for the same reason a rename does: one row
     # changes and the pedal is never touched.
+    #
+    # The same licence covers the other reads that go straight to db from this
+    # file — trash_items, library_all, library_get, hash_in_library, all_slots —
+    # and nothing beyond that. A route that touches the pedal, queues work, or
+    # has to be refused once the session is ending goes through the service,
+    # because the admission lock is the only thing that orders those against a
+    # shutdown. The test for which kind you are writing is whether losing power
+    # mid-request could leave the device inconsistent; if it could, it is the
+    # service's.
 
     @app.get("/api/folders")
     def folders():
@@ -631,12 +687,10 @@ def create_app(service: Service) -> Flask:
     @app.post("/api/folders")
     def folder_create():
         body = request.get_json(silent=True)
-        name, err = _json_name(body)
-        if err:
-            return err
-        supplied, parent = _json_folder_ref(body, "parent_id")
-        if isinstance(body, dict) and "parent_id" in body and not supplied:
-            return jsonify(error="parent_id must be a folder id or null"), 400
+        name = _json_name(body)
+        # Creating: absent and null both mean the top level, so unlike the edit
+        # routes there is nothing here that needs to tell them apart.
+        _, parent = _json_folder_ref(body, "parent_id")
         if parent is not None and db.folder_get(parent) is None:
             return jsonify(error="no such folder"), 404
         row = db.folder_add(name, parent)
@@ -652,15 +706,9 @@ def create_app(service: Service) -> Flask:
         body = request.get_json(silent=True)
         has_name = isinstance(body, dict) and "name" in body
         supplied, parent = _json_folder_ref(body, "parent_id")
-        if isinstance(body, dict) and "parent_id" in body and not supplied:
-            return jsonify(error="parent_id must be a folder id or null"), 400
         if not has_name and not supplied:
             return jsonify(error="nothing to change"), 400
-        name = None
-        if has_name:
-            name, err = _json_name(body)
-            if err:
-                return err
+        name = _json_name(body) if has_name else None
 
         # One call, so a rejected move cannot leave the rename applied. Doing
         # them in sequence answered 404 for {"name": "x", "parent_id": 999}
@@ -704,9 +752,7 @@ def create_app(service: Service) -> Flask:
         so the range on screen and the range written come from one function.
         Safe method, so no cross-site guard, and nothing is queued.
         """
-        ok, start = _start_slot(request.args.get("start") or None)
-        if not ok:
-            return jsonify(error="start must be a slot number"), 400
+        start = _start_slot(request.args.get("start") or None)
         try:
             plan = service.plan_folder(folder_id, start)
         except ValueError as e:
@@ -730,9 +776,7 @@ def create_app(service: Service) -> Flask:
         """
         body = request.get_json(silent=True)
         raw = body.get("start") if isinstance(body, dict) else None
-        ok, start = _start_slot(raw)
-        if not ok:
-            return jsonify(error="start must be a slot number"), 400
+        start = _start_slot(raw)
         try:
             plan = service.assign_folder(folder_id, start)
         except ValueError as e:
@@ -752,9 +796,13 @@ def create_app(service: Service) -> Flask:
 
         Nothing on this device plays audio. This is bytes to the browser.
         """
+        # abort(404), not an ApiError: this streams bytes into an <audio>
+        # element, and a JSON error body would be something the browser tries to
+        # decode as audio. The inconsistency with every other route here is the
+        # point, not an oversight.
         if not HASH_RE.match(h) or not db.hash_in_library(h):
             abort(404)
-        path = service._source_for(h)
+        path = service.source_for(h)
         # The library row is the gate: bytes can outlive a delete by up to one
         # collector pass, and shouldn't stay reachable in the meantime.
         if path is None or path.parent != config.SOURCES:
@@ -771,8 +819,7 @@ def create_app(service: Service) -> Flask:
     def assign(slot: int):
         """Put a library track into a slot without uploading it again."""
         h = _json_str(request.get_json(silent=True), "hash") or ""
-        if not HASH_RE.match(h):
-            return jsonify(error="not found"), 404
+        _require_hash(h)
         try:
             row = service.assign(slot, h)
         except ValueError as e:

@@ -4,3 +4,8 @@
 flask
 waitress
 pytest
+
+# Exact, unlike the rest: a ruff minor release adds rules, so an unpinned
+# linter turns a green branch red on a day nobody touched the code. Bumping it
+# becomes a commit that says which new rules were adopted.
+ruff==0.16.4

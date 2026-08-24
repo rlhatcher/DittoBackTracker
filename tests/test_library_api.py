@@ -226,7 +226,7 @@ def test_audio_of_an_unknown_track_is_404(client):
     "aaaaaaaaaaaaaaaaaaaaa",     # 21 chars
 ])
 def test_audio_rejects_anything_that_is_not_a_hash(client, bad):
-    """Two gates, and the regex is the first. It matters because _source_for
+    """Two gates, and the regex is the first. It matters because source_for
     globs sources/{h}.*: a wildcard reaching that glob would match some other
     library file, which path-containment checking would not catch. The library
     lookup behind it would refuse these anyway — that redundancy is the point."""
@@ -571,7 +571,6 @@ def test_a_batch_reports_the_files_that_landed_when_one_cannot_be_stored(
     expected failure on this device, and a set-list drop is exactly when it
     happens. The files already committed and queued must still be reported, or
     the UI cannot tell what landed."""
-    svc = _service_of(app)
     monkeypatch.setattr(core.media, "probe",
                         lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
     hashes = iter([f"{i:020d}" for i in range(10)])

@@ -6,9 +6,9 @@ round trip per file, a USB stat per slot, an ffprobe per track.
 """
 
 import itertools
-import types
 import queue
 import threading
+import types
 
 import pytest
 

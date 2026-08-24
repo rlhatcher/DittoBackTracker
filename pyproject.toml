@@ -3,3 +3,31 @@
 # import it without an install step.
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+# The device runs Debian's system python3, so this is the floor the appliance
+# can actually parse. Without it ruff proposes syntax that fails on the Pi.
+target-version = "py311"
+# The widest line this codebase has ever written is 89; 88 is ruff's default
+# and close enough to that to be no change in practice.
+line-length = 88
+
+[tool.ruff.lint]
+# Chosen against this tree rather than adopted wholesale. Turning on PL, ARG and
+# PTH in full reports 436 findings, of which 130 are magic values in tests where
+# the magic value *is* the assertion and 132 are pytest fixture arguments — all
+# churn, no defect. These are the rules that found something real.
+#
+# BLE is here for a non-obvious reason: test_db.py already carries a
+# `# noqa: BLE001`, and with BLE unselected that directive reads as unused and
+# RUF100 fires on it. Selecting BLE keeps it load-bearing.
+#
+# Not selected, deliberately:
+#   ISC     — fires on update.py's multi-line f-strings in return tuples, which
+#             are a wrap, not a missing comma.
+#   PLW1510 — fires on the subprocess.run calls that check returncode
+#             explicitly afterwards, because they need the output on failure.
+#   UP      — the typing modernisation is safe but touches every module's
+#             annotations for a cosmetic gain, and git blame is this project's
+#             design record.
+select = ["E", "W", "F", "I", "B", "RUF", "BLE"]

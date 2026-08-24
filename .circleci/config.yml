@@ -3,7 +3,7 @@ version: 2.1
 jobs:
   test:
     docker:
-      - image: cimg/python:3.11
+      - image: cimg/python:3.11-node
     steps:
       - checkout
       - run:
@@ -37,10 +37,32 @@ jobs:
           paths:
             - venv
       - run:
+          name: Lint
+          # Before the tests: a lint failure is a second, and finding out about
+          # it after a 40-second suite is 40 seconds wasted.
+          command: |
+            . venv/bin/activate
+            ruff check ditto/ tests/
+      - run:
+          name: Check the installer
+          # install.sh is the least-tested surface here — it cannot be unit
+          # tested and it runs as root on a device with a read-only root.
+          #
+          # shellcheck ships in the cimg image, so there is nothing to install.
+          # If a future image drops it this fails with "command not found",
+          # which is the right way round: a missing checker should stop the
+          # build rather than quietly pass it.
+          command: shellcheck install.sh
+      - run:
           name: Run tests
           command: |
             . venv/bin/activate
             pytest -q
+          environment:
+            # test_frontend runs `node --check` over app.js. Without this the
+            # check turns into a permanent green skip the moment the image loses
+            # node, and a page whose script never parses ships unnoticed.
+            DITTO_STRICT_FRONTEND: "1"
 
 workflows:
   test:

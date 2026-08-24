@@ -33,6 +33,10 @@ class FakeService:
     def __init__(self):
         self.uploaded = []          # (slot, display_name)
         self.loops = set()
+        # The route reads the service's view of the pedal rather than calling
+        # pedal.mounted() itself, so this is what decides whether the loop
+        # cache below is consulted at all.
+        self.mounted = False
         self.reject = set()         # names to refuse as unreadable audio
 
     def has_loop(self, n):
@@ -173,10 +177,9 @@ def test_occupied_slots_are_skipped(app_service, client):
     assert app_service.uploaded[0][0] == 3
 
 
-def test_a_recorded_loop_reserves_its_slot_when_mounted(app_service, client,
-                                                        monkeypatch):
+def test_a_recorded_loop_reserves_its_slot_when_mounted(app_service, client):
     """We don't put a backing track under someone's performance by accident."""
-    monkeypatch.setattr(web.pedal, "mounted", lambda: True)
+    app_service.mounted = True
     app_service.loops.add(1)
 
     post(client, [f("x.mp3")])
@@ -184,9 +187,8 @@ def test_a_recorded_loop_reserves_its_slot_when_mounted(app_service, client,
     assert app_service.uploaded[0][0] == 2
 
 
-def test_loops_are_ignored_when_no_pedal_is_mounted(app_service, client,
-                                                    monkeypatch):
-    monkeypatch.setattr(web.pedal, "mounted", lambda: False)
+def test_loops_are_ignored_when_no_pedal_is_mounted(app_service, client):
+    app_service.mounted = False
     app_service.loops.add(1)
 
     post(client, [f("x.mp3")])

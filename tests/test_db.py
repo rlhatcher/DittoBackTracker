@@ -819,7 +819,8 @@ def test_a_forced_delete_gives_every_promoted_track_its_own_position(fresh_db):
 
     moved = [r for r in db.library_all() if r["source_hash"] in H[2:5]]
     positions = sorted(r["position"] for r in moved)
-    assert positions == [2, 3, 4], "distinct and contiguous, after the two already there"
+    assert positions == [2, 3, 4], \
+        "distinct and contiguous, after the two already there"
 
 
 def test_a_forced_delete_keeps_the_promoted_tracks_in_order(fresh_db):

@@ -17,7 +17,6 @@ import pytest
 
 from ditto import config, media, web
 
-
 # --- bytes_per_second ------------------------------------------------------
 
 @pytest.mark.parametrize("codec,width", [
@@ -181,3 +180,79 @@ def test_a_truncated_staged_file_is_not_treated_as_a_cache_hit(tmp_path,
     with pytest.raises(RuntimeError):
         media.convert(tmp_path / "in.mp3", "a" * 20, spec, duration=1.0)
     assert ran, "a truncated file was reused as if it were converted"
+
+
+# --- the command lines themselves ------------------------------------------
+#
+# ffmpeg and ffprobe never run here, and they never run in CI either — the
+# image has neither. So the exact arguments this module builds are the one
+# part of the audio path that no test and no build has ever executed. These
+# pin them as text. It is not proof they work; it is proof they have not
+# changed by accident, which is the failure that would otherwise reach a pedal
+# with nothing in between.
+
+def test_the_ffprobe_command_asks_for_exactly_one_audio_stream(monkeypatch,
+                                                               tmp_path):
+    """-select_streams a:0 is what makes streams[0] the audio track. Without it
+    a video container puts its picture stream first and every field read below
+    comes off the wrong stream: codec "png", sample_rate 0, duration 0 — which
+    upload() then rejects as "not a readable audio file"."""
+    seen = []
+
+    def fake(cmd, **kw):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(media.subprocess, "run", fake)
+    media.probe(tmp_path / "x.mp3")
+    assert seen[0] == [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-show_streams", "-select_streams", "a:0", str(tmp_path / "x.mp3"),
+    ]
+
+
+def test_the_ffmpeg_command_writes_the_pedal_format_and_nothing_else(
+        monkeypatch, tmp_path):
+    """Every flag here is load-bearing on a pedal that reads no metadata:
+
+      -map_metadata -1 and -fflags +bitexact together strip the tags. Either
+      one alone still leaves ffmpeg writing a LIST/INFO chunk carrying its own
+      version string into a file the pedal parses as audio.
+
+      -f wav because the .part suffix defeats format inference.
+
+      -progress pipe:1 with -nostats is what convert() reads out_time_us from;
+      drop it and the progress bar stops moving with no error anywhere.
+
+      -vn because cover art in an MP3 is a video stream, and without this it is
+      muxed into the WAV.
+
+    -ar/-ac/-c:a come from the spec probed off the pedal, so they are asserted
+    against DEFAULT_FORMAT rather than against literals.
+    """
+    monkeypatch.setattr(config, "STAGED", tmp_path)
+    spec = dict(config.DEFAULT_FORMAT)
+    seen = []
+
+    def fake_popen(cmd, **kw):
+        seen.append(cmd)
+        raise RuntimeError("stop here — the command line is the assertion")
+
+    monkeypatch.setattr(media.subprocess, "Popen", fake_popen)
+    with pytest.raises(RuntimeError):
+        media.convert(tmp_path / "in.mp3", "b" * 20, spec, duration=1.0)
+
+    dest = media.staged_path("b" * 20, spec)
+    assert seen[0] == [
+        "ffmpeg", "-hide_banner", "-nostdin", "-y",
+        "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+        "-i", str(tmp_path / "in.mp3"),
+        "-vn",
+        "-ar", str(spec["sample_rate"]),
+        "-ac", str(spec["channels"]),
+        "-c:a", spec["codec"],
+        "-map_metadata", "-1",
+        "-fflags", "+bitexact",
+        "-f", "wav",
+        str(dest.with_suffix(".wav.part")),
+    ]

@@ -508,7 +508,7 @@
     padding: 0 0 10px 40px; margin-top: -2px;
     border-bottom: var(--rule-minor) solid var(--rule);
   }
-  .looprow .loopbtn, .track .loopbtn { font-size: var(--text-meta); }
+  .looprow .loopbtn { font-size: var(--text-meta); }
 
   /* -- library ------------------------------------------------------------ */
 
@@ -687,7 +687,6 @@
      layout a phone gets, and the fallback the desktop frame below reverts to. */
   body { padding-bottom: 84px; }
   .pane-l { border-bottom: var(--rule-major) solid var(--rule); }
-  .pane > section:last-child { border-bottom: 0; }
 
   /* The device is managed from a laptop, so at this width the single column
      becomes two: the pedal on the left, the library beside it. Assigning a
