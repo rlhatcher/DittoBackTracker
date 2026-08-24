@@ -24,7 +24,7 @@ from flask import (
     stream_with_context,
 )
 
-from . import config, db, pedal
+from . import config, db
 from .core import Service, ShuttingDown
 
 log = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
 
 # media.file_hash is sha256().hexdigest()[:20] — exactly 20 lowercase hex chars.
 # This has to be a whitelist match rather than a resolve()-and-contain check,
-# because _source_for *globs* sources/{h}.*: a `*`, `?` or `[` in the hash would
+# because source_for *globs* sources/{h}.*: a `*`, `?` or `[` in the hash would
 # make the glob match some other library file entirely, which no amount of path
 # containment checking would catch.
 HASH_RE = re.compile(r"\A[0-9a-f]{20}\Z")
@@ -359,7 +359,7 @@ def create_app(service: Service) -> Flask:
         # the two files coexist — but we don't put a backing track under
         # someone's performance by accident.
         reserved = {s["slot"] for s in db.all_slots()}
-        if pedal.mounted():
+        if service.mounted:
             # service.has_loop reads the cache built once per mount. Calling
             # pedal.has_loop here instead would stat 99 directories over a
             # ~1 MB/s USB link on every upload request — the exact cost the
@@ -444,10 +444,10 @@ def create_app(service: Service) -> Flask:
         transient. No cross-site guard because it is a safe method.
         """
         try:
-            service._check_slot(slot)
+            service.check_slot(slot)
         except ValueError as e:
             return jsonify(error=str(e)), 400
-        if not pedal.mounted():
+        if not service.mounted:
             return jsonify(error="no pedal connected"), 503
         if not service.has_loop(slot):
             return jsonify(error="no loop in that slot"), 404
@@ -623,6 +623,15 @@ def create_app(service: Service) -> Flask:
     # full snapshot that says nothing new. They also keep working while the
     # device is shutting down, for the same reason a rename does: one row
     # changes and the pedal is never touched.
+    #
+    # The same licence covers the other reads that go straight to db from this
+    # file — trash_items, library_all, library_get, hash_in_library, all_slots —
+    # and nothing beyond that. A route that touches the pedal, queues work, or
+    # has to be refused once the session is ending goes through the service,
+    # because the admission lock is the only thing that orders those against a
+    # shutdown. The test for which kind you are writing is whether losing power
+    # mid-request could leave the device inconsistent; if it could, it is the
+    # service's.
 
     @app.get("/api/folders")
     def folders():
@@ -763,7 +772,7 @@ def create_app(service: Service) -> Flask:
         """
         if not HASH_RE.match(h) or not db.hash_in_library(h):
             abort(404)
-        path = service._source_for(h)
+        path = service.source_for(h)
         # The library row is the gate: bytes can outlive a delete by up to one
         # collector pass, and shouldn't stay reachable in the meantime.
         if path is None or path.parent != config.SOURCES:

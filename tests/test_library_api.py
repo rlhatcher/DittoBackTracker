@@ -226,7 +226,7 @@ def test_audio_of_an_unknown_track_is_404(client):
     "aaaaaaaaaaaaaaaaaaaaa",     # 21 chars
 ])
 def test_audio_rejects_anything_that_is_not_a_hash(client, bad):
-    """Two gates, and the regex is the first. It matters because _source_for
+    """Two gates, and the regex is the first. It matters because source_for
     globs sources/{h}.*: a wildcard reaching that glob would match some other
     library file, which path-containment checking would not catch. The library
     lookup behind it would refuse these anyway — that redundancy is the point."""

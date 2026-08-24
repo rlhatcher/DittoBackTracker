@@ -86,7 +86,7 @@ def test_the_trash_listing_answers_before_anything_is_in_it(client):
 def test_a_cleared_slot_turns_up_in_the_trash(client, service, monkeypatch):
     """What the undo control reads. The row has to carry the slot it came from
     and an id to restore by, or the page has nothing to offer."""
-    monkeypatch.setattr(service, "_source_for", lambda h: None)
+    monkeypatch.setattr(service, "source_for", lambda h: None)
     db.library_add("c" * 20, "Blue Bossa", 90.0)
     db.put_slot(1, "c" * 20, state="synced")
 

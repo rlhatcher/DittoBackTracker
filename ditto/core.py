@@ -271,7 +271,7 @@ class Service:
     # ------------------------------------------------------------ operations
 
     @staticmethod
-    def _check_slot(slot: int) -> None:
+    def check_slot(slot: int) -> None:
         if not (1 <= slot <= config.SLOTS):
             raise ValueError(f"slot must be 1-{config.SLOTS}")
 
@@ -308,7 +308,7 @@ class Service:
 
     def upload(self, slot: int, tmp_path: Path, display_name: str) -> Dict:
         self._check_accepting()
-        self._check_slot(slot)
+        self.check_slot(slot)
 
         info = media.probe(tmp_path)
         if info is None or info.duration <= 0:
@@ -316,7 +316,7 @@ class Service:
             raise ValueError("not a readable audio file")
 
         h = media.file_hash(tmp_path)
-        # _source_for globs for "{hash}.*", so an extensionless upload would be
+        # source_for globs for "{hash}.*", so an extensionless upload would be
         # stored under a name it can never find again.
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
         # The row before the bytes. The two orderings fail differently and only
@@ -369,7 +369,7 @@ class Service:
         be cached — instead of another upload over WiFi.
         """
         self._check_accepting()
-        self._check_slot(slot)
+        self.check_slot(slot)
         # Inside the admission, not before it. forget() holds the same lock
         # across reading the slot list, clearing those slots and deleting the
         # row — so a membership test outside it can pass, then have the track
@@ -400,7 +400,7 @@ class Service:
             if db.get_slot(slot):
                 db.delete_slot(slot, to_trash=True)
             db.put_slot(slot, source_hash, state="converting")
-            src = self._source_for(source_hash)
+            src = self.source_for(source_hash)
             if src is None:
                 db.set_state(slot, "error", "source file missing")
                 return
@@ -426,7 +426,7 @@ class Service:
         if folder is None:
             return None
         if start is not None:
-            self._check_slot(start)
+            self.check_slot(start)
 
         # Read once, before placing. Re-reading the loop set part way through
         # would produce a plan that no single moment agrees with.
@@ -500,12 +500,28 @@ class Service:
         return plan
 
     def clear(self, slot: int) -> Optional[int]:
-        self._check_slot(slot)
+        self.check_slot(slot)
         with self._admitting():
             trash_id = db.delete_slot(slot, to_trash=True)
             self._work.put(("erase", slot))
         self._emit()
         return trash_id
+
+    @property
+    def mounted(self) -> bool:
+        """Whether the monitor currently sees a pedal.
+
+        The monitor's view, refreshed every POLL_SECS, not a live check. That is
+        deliberate for the callers that pair it with has_loop: both then come
+        from the same scan, so "a pedal is here" and "these are its loops"
+        cannot disagree, which they can if one is live and the other cached.
+
+        It also means a pedal unplugged in the last couple of seconds still
+        reads mounted. Nothing is trusted to this: every path that touches the
+        pedal ends at the worker, which re-checks _mount_gen and pedal.mounted()
+        for itself before any I/O.
+        """
+        return self.pedal_state == "mounted"
 
     def has_loop(self, slot: int) -> bool:
         """From the mount-time cache — no pedal I/O. Only meaningful mounted."""
@@ -521,7 +537,7 @@ class Service:
         staged file, so nothing is orphaned. The job carries the current mount
         generation so a stale job (queued before an unplug/replug) is skipped.
         """
-        self._check_slot(slot)
+        self.check_slot(slot)
         stage = LoopStage()
         with self._admitting():
             self._work.put(("stage_loop", slot, self._mount_gen, stage))
@@ -534,7 +550,7 @@ class Service:
         # the slot happened to hold a loop: during shutdown this is refused
         # either way.
         self._check_accepting()
-        self._check_slot(slot)
+        self.check_slot(slot)
         if slot not in self._loops:
             return False
         with self._admitting():
@@ -548,8 +564,8 @@ class Service:
         Swapping rather than overwriting means reordering a setlist never
         destroys anything, so no trash entry and no undo needed.
         """
-        self._check_slot(src)
-        self._check_slot(dst)
+        self.check_slot(src)
+        self.check_slot(dst)
         # The move-or-swap decision is made atomically in db, so we queue pedal
         # work from what actually happened rather than a pre-read that a
         # concurrent upload could have invalidated.
@@ -567,11 +583,11 @@ class Service:
 
     def retry(self, slot: int) -> None:
         self._check_accepting()     # ahead of the empty-slot return, as above
-        self._check_slot(slot)
+        self.check_slot(slot)
         row = db.get_slot(slot)
         if not row:
             return
-        src = self._source_for(row["source_hash"])
+        src = self.source_for(row["source_hash"])
         if not src:
             db.set_state(slot, "error", "source file missing")
             self._emit()
@@ -779,7 +795,7 @@ class Service:
         except OSError:
             log.warning("could not fsync %s", stored.parent, exc_info=True)
 
-    def _source_for(self, h: str) -> Optional[Path]:
+    def source_for(self, h: str) -> Optional[Path]:
         for p in config.SOURCES.glob(f"{h}.*"):
             return p
         return None
@@ -994,7 +1010,7 @@ class Service:
 
         wav = media.staged_path(row["source_hash"], self.fmt)
         if not wav.exists():
-            src = self._source_for(row["source_hash"])
+            src = self.source_for(row["source_hash"])
             if src:
                 self._work.put(("convert", slot, row["source_hash"], src))
             else:
