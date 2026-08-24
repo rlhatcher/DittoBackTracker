@@ -28,8 +28,40 @@ const SLOT_MIME = "application/x-ditto-slot";
    which a name disappears behind the meta text in a half-width column. Change
    it here and the depth limit stops meaning what its comment says. */
 const DEPTH_INDENT_PX = 18;
+
+/* ---------------------------------------------------------- module state */
+
+/* One rule runs under most of what follows, so it is stated once here rather
+   than re-derived at each declaration: render() runs on every SSE frame, up to
+   5 Hz while a conversion reports progress, and it rebuilds both lists from
+   scratch. Anything the user is part-way through — a rename, a half-typed slot
+   number, which folder is open, where the keyboard is — would be destroyed by
+   that unless it lives out here and is read back on the way in.
+
+   The declarations below each say which variant they need, because they are
+   genuinely different: some freeze a rebuild (editingHash), some survive one by
+   being read back (slotDraft, folderStart), and one must never reach a rebuild
+   at all (hoveredSlot). Those are not three ways of saying the same thing. */
+
 let state = null, selected = null, dragSrc = null, binMode = false;
-let updating = false, updatingFromRev = null, updateTimer = null, checking = false;
+/* The over-the-air update, as one small state machine.
+
+   Idle is every field at its value below, and endUpdating() is the reset.
+   Grouped because the lifecycle is split across two functions 600 lines apart:
+   doUpdate() sets `fromRev`, and render() is what clears `ota.updating`, by
+   noticing that a snapshot now reports a different revision. Four loose flags
+   made that look like four unrelated booleans.
+
+   Only this one is an object. The other state here stays as plain bindings —
+   a mistyped `let` is a ReferenceError, a mistyped property is undefined
+   flowing quietly into a falsy check, and nothing in this project can catch
+   the second. If a linter with no-undef is ever adopted, that reverses. */
+const ota = {
+  updating: false,   // an update is in flight, or its restart is pending
+  fromRev: null,     // the revision we are leaving; completion is != this
+  timer: null,       // the 180s "didn't confirm" safety net
+  checking: false,   // a check is in flight (a check is not an update)
+};
 
 /* Two sources of truth, deliberately kept apart.
 
@@ -464,7 +496,7 @@ function render(s){
   // (the restart brought up the new build). Gate on that, not on the SSE
   // reconnect — reconnects also happen on the routine stream rotation, well
   // before any update, and clearing early could admit a second update.
-  if (updating && s.revision && s.revision !== updatingFromRev){
+  if (ota.updating && s.revision && s.revision !== ota.fromRev){
     endUpdating();
   }
   updateBtnState(s);
@@ -708,7 +740,7 @@ function printList(){
 }
 
 function updateBtnState(s){
-  if (updating || checking) return;     // don't clobber a transient label
+  if (ota.updating || ota.checking) return;  // don't clobber a transient label
   const b = $("#update");
   b.hidden = false;
   b.disabled = false;
@@ -1069,7 +1101,9 @@ $("#print").onclick = printList;
 
 /* ------------------------------------------------- the over-the-air update */
 
-function endUpdating(){ updating = false; clearTimeout(updateTimer); updateTimer = null; }
+function endUpdating(){
+  ota.updating = false; clearTimeout(ota.timer); ota.timer = null;
+}
 
 // The single footer button has two resting states: "Update available" (runs the
 // OTA update) and "Check for update" (asks the device to re-check the remote).
@@ -1082,16 +1116,16 @@ $("#update").onclick = () => {
 
 async function doCheck(){
   const btn = $("#update");
-  checking = true;
+  ota.checking = true;
   btn.disabled = true; btn.textContent = "Checking…"; btn.className = "link";
   const r = await api("/api/update/check", {method:"POST"});
   if (!r.status){
-    checking = false; updateBtnState(state);
+    ota.checking = false; updateBtnState(state);
     fail("Update check failed — check the connection");
     return;
   }
   const j = r.body;
-  checking = false;
+  ota.checking = false;
   if (!j.ok){
     // The check couldn't run (offline, or not a git deployment).
     updateBtnState(state);
@@ -1115,22 +1149,22 @@ async function doUpdate(){
   // A known deployed revision is required: completion is detected by the
   // revision changing (see render). Without one — the first snapshot hasn't
   // arrived, or this isn't a git deployment — a pre-restart snapshot would
-  // differ from a null baseline and clear `updating` before the update lands.
+  // differ from a null baseline and clear it before the update lands.
   if (!state || !state.revision){
     fail("Device state isn't ready yet — try again in a moment");
     return;
   }
   if (!confirm("Update to the latest version and restart? The device will briefly disconnect.")) return;
-  updating = true;
-  // Remember the revision we're leaving; render() clears `updating` once a
+  ota.updating = true;
+  // Remember the revision we're leaving; render() clears ota.updating once a
   // snapshot reports a different one (the new build is up).
-  updatingFromRev = state.revision;
+  ota.fromRev = state.revision;
   btn.disabled = true; btn.textContent = "Updating…"; btn.className = "link";
   // Safety net: if no new revision ever arrives (restart failed to come back),
   // don't leave the button stuck forever.
-  clearTimeout(updateTimer);
-  updateTimer = setTimeout(() => {
-    if (!updating) return;
+  clearTimeout(ota.timer);
+  ota.timer = setTimeout(() => {
+    if (!ota.updating) return;
     endUpdating();
     if (state) render(state);
     fail("Update didn't confirm — reload the page to check");
@@ -1150,7 +1184,7 @@ async function doUpdate(){
     endUpdating(); updateBtnState(state);
     return;
   }
-  // Success: the service is restarting. `updating` stays set until a snapshot
+  // Success: the service is restarting. ota.updating stays set until a snapshot
   // shows the new revision (see render), keeping the button locked so a second
   // update can't start while the restart is pending.
   setText($("#msg"), "Updating… the page will reconnect"); $("#msg").className = "msg";
