@@ -13,6 +13,9 @@ trash/
 *.wav
 *.mp3
 
+# Local agent scratch: worktrees, launch config, per-project settings.
+.claude/
+
 .DS_Store
 ._*
 .Spotlight-V100

@@ -174,6 +174,15 @@ own GitHub remote, so it fetches your code, not an attacker's — but it does le
 LAN user force a restart. It is built for a home LAN. Don't put it on a network
 you don't control.
 
+The two `sudo` rules the app relies on are scoped to one command each
+(`etc/99-ditto-poweroff`, `etc/99-ditto-restart`). Read those as
+defence-in-depth and as documentation of what the service is allowed to do, not
+as the ceiling. The service runs as `ditto`, which is the account Raspberry Pi
+Imager creates, and that account is in the `sudo` group — so the real ceiling is
+whatever that user can do. Narrowing it means a separate system account, which
+changes the data partition's ownership on every device already provisioned;
+worth doing alongside authentication rather than before it.
+
 ---
 
 ## Disclaimer
