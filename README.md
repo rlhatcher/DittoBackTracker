@@ -1,5 +1,7 @@
 # DittoBackTracker
 
+[![CI](https://dl.circleci.com/status-badge/img/gh/rlhatcher/DittoBackTracker/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/rlhatcher/DittoBackTracker/tree/main)
+
 Load backing tracks onto a TC Electronic Ditto+ looper over WiFi.
 
 The Ditto+ plays backing tracks, but getting them onto it needs a computer. The

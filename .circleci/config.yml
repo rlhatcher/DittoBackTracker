@@ -47,9 +47,12 @@ jobs:
           name: Check the installer
           # install.sh is the least-tested surface here — it cannot be unit
           # tested and it runs as root on a device with a read-only root.
-          command: |
-            sudo apt-get install -y --no-install-recommends shellcheck
-            shellcheck install.sh
+          #
+          # shellcheck ships in the cimg image, so there is nothing to install.
+          # If a future image drops it this fails with "command not found",
+          # which is the right way round: a missing checker should stop the
+          # build rather than quietly pass it.
+          command: shellcheck install.sh
       - run:
           name: Run tests
           command: |
