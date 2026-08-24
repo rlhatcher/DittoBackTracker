@@ -46,7 +46,7 @@ def local_ip() -> str:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("10.255.255.255", 1))
             return s.getsockname()[0]
-    except Exception:
+    except Exception:      # noqa: BLE001 — any failure here means no network
         return "no network"
 
 
@@ -1086,7 +1086,7 @@ class Service:
                 dest.unlink(missing_ok=True)
             self._loops = self._loops - {slot}  # the loop is gone; drop it
             stage.error = "no loop"
-        except Exception as e:                  # surface like a failed convert
+        except Exception as e:      # noqa: BLE001 — surface like a failed convert
             if dest is not None:
                 dest.unlink(missing_ok=True)
             stage.error = str(e)
