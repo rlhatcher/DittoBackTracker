@@ -292,6 +292,7 @@
   .row > h2 { margin: 0; }
   .listhead {
     display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; row-gap: var(--space-1);
     margin-bottom: var(--space-2);
   }
   .listhead h2 { margin: 0; }
@@ -543,13 +544,23 @@
   /* A track can be in more than one slot and the field can only show one. */
   .slotmore { font: var(--text-meta) var(--font-mono); color: var(--text-faint); }
 
+  /* The buttons are one block that never splits. Every .libbtn is flex:none, so
+     a group that shrinks does not narrow its buttons, it spills them out of the
+     pane. Sized to its content and pushed right by the auto margin, the group
+     drops to a line of its own once the heading stops leaving room for it.
+
+     Left shrinkable it ran 5px past a 375px phone with two buttons, and 21px
+     past the right pane at 900 once "Out of folder" joins them. The phone case
+     widened the document and took the fixed action bar with it; the 900 case is
+     under overflow:hidden, so "Add files" was simply cut off. */
+  .libhead-acts { display: flex; gap: var(--space-2); flex: none; margin-left: auto; }
+
   /* -- the folder tree ----------------------------------------------------
 
      One flat list of rows carrying their own indent, not nested containers.
      Rows are rebuilt from scratch on every library change, and a tree of divs
      would have to be diffed to keep that cheap; a flat list is what rebuild()
      already knows how to restore focus into. */
-  .libhead-acts { display: flex; gap: var(--space-2); }
   .folderrow {
     display: flex; align-items: center; gap: var(--space-2); padding: 9px 0;
     border-bottom: var(--rule-minor) solid var(--rule);
