@@ -76,12 +76,3 @@ Set them in the systemd unit, which lives on the read-only filesystem — see
 [Service]
 Environment=DITTO_PORT=8080
 ```
-
----
-
-## Enclosure
-
-There isn't one. A bare Zero 2 W is 65 × 30 mm and about 5 mm tall. Both
-micro-USB ports are on the same long edge and both need to stay reachable, and
-the OTG adapter on the data port is bulky enough that a short pigtail may fit
-better than a rigid adapter.

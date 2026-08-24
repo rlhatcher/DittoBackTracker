@@ -2,9 +2,6 @@
 
 ## Not yet built
 
-**Enclosure.** None yet; the mechanical constraints are in
-[hardware.md](hardware.md#enclosure).
-
 **Authentication.** The web UI is open to anyone on the network. Fine for a home
 LAN, not for anything else.
 
