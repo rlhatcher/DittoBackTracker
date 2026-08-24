@@ -202,15 +202,10 @@ account the service runs as, not your login) rather than the world-writable
 sudo mkdir -p /media/ditto
 ```
 
-To try it by hand before the service exists, mount as the account that will own
-it. `user` in fstab lets anyone mount but only the mounting user unmount, so
-mounting this as yourself leaves a volume the service cannot release:
-
-```bash
-sudo -u ditto-svc mount /media/ditto
-ls /media/ditto          # 01track/ … 99track/
-sudo -u ditto-svc umount /media/ditto
-```
+There is nothing to test by hand yet. The entry names `ditto-svc`, and mount
+resolves `uid=`/`gid=` when it runs, so until step 6 creates that account the
+mount fails with "unknown user" whoever runs it — including root. The hand test
+is in step 6, after `install.sh`.
 
 `flush` pushes FAT writes out promptly instead of leaving them in cache.
 
@@ -234,6 +229,19 @@ cd /var/lib/ditto/src
 ```
 
 Open `http://dittobacktracker.local/`, plug in the pedal, drop a track in.
+
+The account now exists, so the step 5 mount entry can be tried by hand. Mount
+as `ditto-svc`: `user` in fstab lets anyone mount but only the mounting user
+unmount, so mounting it as yourself leaves a volume the service cannot release.
+Stop the service first, or it will be holding the pedal already.
+
+```bash
+sudo systemctl stop ditto-web
+sudo -u ditto-svc mount /media/ditto
+ls /media/ditto          # 01track/ … 99track/
+sudo -u ditto-svc umount /media/ditto
+sudo systemctl start ditto-web
+```
 
 Do this before enabling the overlay in step 8. `install.sh` writes to `/etc`,
 and those changes are discarded once the root filesystem is read-only.

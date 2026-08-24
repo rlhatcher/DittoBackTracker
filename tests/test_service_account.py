@@ -68,20 +68,25 @@ def _rule(path: Path) -> tuple:
     return who.strip(), argv[0], args
 
 
-def _permits(rule: tuple, argv: list) -> bool:
-    """Would this sudoers rule let this argv run?
+def _call(argv: list) -> list:
+    """The command and arguments out of a subprocess argv.
 
-    argv is what the code passes subprocess.run, so it starts with `sudo` and
-    whatever options it wants. Options are sudo's, not the command's, so strip
-    them before comparing against the rule.
+    argv starts with `sudo` and whatever options it wants. Those are sudo's
+    options, not the command's, so drop them before comparing with a rule.
     """
-    _, command, args = rule
     rest = argv[1:]
     while rest and rest[0].startswith("-"):
         rest = rest[1:]
-    if not rest or rest[0] != command:
+    return rest
+
+
+def _permits(rule: tuple, argv: list) -> bool:
+    """Would this sudoers rule let this argv run?"""
+    _, command, args = rule
+    call = _call(argv)
+    if not call or call[0] != command:
         return False
-    return args is None or rest[1:] == args
+    return args is None or call[1:] == args
 
 
 def _sudo_argvs(module: str) -> list:
@@ -140,19 +145,36 @@ def test_the_installer_gives_the_data_partition_to_that_account():
         "install.sh does not mount the pedal as $SVC"
 
 
-def test_the_poweroff_rule_permits_the_command_core_runs():
+def _check_rule_is_exactly(path: Path, argv: list) -> None:
+    """The rule must permit this call, and permit nothing wider.
+
+    Both halves are load-bearing, and the second is the security one. A rule
+    that names no arguments permits *any* arguments — so dropping `""` from the
+    poweroff rule, or the arguments from the restart rule, still permits the
+    call and passes a "does it permit" check while widening what the service
+    may do as root. `NOPASSWD: /usr/bin/systemctl` on its own would let it
+    start or stop any unit on the box, which is root by a longer route.
+
+    Compared against the argv read out of the source rather than a literal, so
+    there is still only one copy of the command in the repo.
+    """
+    rule = _rule(path)
+    assert _permits(rule, argv), \
+        f"{path.name} allows {rule[1:]}, the code runs {argv}"
+    assert rule[2] == _call(argv)[1:], \
+        (f"{path.name} is not scoped to that call: it permits "
+         f"{'any arguments' if rule[2] is None else rule[2]}")
+
+
+def test_the_poweroff_rule_is_exactly_the_command_core_runs():
     argvs = [a for a in _sudo_argvs("core.py")
              if any("poweroff" in str(x) for x in a)]
     assert len(argvs) == 1, f"expected one poweroff in core.py, found {argvs}"
-    rule = _rule(POWEROFF_RULE)
-    assert _permits(rule, argvs[0]), \
-        f"{POWEROFF_RULE.name} allows {rule[1:]}, core.py runs {argvs[0]}"
+    _check_rule_is_exactly(POWEROFF_RULE, argvs[0])
 
 
-def test_the_restart_rule_permits_the_command_the_updater_runs():
+def test_the_restart_rule_is_exactly_the_command_the_updater_runs():
     argvs = [a for a in _sudo_argvs("update.py")
              if any("systemctl" in str(x) for x in a)]
     assert len(argvs) == 1, f"expected one systemctl in update.py, got {argvs}"
-    rule = _rule(RESTART_RULE)
-    assert _permits(rule, argvs[0]), \
-        f"{RESTART_RULE.name} allows {rule[1:]}, update.py runs {argvs[0]}"
+    _check_rule_is_exactly(RESTART_RULE, argvs[0])

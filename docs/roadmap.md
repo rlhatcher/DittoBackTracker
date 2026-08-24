@@ -21,13 +21,17 @@ header is out, and it comes down to a cookie or a query parameter.
 
 ## Worth considering
 
-**Other Ditto models.** The X2 and X4 are reported to keep tracks in a single
-`TRACK/` folder rather than 99 numbered directories — reported, not measured,
-unlike everything else in [pedal-format.md](pedal-format.md). The slot *count*
-is already parameterised: nothing spells out 99, and clients read `slot_count`
-from the snapshot. The layout is not, and it reaches further than `pedal.py` —
-`detect_format()` finds a file to probe by walking the numbered directories, the
-slot map's ten columns are ten because 99 divides into them, and `db.slots.slot`
-is an `INTEGER PRIMARY KEY` that the move/swap parks at `-1`. The four places
-are listed in [pedal-format.md](pedal-format.md#other-models). Needs one of
-those pedals to develop against.
+**Other Ditto models.** Bigger than it looks, and probably not worth it. The X2
+holds *one* backing track in a `TRACK/` folder and plays whichever file was
+added last; the X4 holds *two*, in `TRACK1/` and `TRACK2/`, one per LOOP
+control. Neither has slots. The 99-slot map, the library-to-slot assignment,
+filling a folder into a run of slots and dragging to reorder are all modelling
+something those pedals do not have — so this is a second product sharing a
+converter, not a port.
+
+The slot *count* is already parameterised, for what it is worth: nothing spells
+out 99 and clients read `slot_count` from the snapshot. The layout is not, and
+it reaches past `pedal.py` into `detect_format()`, the grid's column count and
+the `slots` schema. The five places, the layouts and their sources are in
+[pedal-format.md](pedal-format.md#other-models), all secondhand and unconfirmed
+on hardware.

@@ -52,6 +52,25 @@ if ! id -u "$SVC" >/dev/null 2>&1; then
        --no-create-home --shell /usr/sbin/nologin "$SVC"
 fi
 
+# Everything from here to the restart at the end can exit non-zero, and from
+# here on the service is down. Put it back if we fail, rather than leaving a
+# device with no web UI -- the likeliest failure is the checkout validation
+# below, which is exactly the case where someone is already mid-problem. A
+# device that was already stopped stays stopped.
+WAS_ACTIVE=0
+if systemctl is-active --quiet ditto-web 2>/dev/null; then
+  WAS_ACTIVE=1
+fi
+restore_service() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ "$WAS_ACTIVE" -eq 1 ]; then
+    echo >&2
+    echo "install failed; restarting the service that was running before" >&2
+    sudo systemctl start ditto-web || true
+  fi
+}
+trap restore_service EXIT
+
 # Stop before touching ownership. A recursive chown under a live SQLite writer
 # can leave a half-owned WAL, and on a device migrating off the old account the
 # service is still running as the wrong user right now.
