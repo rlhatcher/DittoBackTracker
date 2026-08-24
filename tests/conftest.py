@@ -1,4 +1,4 @@
-"""Shared fixtures, and the two pieces of setup that have to run at import.
+"""Shared fixtures, and the setup that has to run at import.
 
 Point the app's data/mount paths at throwaway temp dirs before anything in the
 ditto package imports config (which resolves them at import time). This keeps a
@@ -20,7 +20,7 @@ os.environ["DITTO_DATA"] = os.path.join(_tmp, "data")
 os.environ["DITTO_MOUNT"] = os.path.join(_tmp, "mount")
 
 # Imported after the environment is set, or config resolves the real paths.
-from ditto import config, core, db, update, web       # noqa: E402
+from ditto import config, core, db, media, update, web       # noqa: E402
 
 
 # Every sudo the app runs, recorded instead of executed. Read it in a test if
@@ -54,7 +54,47 @@ def _block_sudo() -> None:
         mod.subprocess.run = guard
 
 
+def _block_ffmpeg() -> None:
+    """Stop the suite from ever reaching a real ffmpeg or ffprobe.
+
+    test_media.py's docstring states that neither is invoked and that every
+    crossing is stubbed. Nothing enforced it. A test that forgets to stub
+    passes on a laptop with ffmpeg installed, and CI has no ffmpeg, so the same
+    test fails there for a reason that reads like a broken image rather than a
+    broken test.
+
+    Raises rather than returning a plausible empty result. A test that reaches
+    the real binary has a bug in the test, and a fake CompletedProcess would
+    hide it behind an assertion about an empty stream list.
+
+    Wraps media's module reference, which is the only place either is named.
+    """
+    real_run, real_popen = media.subprocess.run, media.subprocess.Popen
+
+    def _blocked(cmd) -> str:
+        head = str(cmd[0]) if isinstance(cmd, (list, tuple)) and cmd else ""
+        return head if head in ("ffmpeg", "ffprobe") else ""
+
+    def guard_run(*args, **kwargs):
+        name = _blocked(args[0] if args else kwargs.get("args", []))
+        if name:
+            raise AssertionError(f"the suite tried to run {name}; stub it "
+                                 "instead (see test_media.py)")
+        return real_run(*args, **kwargs)
+
+    def guard_popen(*args, **kwargs):
+        name = _blocked(args[0] if args else kwargs.get("args", []))
+        if name:
+            raise AssertionError(f"the suite tried to run {name}; stub it "
+                                 "instead (see test_media.py)")
+        return real_popen(*args, **kwargs)
+
+    media.subprocess.run = guard_run
+    media.subprocess.Popen = guard_popen
+
+
 _block_sudo()
+_block_ffmpeg()
 
 
 def _forget_connection():
