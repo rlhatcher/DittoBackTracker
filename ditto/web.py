@@ -13,8 +13,16 @@ import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from flask import (Flask, Response, abort, jsonify, request, send_file,
-                   send_from_directory, stream_with_context)
+from flask import (
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    request,
+    send_file,
+    send_from_directory,
+    stream_with_context,
+)
 
 from . import config, db, pedal
 from .core import Service, ShuttingDown
@@ -121,7 +129,8 @@ def _json_folder_ref(body, field: str) -> "tuple[bool, Optional[int]]":
     if v is None:
         return True, None
     # bool is an int subclass, and True would silently mean folder 1.
-    return (True, v) if isinstance(v, int) and not isinstance(v, bool) else (False, None)
+    ok = isinstance(v, int) and not isinstance(v, bool)
+    return (True, v) if ok else (False, None)
 
 
 def _form_folder():

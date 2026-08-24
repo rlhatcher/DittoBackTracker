@@ -530,7 +530,8 @@ def folders_all() -> List[Dict]:
     rows actually on screen, since the client filters and sorts locally.
     """
     return [dict(r) for r in conn().execute(
-        "SELECT * FROM folders ORDER BY parent_id IS NOT NULL, parent_id, position, id")]
+        "SELECT * FROM folders "
+        "ORDER BY parent_id IS NOT NULL, parent_id, position, id")]
 
 
 def folder_get(folder_id: int) -> Optional[Dict]:
@@ -728,7 +729,8 @@ def library_set_folder(source_hash: str, folder_id: Optional[int]) -> bool:
         pos = c.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM library WHERE folder_id IS ?",
             (folder_id,)).fetchone()[0]
-        cur = c.execute("UPDATE library SET folder_id=?, position=? WHERE source_hash=?",
+        cur = c.execute(
+            "UPDATE library SET folder_id=?, position=? WHERE source_hash=?",
                         (folder_id, pos, source_hash))
         c.commit()
         return cur.rowcount > 0

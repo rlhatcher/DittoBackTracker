@@ -17,7 +17,6 @@ import pytest
 
 from ditto import config, media, web
 
-
 # --- bytes_per_second ------------------------------------------------------
 
 @pytest.mark.parametrize("codec,width", [

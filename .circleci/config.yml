@@ -37,6 +37,20 @@ jobs:
           paths:
             - venv
       - run:
+          name: Lint
+          # Before the tests: a lint failure is a second, and finding out about
+          # it after a 40-second suite is 40 seconds wasted.
+          command: |
+            . venv/bin/activate
+            ruff check ditto/ tests/
+      - run:
+          name: Check the installer
+          # install.sh is the least-tested surface here — it cannot be unit
+          # tested and it runs as root on a device with a read-only root.
+          command: |
+            sudo apt-get install -y --no-install-recommends shellcheck
+            shellcheck install.sh
+      - run:
           name: Run tests
           command: |
             . venv/bin/activate

@@ -20,8 +20,7 @@ os.environ["DITTO_DATA"] = os.path.join(_tmp, "data")
 os.environ["DITTO_MOUNT"] = os.path.join(_tmp, "mount")
 
 # Imported after the environment is set, or config resolves the real paths.
-from ditto import config, core, db, media, update, web       # noqa: E402
-
+from ditto import config, core, db, media, update, web  # noqa: E402
 
 # Every sudo the app runs, recorded instead of executed. Read it in a test if
 # you want to assert one was attempted.

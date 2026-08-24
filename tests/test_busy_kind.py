@@ -191,8 +191,11 @@ def test_end_session_queues_exactly_one_marker(service, monkeypatch):
             service.ending = SlowRead(False)
             start = threading.Barrier(16)
 
-            def go():
-                start.wait(timeout=5)
+            # Bound as a default: `start` is rebound each round, and the
+            # safety of reading it late depends on the join below sitting in
+            # the same iteration. Binding it here makes that local.
+            def go(barrier=start):
+                barrier.wait(timeout=5)
                 service.end_session()
 
             threads = [threading.Thread(target=go) for _ in range(16)]

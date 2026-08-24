@@ -134,12 +134,12 @@ TEXT = [
     ("--text-muted",     "--surface-hover", 12, 400, "a status on a hovered row"),
     ("--text-danger",    "--surface-hover", 12, 400, "a warning status, hovered"),
     ("--color-text",     "--surface-selected",  15, 400, "a name on a selected row"),
-    ("--text-faint",     "--surface-selected",  12, 400, "a duration on a selected row"),
+    ("--text-faint",     "--surface-selected",  12, 400, "a duration, selected"),
     ("--text-muted",     "--surface-selected",  12, 400, "a status on a selected row"),
     ("--text-danger",    "--surface-selected",  12, 400, "a warning status, selected"),
     # the row's slot-number block, unselected and selected
     ("--color-bg",       "--color-text",        13, 800, "a slot number block"),
-    ("--color-bg",       "--accent-legible",    13, 800, "a selected slot number block"),
+    ("--color-bg",       "--accent-legible",    13, 800, "a selected slot block"),
     ("--text-faint",     "--color-bg",          11, 400, "the resting slot readout"),
     ("--color-text",     "--color-bg",          11, 800, "the active slot readout"),
     # the per-track slot field, and the marker for a track in several slots
@@ -180,7 +180,8 @@ def test_every_piece_of_text_meets_wcag_aa(scheme, fg, bg, px, weight, what):
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
-@pytest.mark.parametrize("fg,bg,what", NON_TEXT, ids=[t[2].replace(" ", "-") for t in NON_TEXT])
+@pytest.mark.parametrize("fg,bg,what", NON_TEXT,
+                         ids=[t[2].replace(" ", "-") for t in NON_TEXT])
 def test_control_boundaries_meet_wcag_non_text_contrast(scheme, fg, bg, what):
     """The design's own divider token measures 2.41:1 here, which is why the
     cell border is a separate token — this is what stops it drifting back."""
@@ -212,7 +213,8 @@ def test_the_stylesheet_puts_every_rule_in_a_layer():
     leftover = "".join(out)
     leftover = re.sub(r"@layer[^;]*;", "", leftover)          # the order statement
     leftover = re.sub(r"@font-face\s*\{[^}]*\}", "", leftover)  # declares a resource
-    assert not leftover.strip(), f"these rules sit outside every layer:\n{leftover.strip()}"
+    assert not leftover.strip(), \
+        f"these rules sit outside every layer:\n{leftover.strip()}"
 
 
 def test_only_the_token_layer_names_a_raw_ramp_step():
@@ -247,7 +249,8 @@ def test_the_page_reads_a_leading_slot_number_the_way_the_server_does():
 def test_the_arrow_keys_step_the_same_grid_the_css_draws():
     """app.js repeats the column count so Up and Down can move a whole row. The
     two have to agree or Down lands on the wrong slot, and nothing errors."""
-    css = int(re.search(r"#grid\s*\{[^}]*repeat\((\d+),", _strip_comments(CSS)).group(1))
+    css = int(re.search(r"#grid\s*\{[^}]*repeat\((\d+),",
+                        _strip_comments(CSS)).group(1))
     js = int(re.search(r"const GRID_COLS\s*=\s*(\d+)", _strip_comments(JS)).group(1))
     assert js == css, f"GRID_COLS is {js} but the CSS draws {css} columns"
 

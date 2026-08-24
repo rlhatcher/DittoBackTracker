@@ -4,6 +4,7 @@ the mounted pedal. No real device or ffmpeg needed."""
 import pathlib
 import queue
 import threading
+
 import pytest
 
 from ditto import config, pedal

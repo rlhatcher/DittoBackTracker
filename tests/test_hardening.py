@@ -15,11 +15,10 @@ import queue
 import stat
 import time
 
+import conftest
 import pytest
 
-import conftest
 from ditto import config, core, db
-
 
 # --- durable ingest ---------------------------------------------------------
 
