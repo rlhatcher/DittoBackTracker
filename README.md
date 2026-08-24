@@ -84,6 +84,13 @@ First-time setup needs the read-only overlay off for one boot
 ([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)); the
 mechanism is in [docs/api.md](docs/api.md#post-apiupdate).
 
+An over-the-air update replaces the Python and nothing else, so a release that
+changes the systemd unit, the sudoers rules, the fstab entry or the ownership
+of `/var/lib/ditto` needs `install.sh` run again with the overlay off. **0.4.0
+is one of those** — it moves the service onto its own account. The procedure is
+[Upgrading a device that is already
+running](docs/provisioning.md#upgrading-a-device-that-is-already-running).
+
 ### Running it without hardware
 
 The web UI runs anywhere. With no pedal attached, uploads convert and wait.
@@ -190,8 +197,8 @@ is in the `sudo` group — so the same reach was root on the device. The rules
 in `etc/` documented an intention; now they bound it.
 
 Upgrading an existing device means re-running `install.sh` once with the
-overlay disabled. An over-the-air update replaces the Python and leaves the
-account alone.
+overlay disabled — an over-the-air update replaces the Python and leaves the
+account alone. Steps in [docs/provisioning.md](docs/provisioning.md#upgrading-a-device-that-is-already-running).
 
 ---
 

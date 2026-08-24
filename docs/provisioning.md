@@ -373,6 +373,73 @@ sudo sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.
 sudo reboot
 ```
 
+### Upgrading a device that is already running
+
+Most releases need none of this: press **Update** and the device redeploys
+itself. Do this only when a release changes something outside the `ditto/`
+package — the unit, the sudoers rules, the fstab entry or the ownership of
+`/var/lib/ditto`. An over-the-air update copies the Python and nothing else,
+so those stay as they were until `install.sh` runs again, and `install.sh`
+writes to `/etc`, which means the overlay has to be off for one boot.
+
+0.4.0 is such a release: it moves the service off your login account onto
+`ditto-svc`. Two reboots, and nothing on the pedal is touched.
+
+**1. Finish the session.** Press **Done** and unplug the pedal, so nothing is
+mid-write when the service stops. Power the Pi back up.
+
+**2. Turn the overlay off for a boot.** The edit has to happen inside the
+chroot or it lands on the tmpfs layer and is discarded:
+
+```bash
+sudo overlayroot-chroot
+sed -i 's/^overlayroot=.*/overlayroot=""/' /etc/overlayroot.conf
+exit
+sudo reboot
+```
+
+**3. Pull and install.** The checkout still belongs to your login account at
+this point, so plain `git pull` is right here — it is only afterwards that it
+needs `sudo -u ditto-svc`:
+
+```bash
+cd /var/lib/ditto/src
+git pull
+./install.sh
+```
+
+`install.sh` creates the account, stops the service, unmounts the pedal if it
+is still mounted, hands `/var/lib/ditto` to `ditto-svc`, rewrites the fstab
+entry and both sudoers rules, replaces the unit and starts it again. It is
+idempotent, so a second run costs nothing.
+
+If it fails it says which state it left the device in. "Restarting the service
+that was running" means nothing changed hands and you are back where you
+started. A part-migrated message means the data moved but the unit did not, and
+the service is deliberately left down — fix what it reported and run it again.
+
+**4. Check it took**, before putting the overlay back:
+
+```bash
+systemctl show ditto-web -p User        # User=ditto-svc
+id ditto-svc                            # no sudo group
+systemctl is-active ditto-web           # active
+```
+
+Then open the page, plug the pedal in, confirm the slot map fills, and press
+**Done** to confirm the poweroff rule still matches. That last one is the
+easiest to get wrong and the least obvious when it is: a refused poweroff
+arrives after the page has already said it is safe to unplug.
+
+**5. Put the overlay back.** Root is writable now, so no chroot:
+
+```bash
+sudo sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
+sudo reboot
+```
+
+From here on, updates that only touch the Python go over the air again.
+
 ---
 
 ## 9. Optional: measure write throughput
