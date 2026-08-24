@@ -143,3 +143,32 @@ workaround is to generate four beats instead of one.
 
 **Flush before unplugging.** On FAT, a rename in particular doesn't reliably
 stick without an explicit `sync`.
+
+---
+
+## Other models
+
+Nothing below was measured. Everything above it was, on a Ditto+; this section
+is a note for whoever has an X2 or an X4 in front of them.
+
+The X2 and X4 are reported to keep backing tracks in a single `TRACK/` folder
+rather than 99 numbered directories. If that holds, four things in
+DittoBackTracker assume the Ditto+ layout and would have to change:
+
+- `pedal.detect_format()` finds a file to probe by walking slots 1 to
+  `config.SLOTS` and stat-ing `SLOT_DIR.format(n)`. The audio format is read
+  from the pedal at mount time rather than hardcoded, but the *search* for
+  something to read is not layout-independent, so it has to be taught the new
+  layout before it can detect anything on one.
+- `db.slots.slot` is `INTEGER PRIMARY KEY`, and the move/swap parks a row at
+  `slot = -1` while it exchanges two others. Both assume one small integer
+  keyspace. A model whose tracks aren't identified by a number in that range
+  needs a schema change, not just new paths.
+- The slot map is ten columns wide because a row of ten is a decade and 99
+  slots divide into it. A different count wants a different arrangement, and
+  the column count lives in `app.js` and `app.css` with a test tying them.
+- `config.PEDAL_LABEL` is one label per process, so a build serves one model.
+
+The rest already reads `config.SLOTS` and `config.SLOT_DIR` rather than
+spelling out 99, and clients read `slot_count` from the state snapshot, so slot
+*count* is not the hard part. Layout is.
