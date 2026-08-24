@@ -3,7 +3,7 @@ version: 2.1
 jobs:
   test:
     docker:
-      - image: cimg/python:3.11
+      - image: cimg/python:3.11-node
     steps:
       - checkout
       - run:
@@ -41,6 +41,11 @@ jobs:
           command: |
             . venv/bin/activate
             pytest -q
+          environment:
+            # test_frontend runs `node --check` over app.js. Without this the
+            # check turns into a permanent green skip the moment the image loses
+            # node, and a page whose script never parses ships unnoticed.
+            DITTO_STRICT_FRONTEND: "1"
 
 workflows:
   test:
