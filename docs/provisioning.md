@@ -398,13 +398,22 @@ exit
 sudo reboot
 ```
 
-**3. Pull and install.** The checkout still belongs to your login account at
-this point, so plain `git pull` is right here — it is only afterwards that it
-needs `sudo -u ditto-svc`:
+**3. Pull and install.** Which `git pull` depends on who owns the checkout,
+which depends on whether this device has been through the 0.4.0 migration
+already. Coming from 0.3.x it is still your login account:
 
 ```bash
 cd /var/lib/ditto/src
 git pull
+./install.sh
+```
+
+On a device already running 0.4.0 or later, the checkout belongs to
+`ditto-svc` and git refuses it as anyone else:
+
+```bash
+cd /var/lib/ditto/src
+sudo -u ditto-svc git pull
 ./install.sh
 ```
 
@@ -430,6 +439,9 @@ Then open the page, plug the pedal in, confirm the slot map fills, and press
 **Done** to confirm the poweroff rule still matches. That last one is the
 easiest to get wrong and the least obvious when it is: a refused poweroff
 arrives after the page has already said it is safe to unplug.
+
+**Done halts the Pi**, which is how you know the rule worked. Power it back up
+for the last step.
 
 **5. Put the overlay back.** Root is writable now, so no chroot:
 

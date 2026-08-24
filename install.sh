@@ -100,7 +100,7 @@ restore_service() {
         sudo systemctl start ditto-web || true
       fi
       ;;
-    chowned)
+    migrating)
       echo >&2
       echo "install failed after /var/lib/ditto changed hands. The device is" >&2
       echo "part-migrated: the data belongs to $SVC and the installed unit" >&2
@@ -127,12 +127,17 @@ if mountpoint -q /media/ditto; then
 fi
 
 echo "==> ownership -> $SVC"
-# Before the git steps, not after. Once the data partition belongs to $SVC, git
-# refuses to touch $SRC as anyone else ("detected dubious ownership"), so every
-# git call and every write below has to run as $SVC. Doing this last, as it
-# used to, worked on a fresh install and failed on every re-run.
+# Everything below this line writes as $SVC, because from here $SVC owns the
+# tree and git refuses a work tree owned by anyone else.
+#
+# The stage is set before the chown rather than after. `chown -R` reports what
+# it could not change, carries on with the rest, and exits non-zero -- so a
+# partial failure trips set -e with much of the tree already moved. Setting it
+# afterwards would leave the trap believing nothing had changed hands, and
+# restarting the old service onto data it no longer owns is the exact case this
+# variable exists to prevent.
+STAGE=migrating
 sudo chown -R "$SVC:$SVC" /var/lib/ditto
-STAGE=chowned
 
 echo "==> code -> $APP"
 sudo -u "$SVC" mkdir -p "$APP"
