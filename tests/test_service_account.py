@@ -29,6 +29,7 @@ app.js to pin what it reaches for.
 """
 
 import ast
+import re
 from pathlib import Path
 
 from ditto import config
@@ -122,12 +123,21 @@ def test_the_unit_and_both_sudoers_rules_name_one_account():
 
 
 def test_the_installer_gives_the_data_partition_to_that_account():
+    """install.sh names the account once, in SVC=, and spends it through a
+    variable everywhere else. Both spends are checked, because they fail
+    differently: the wrong chown target leaves the service unable to write its
+    own data partition, the wrong fstab uid= leaves it unable to read the pedal
+    it just mounted."""
     user = _unit_value("User")
     sh = INSTALL_SH.read_text()
-    assert f"chown -R {user}:{user} /var/lib/ditto" in sh, \
-        f"install.sh does not chown the data partition to {user}"
-    assert f"uid={user},gid={user}" in sh, \
-        f"install.sh does not mount the pedal as {user}"
+    declared = re.search(r"^SVC=(\S+)$", sh, re.M)
+    assert declared, "install.sh has no SVC= line naming the service account"
+    assert declared.group(1) == user, \
+        f"install.sh installs for {declared.group(1)}, unit runs as {user}"
+    assert 'chown -R "$SVC:$SVC" /var/lib/ditto' in sh, \
+        "install.sh does not chown the data partition to $SVC"
+    assert "uid=$SVC,gid=$SVC" in sh, \
+        "install.sh does not mount the pedal as $SVC"
 
 
 def test_the_poweroff_rule_permits_the_command_core_runs():

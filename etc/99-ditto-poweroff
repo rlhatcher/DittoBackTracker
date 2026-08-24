@@ -1,1 +1,4 @@
-ditto ALL=(root) NOPASSWD: /sbin/poweroff
+# Let the ditto service power the device off for the web UI's Done button,
+# without a password. Scoped to poweroff with no arguments: "" is how sudoers
+# spells that, and a bare command name would permit any arguments at all.
+ditto-svc ALL=(root) NOPASSWD: /sbin/poweroff ""

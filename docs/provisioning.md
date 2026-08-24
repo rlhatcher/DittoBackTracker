@@ -135,11 +135,14 @@ LABEL=dittodata  /var/lib/ditto  ext4  defaults,noatime  0  2
 ```bash
 sudo mount -a
 sudo mkdir -p /var/lib/ditto/{sources,staged,trash,app}
-sudo chown -R ditto:ditto /var/lib/ditto
 ```
 
 This partition holds the application, the uploads and the database. It is the
 only writable storage once the overlay is on.
+
+Ownership is left alone here on purpose. `install.sh` creates the `ditto-svc`
+account in step 6 and hands it the whole partition, so chowning it to the login
+user now only means chowning it twice.
 
 ---
 
@@ -185,25 +188,28 @@ Udev creates the `by-label` symlink. No custom rule needed.
 ## 5. Mounting
 
 An fstab entry with `noauto,user` lets the service mount the pedal without
-root:
+root. `install.sh` writes this line; it is here so you can read it:
 
 ```text
-LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto,gid=ditto  0  0
+LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto-svc,gid=ditto-svc  0  0
 ```
 
-`fmask=077,dmask=077` keeps the mounted files owner-only (the `ditto` user the
-service runs as) rather than the world-writable `umask=000`.
+`fmask=077,dmask=077` keeps the mounted files owner-only (the `ditto-svc`
+account the service runs as, not your login) rather than the world-writable
+`umask=000`.
 
 ```bash
 sudo mkdir -p /media/ditto
 ```
 
-As the `ditto` user, with no sudo:
+To try it by hand before the service exists, mount as the account that will own
+it. `user` in fstab lets anyone mount but only the mounting user unmount, so
+mounting this as yourself leaves a volume the service cannot release:
 
 ```bash
-mount /media/ditto
+sudo -u ditto-svc mount /media/ditto
 ls /media/ditto          # 01track/ … 99track/
-umount /media/ditto
+sudo -u ditto-svc umount /media/ditto
 ```
 
 `flush` pushes FAT writes out promptly instead of leaving them in cache.
@@ -300,8 +306,11 @@ Verify:
 ```bash
 mount | grep ' / '            # overlay
 df -h /var/lib/ditto          # must be /dev/mmcblk0p3, not an overlay
-touch /var/lib/ditto/x && echo ok && rm /var/lib/ditto/x
+sudo -u ditto-svc touch /var/lib/ditto/x && echo ok && sudo rm /var/lib/ditto/x
 ```
+
+The write test runs as `ditto-svc` because that is the account that has to be
+able to write there. Your login user cannot, and that is the point.
 
 ### Changing anything afterwards
 
@@ -309,19 +318,28 @@ Application code lives on `/var/lib/ditto/app`, which stays writable, so
 updating is:
 
 ```bash
-cd /var/lib/ditto/src && git pull
-rm -rf /var/lib/ditto/app/ditto
-cp -r ditto /var/lib/ditto/app/
+sudo -u ditto-svc git -C /var/lib/ditto/src pull
+sudo -u ditto-svc rm -rf /var/lib/ditto/app/ditto
+sudo -u ditto-svc cp -r /var/lib/ditto/src/ditto /var/lib/ditto/app/
 sudo systemctl restart ditto-web
 ```
 
 The `rm` matters: without it, modules deleted upstream linger in the deployed
 copy.
 
+Every step runs as `ditto-svc` because the data partition belongs to it. Run
+the `git pull` as yourself and git refuses with "detected dubious ownership"
+rather than doing something half-right.
+
 Or press **Update** in the web UI for the same result over the air — how it works
 is in [api.md](api.md#post-apiupdate). It needs the `ditto-restart.service`
 unit and sudoers rule that `install.sh` installs; if you provisioned before those
 existed, re-run `install.sh` once with the overlay disabled (below) to add them.
+
+An update over the air replaces the Python and nothing else. It does not re-run
+`install.sh`, so a device that self-updates past 0.4.0 keeps running as whatever
+account it was installed with. Moving it to `ditto-svc` takes one `install.sh`
+run with the overlay off.
 
 For changes under `/etc`:
 
@@ -370,7 +388,8 @@ Expect roughly 1 MB/s. That figure is what sizes the loop-staging timeout in
 
 - [ ] `dittobacktracker.local` resolves from your laptop
 - [ ] Pedal appears at `/dev/disk/by-label/DITTOPLUS` when connected
-- [ ] The `ditto` user can mount and unmount without `sudo`
+- [ ] `id ditto-svc` shows it is **not** in the `sudo` group
+- [ ] `ditto-svc` can mount and unmount the pedal without `sudo`
 - [ ] `systemctl status ditto-web` is active, with no restart loop
 - [ ] The web UI loads and shows the slot grid
 - [ ] A dropped MP3 converts and plays back from the pedal

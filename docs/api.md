@@ -27,7 +27,7 @@ Full snapshot. The same object is pushed over `/api/events`.
   "ending": false,
   "error": null,
   "ip": "192.168.1.42",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "revision": "a1b2c3d",
   "update_available": false,
   "remote_revision": null,

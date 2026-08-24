@@ -2,16 +2,22 @@
 
 ## Not yet built
 
-**Authentication.** The web UI is open to anyone on the network. Fine for a home
-LAN, not for anything else.
+**Authentication.** The web UI is open to anyone on the network, and the only
+guard in front of a state-changing request is the cross-site check in
+`web.py` — which stops another origin's page acting through your browser, and
+stops nothing typed at a terminal. Anyone who can route to port 80 can upload,
+clear slots, download a recorded loop, force a restart onto the tracked branch,
+or shut the device down.
 
-**Privilege separation.** The service runs as `ditto`, the Raspberry Pi Imager
-login account, which is in the `sudo` group. The scoped rules in `etc/` describe
-what the app intends to do rather than bounding what it could. A dedicated
-system account would fix it, at the cost of a migration touching `install.sh`,
-the unit file, the fstab `uid=`/`gid=` and the data partition's ownership on
-every provisioned device. Worth pairing with authentication, since anyone who
-can reach `POST /api/update` can already run code from the tracked branch.
+Since 0.4.0 that reach stops at the `ditto-svc` account rather than root, so
+this is now the last thing standing open rather than the second. Fine for a
+home LAN, not for anything else.
+
+The shape is not decided. The awkward part is not the login page, it is that
+`GET /api/events`, the loop download and the audio preview are all reached by
+the browser rather than by `fetch` — an `EventSource` cannot set a header, and
+neither can an `<a download>` or an `<audio src>`. So a bearer token in a
+header is out, and it comes down to a cookie or a query parameter.
 
 ## Worth considering
 

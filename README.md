@@ -176,14 +176,22 @@ own GitHub remote, so it fetches your code, not an attacker's — but it does le
 LAN user force a restart. It is built for a home LAN. Don't put it on a network
 you don't control.
 
-The two `sudo` rules the app relies on are scoped to one command each
-(`etc/99-ditto-poweroff`, `etc/99-ditto-restart`). Read those as
-defence-in-depth and as documentation of what the service is allowed to do, not
-as the ceiling. The service runs as `ditto`, which is the account Raspberry Pi
-Imager creates, and that account is in the `sudo` group — so the real ceiling is
-whatever that user can do. Narrowing it means a separate system account, which
-changes the data partition's ownership on every device already provisioned;
-worth doing alongside authentication rather than before it.
+The service runs as `ditto-svc`, a system account with no shell that is not in
+the `sudo` group. The two rules in `etc/99-ditto-poweroff` and
+`etc/99-ditto-restart` are scoped to one command each, and they are the whole of
+what the service may do as root: power the device off, and start the restart
+helper. So a LAN user who reaches `POST /api/update` can still make the device
+restart on code from your tracked branch, and can still shut it down. They
+cannot get root.
+
+That is a smaller claim than it sounds and worth reading precisely. Until
+0.4.0 the service ran as `ditto`, the Raspberry Pi Imager login account, which
+is in the `sudo` group — so the same reach was root on the device. The rules
+in `etc/` documented an intention; now they bound it.
+
+Upgrading an existing device means re-running `install.sh` once with the
+overlay disabled. An over-the-air update replaces the Python and leaves the
+account alone.
 
 ---
 
