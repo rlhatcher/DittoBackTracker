@@ -1,5 +1,33 @@
+/* The whole page, in one file and in this order:
+
+     module state          what render() and the library views read
+     the slot map          painting, selection, hover, pick-up, drag and drop
+     drawing the two lists slot buttons, loop controls, the track list
+     render                the one function the SSE snapshot drives
+     DOM helpers           rebuild-with-focus, setText, printing
+     talking to the device api(), failFrom(), jsonBody
+     the status line       say/warn/fail, and the six-second hold
+     uploads               where a dropped file goes, and what it reports
+     listeners             keyboard, hover, the drop zone, the bin
+     the update            check and deploy, and the button's two states
+     the event stream      EventSource, and the reconnect grace
+     library and folders   fetching, the derived tree, the views, the rows
+     boot                  the two loads the stream would otherwise wait for
+
+   One file on purpose. Splitting it into ES modules would cost a round trip
+   each on a page served no-cache from a Pi Zero, serialise on the import graph
+   the preload scanner cannot see, and add an ASSETS allowlist entry per module
+   where forgetting one is a silent 404. Revisit if this passes ~2500 lines, or
+   the library section passes ~1200. */
+
 const $ = s => document.querySelector(s);
 const SLOT_MIME = "application/x-ditto-slot";
+/* How far one level of folder nesting indents a row. Written twice before this
+   — once for folder rows, once for track rows — and config.py cites it a third
+   time (16 + depth*18) to justify MAX_FOLDER_DEPTH = 8, which is the depth past
+   which a name disappears behind the meta text in a half-width column. Change
+   it here and the depth limit stops meaning what its comment says. */
+const DEPTH_INDENT_PX = 18;
 let state = null, selected = null, dragSrc = null, binMode = false;
 let updating = false, updatingFromRev = null, updateTimer = null, checking = false;
 
@@ -110,6 +138,8 @@ let slotDraft = {};
    before the answer comes. Without this, a slow refusal wipes what they have
    since typed. */
 let slotEdit = {};
+
+/* ------------------------------------------------------------ the slot map */
 
 /* The only thing that writes .sel and .linked, on either surface.
 
@@ -289,6 +319,8 @@ function attachSlotDnD(el, n){
   });
 }
 
+/* --------------------------------------------------- drawing the two lists */
+
 const pad2 = n => String(n).padStart(2, "0");
 // One vocabulary for slot state. The wire words are not the shown words, and
 // the map cell and the list row describe the same slot — a cell announcing
@@ -411,6 +443,8 @@ function drawTrackList(list, s, byslot, loops){
       }
     });
 }
+
+/* ------------------------------------------------------------------ render */
 
 function render(s){
   state = s;
@@ -584,6 +618,8 @@ function render(s){
   updateSlotRead();
 }
 
+/* ----------------------------------------------- DOM helpers, and printing */
+
 /* Rebuild `host` while keeping focus where the user put it.
 
    A dirty check keeps most rebuilds from happening at all, but the ones that do
@@ -688,6 +724,8 @@ function updateBtnState(s){
   }
 }
 
+/* --------------------------------------------------- talking to the device */
+
 /* Send it, parse whatever came back, say whether it worked — the shape seven of
    the thirteen call sites want. `status` is 0 when the request never reached the
    device: the device's own error is worth showing, a network failure is not. The
@@ -711,6 +749,8 @@ function failFrom(r, what){
 const jsonBody = body => ({method: "POST",
                            headers: {"Content-Type": "application/json"},
                            body: JSON.stringify(body)});
+
+/* --------------------------------------------------------- the status line */
 
 /* Two status surfaces, and they must not swap jobs. #msg says what just
    happened; the drop-zone note says what you can do next. Cross them and the
@@ -739,6 +779,8 @@ function holdMsg(){
 function say(text){ setText($("#msg"), text); $("#msg").className = "msg"; holdMsg(); }
 function warn(text){ setText($("#msg"), text); $("#msg").className = "msg warn"; holdMsg(); }
 function fail(text){ setText($("#msg"), text); $("#msg").className = "msg err"; holdMsg(); }
+
+/* ---------------------------------- uploads, and where a dropped file goes */
 
 // Returns whether it landed. Most callers ignore that; the slot field needs it
 // to know whether the number the user typed is now true.
@@ -849,6 +891,8 @@ function reportUpload(res, nped, nlib){
   say(`${n} track${n === 1 ? "" : "s"} added to ${where}`
       + (nped ? ` · ${nped} to the pedal` : ""));
 }
+
+/* ------------------------------ keyboard, hover, the drop zone and the bin */
 
 /* Arrow-key movement inside the slot grid.
 
@@ -1001,6 +1045,8 @@ paneL.addEventListener("drop", e => {
   send(e.dataTransfer.files, selected);
 });
 
+/* ------------------------------------ the page's own drag, drop and footer */
+
 // Anywhere else, a dropped file would navigate the page away from the app.
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("drop", e => e.preventDefault());
@@ -1020,6 +1066,8 @@ $("#done").onclick = async () => {
 };
 
 $("#print").onclick = printList;
+
+/* ------------------------------------------------- the over-the-air update */
 
 function endUpdating(){ updating = false; clearTimeout(updateTimer); updateTimer = null; }
 
@@ -1107,6 +1155,8 @@ async function doUpdate(){
   // update can't start while the restart is pending.
   setText($("#msg"), "Updating… the page will reconnect"); $("#msg").className = "msg";
 }
+
+/* -------------------------------------------------------- the event stream */
 
 const es = new EventSource("/api/events");
 let reconnectTimer = null;
@@ -1216,6 +1266,8 @@ async function loadFolders(){
   }
   renderLibrary();
 }
+
+/* ------------------------------------------------ the folder tree, derived */
 
 /* The tree, from the two flat lists the server sends.
 
@@ -1328,6 +1380,8 @@ function assignTarget(){
   }
   return null;
 }
+
+/* -------------------------------------------------------- the library view */
 
 /* What the library pane draws, as one flat list of row descriptors.
 
@@ -1471,6 +1525,8 @@ function _renderLibrary(){
     + (q ? `<span>${shown} match${shown === 1 ? "" : "es"}</span>` : "");
 }
 
+/* ------------------------------------------- the slot field on a track row */
+
 /* The slot a track occupies, as an editable field.
 
    A track can occupy several slots — db.slots_for_hash returns a list and the
@@ -1580,6 +1636,8 @@ async function commitSlotField(r, slots){
   }
 }
 
+/* --------------------------------------- folder rows, and filing into them */
+
 /* A folder: a disclosure that carries the name, then what it holds.
 
    The caret and the name are one <button> rather than a clickable div. It is a
@@ -1592,7 +1650,7 @@ function folderRow(row){
   const el = document.createElement("div");
   el.className = "folderrow" + (row.depth ? "" : " top");
   el.dataset.folder = f.id;
-  el.style.paddingLeft = (row.depth * 18) + "px";
+  el.style.paddingLeft = (row.depth * DEPTH_INDENT_PX) + "px";
 
   // Built like a track row, and for the same reasons: the body of the row is
   // the big target, the name is the way to rename, controls at the right stop
@@ -1883,10 +1941,13 @@ async function newFolder(){
   loadFolders();
 }
 
+/* -------------------------------------------------------------- track rows */
+
 function libraryRow(r, slots, row){
   const el = document.createElement("div");
   el.className = "librow" + (pickedTrack === r.source_hash ? " picked" : "");
-  if (row && row.depth) el.style.paddingLeft = (row.depth * 18) + "px";
+  if (row && row.depth)
+    el.style.paddingLeft = (row.depth * DEPTH_INDENT_PX) + "px";
   // The column a folder's caret occupies, so names line up under the folder
   // they are in. Only in the tree — a flattened list has no carets to align to.
   if (row && row.tree){
@@ -2063,6 +2124,8 @@ async function forget(r, force){
   if (nowPlaying === r.source_hash){ player.pause(); nowPlaying = null; }
   loadLibrary();
 }
+
+/* -------------------------------------------------- sending to the library */
 
 async function sendToLibrary(files){
   if (!files || !files.length) return;
