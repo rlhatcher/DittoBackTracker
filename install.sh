@@ -52,22 +52,65 @@ if ! id -u "$SVC" >/dev/null 2>&1; then
        --no-create-home --shell /usr/sbin/nologin "$SVC"
 fi
 
-# Everything from here to the restart at the end can exit non-zero, and from
-# here on the service is down. Put it back if we fail, rather than leaving a
-# device with no web UI -- the likeliest failure is the checkout validation
-# below, which is exactly the case where someone is already mid-problem. A
-# device that was already stopped stays stopped.
+# Validate the checkout OTA will pull from, before anything is stopped or
+# chowned, so a bad checkout costs nothing. This runs after the package step so
+# a device without git yet gets a clear result rather than "git: command not
+# found".
+#
+# As $SRC's current owner, whoever that is: git refuses a work tree owned by
+# someone else ("detected dubious ownership"), and this has to work both on a
+# fresh clone owned by the admin and on a re-run where $SVC already owns it.
+SRC_OWNER="$(stat -c '%U' "$SRC")"
+if ! sudo -u "$SRC_OWNER" git -C "$SRC" rev-parse --is-inside-work-tree \
+     >/dev/null 2>&1; then
+  echo "error: $SRC is not a valid git checkout, so over-the-air updates" >&2
+  echo "can't pull. Clone the repo to $SRC rather than copying it." >&2
+  exit 1
+fi
+if ! sudo -u "$SRC_OWNER" git -C "$SRC" remote get-url origin >/dev/null 2>&1
+then
+  echo "error: $SRC has no 'origin' remote, so over-the-air updates can't" >&2
+  echo "fetch. Clone it from your GitHub remote to $SRC." >&2
+  exit 1
+fi
+
+# From here on the service is down, and everything below can exit non-zero.
+# Put it back if we fail, rather than leaving a device with no web UI. A device
+# that was already stopped stays stopped.
+#
+# Only until the chown, though. Past that the data partition belongs to $SVC
+# while the installed unit still names the old account, so starting it would
+# restore a service that cannot write its own database -- a restart loop, and
+# more confusing than being down. Say what state the device is in instead.
 WAS_ACTIVE=0
 if systemctl is-active --quiet ditto-web 2>/dev/null; then
   WAS_ACTIVE=1
 fi
+# How far in we got, so the trap knows what is safe to do about it.
+STAGE=stopped
 restore_service() {
   local status=$?
-  if [ "$status" -ne 0 ] && [ "$WAS_ACTIVE" -eq 1 ]; then
-    echo >&2
-    echo "install failed; restarting the service that was running before" >&2
-    sudo systemctl start ditto-web || true
-  fi
+  [ "$status" -eq 0 ] && return 0
+  case "$STAGE" in
+    stopped)
+      # Nothing has changed hands yet, so the old service is still coherent.
+      if [ "$WAS_ACTIVE" -eq 1 ]; then
+        echo >&2
+        echo "install failed; restarting the service that was running" >&2
+        sudo systemctl start ditto-web || true
+      fi
+      ;;
+    chowned)
+      echo >&2
+      echo "install failed after /var/lib/ditto changed hands. The device is" >&2
+      echo "part-migrated: the data belongs to $SVC and the installed unit" >&2
+      echo "does not. Starting the old service would only restart-loop it," >&2
+      echo "so it is left down. Fix what failed above and re-run install.sh." >&2
+      ;;
+    installed)
+      : # the unit matches the data; the message below this line is better
+      ;;
+  esac
 }
 trap restore_service EXIT
 
@@ -89,21 +132,7 @@ echo "==> ownership -> $SVC"
 # git call and every write below has to run as $SVC. Doing this last, as it
 # used to, worked on a fresh install and failed on every re-run.
 sudo chown -R "$SVC:$SVC" /var/lib/ditto
-
-# Validate the checkout OTA will pull from. This runs after the package step so a
-# device that doesn't have git yet still gets a clear result rather than a bare
-# "git: command not found".
-if ! sudo -u "$SVC" git -C "$SRC" rev-parse --is-inside-work-tree >/dev/null 2>&1
-then
-  echo "error: $SRC is not a valid git checkout, so over-the-air updates" >&2
-  echo "can't pull. Clone the repo to $SRC rather than copying it." >&2
-  exit 1
-fi
-if ! sudo -u "$SVC" git -C "$SRC" remote get-url origin >/dev/null 2>&1; then
-  echo "error: $SRC has no 'origin' remote, so over-the-air updates can't" >&2
-  echo "fetch. Clone it from your GitHub remote to $SRC." >&2
-  exit 1
-fi
+STAGE=chowned
 
 echo "==> code -> $APP"
 sudo -u "$SVC" mkdir -p "$APP"
@@ -146,6 +175,8 @@ sudo cp "$HERE/systemd/ditto-web.service" /etc/systemd/system/
 # OTA restart helper: started on demand after a self-update, not enabled at boot.
 sudo cp "$HERE/systemd/ditto-restart.service" /etc/systemd/system/
 sudo systemctl daemon-reload
+# Unit and data agree from here; the script owns the restart below.
+STAGE=installed
 sudo systemctl reset-failed ditto-web 2>/dev/null || true
 # enable (create the boot symlink) then restart, so re-installing over a running
 # service actually loads the new code. `enable --now` no-ops on an already-active
