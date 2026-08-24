@@ -837,12 +837,26 @@ class Service:
         # case where it was already mounted when we started — a service
         # restart mid-session must still probe the format and requeue.
         if self.pedal_state != "mounted":
-            self.pedal_state = "mounted"
             self._mount_gen += 1        # a new session; stale loop jobs skip
-            self.last_error = None
             pedal.clean_temp_files()
             self.fmt, self.fmt_source = pedal.detect_format()
             self._scan_loops()
+            # Published last, and this is load-bearing rather than tidy. Two
+            # readers take pedal_state as their licence to trust _loops:
+            # `mounted`, which upload_auto checks before reserving loop slots,
+            # and plan_folder's loops_known. Setting it first left a window —
+            # a temp-file sweep and a format probe, both USB I/O on a ~1 MB/s
+            # link — in which a pedal was reported mounted while _loops was
+            # still the empty set left by the last unmount, so an auto-assigned
+            # upload could put a backing track under a recorded loop. It could
+            # not destroy one (nothing here writes LOOP.WAV), but it is exactly
+            # the accident the reservation exists to prevent.
+            #
+            # A failure in the three calls above now leaves the state unmounted
+            # and retries on the next tick, instead of latching "mounted" over a
+            # default format and an empty loop cache for the rest of the session.
+            self.last_error = None
+            self.pedal_state = "mounted"
             self._requeue_unsynced()
             self._emit()
 

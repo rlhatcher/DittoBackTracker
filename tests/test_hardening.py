@@ -18,7 +18,7 @@ import time
 import conftest
 import pytest
 
-from ditto import config, core, db
+from ditto import config, core, db, pedal
 
 # --- durable ingest ---------------------------------------------------------
 
@@ -359,3 +359,47 @@ def test_the_suite_cannot_power_off_the_machine():
 
     assert result.returncode == 0, "the guard should stand in for the real call"
     assert conftest.sudo_attempts[before:] == [["sudo", "-n", "/sbin/poweroff"]]
+
+
+def test_the_pedal_is_not_reported_mounted_until_its_loops_are_known(service,
+                                                                     monkeypatch):
+    """pedal_state is what two callers treat as a licence to trust _loops.
+
+    upload_auto reserves loop-bearing slots only `if service.mounted`, and
+    plan_folder reports loops_known from the same flag. _tick_pedal used to set
+    the flag first and scan afterwards, with a temp-file sweep and a format
+    probe in between — both USB I/O on a ~1 MB/s link. Anything reading it in
+    that window saw a mounted pedal and the empty loop set left by the last
+    unmount, so an auto-assigned upload could put a backing track under a
+    recorded loop. Nothing here writes LOOP.WAV, so it could not destroy a
+    recording; it is the accident the reservation exists to prevent.
+
+    Sampled inside the scan itself, which is the only place the ordering is
+    observable without timing anything.
+    """
+    seen = {}
+
+    def has_loop(n):
+        seen.setdefault("mounted", service.mounted)
+        seen.setdefault("state", service.pedal_state)
+        return n == 7
+
+    monkeypatch.setattr(pedal, "present", lambda: True)
+    monkeypatch.setattr(pedal, "mount", lambda: None)
+    monkeypatch.setattr(pedal, "clean_temp_files", lambda: None)
+    monkeypatch.setattr(pedal, "detect_format", lambda: (dict(config.DEFAULT_FORMAT),
+                                                         "probed"))
+    monkeypatch.setattr(pedal, "occupied_slots", lambda: set())
+    monkeypatch.setattr(pedal, "has_loop", has_loop)
+
+    service.pedal_state = "absent"
+    service._loops = frozenset()
+    service._tick_pedal()
+
+    assert seen, "the loop scan never ran"
+    assert seen["mounted"] is False, \
+        "mounted was already true while the loop cache was still being built"
+    assert seen["state"] != "mounted", \
+        "plan_folder would have reported loops_known over a stale cache"
+    # And the state that is finally published is the complete one.
+    assert service.mounted and 7 in service._loops
