@@ -46,7 +46,9 @@ About £39. Costs and the cable chain are in
 ### 1. Provision the Pi
 
 Follow [docs/provisioning.md](docs/provisioning.md). Allow about an hour, most
-of it waiting on `apt`.
+of it waiting on `apt`. Flashing the card is manual; the rest is
+`provision.sh`, which partitions the card, installs the packages and sets USB
+host mode and the boot options.
 
 This step is required, not a recommendation. The device has no battery and
 loses power the moment the plug comes out, so it needs a read-only root

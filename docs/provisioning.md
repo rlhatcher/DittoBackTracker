@@ -63,131 +63,47 @@ boot.
 
 ---
 
-## 2. Data partition
+## 2. Prepare the Pi
+
+`provision.sh` does the partitioning, the packages, USB host mode and the boot
+settings. Fetch it directly rather than cloning: git is not installed yet, and
+the partition the repo belongs on does not exist yet either.
 
 ```bash
 ssh ditto@dittobacktracker.local
+curl -fsSL -o provision.sh https://raw.githubusercontent.com/rlhatcher/DittoBackTracker/main/provision.sh
+sudo bash provision.sh
 ```
 
-`parted` and `usbutils` (for `lsusb`, below) aren't guaranteed on a Lite image,
-so install them before you need them:
+It gives the root 5 GB and the data partition everything else. The root is the
+one that gets locked read-only in step 4 and then never grows, so it is sized
+to what it holds: 2.6 GB after these packages, of which ffmpeg and its
+dependencies are about 900 MB. The data partition takes the rest because it is
+the half that fills up, and on a 32 GB card that is around 26 GB.
+
+It is idempotent, and it will not format a partition that already holds a
+filesystem, so re-running it cannot take the library with it.
 
 ```bash
-sudo apt update && sudo apt install -y parted usbutils
+sudo reboot
 ```
 
-The root filesystem is around 2.5 GB and the rest of the card is unallocated.
-Check where p2 actually ends before choosing a start point:
-
-```bash
-sudo parted /dev/mmcblk0 unit MB print free
-```
-
-Then create p3 from just past the end of p2, rounding up. p2 typically ends
-near 3.2 GB, so:
-
-```bash
-sudo parted -a optimal /dev/mmcblk0 --script mkpart primary ext4 3300MB 100%
-sudo partprobe /dev/mmcblk0
-sudo mkfs.ext4 -L dittodata /dev/mmcblk0p3
-sudo mkdir -p /var/lib/ditto
-```
-
-Adjust `3300MB` to what the previous command reported. Parted refuses
-overlapping partitions, so a wrong value fails rather than corrupts. Don't use
-`0%` as the start: that means the start of the disk, which is occupied, and
-parted picks the small gap before partition 1 instead.
-
-If `mkfs` runs before the device node appears, p3 will have no filesystem. Run
-`mkfs.ext4` again.
-
-```bash
-lsblk -o NAME,SIZE,FSTYPE,LABEL /dev/mmcblk0
-```
-
-Expect `p3` to fill the rest of the card, ext4, labelled `dittodata`. Around
-2 GB is enough; the rest is spare.
-
-Add to `/etc/fstab`:
-
-```text
-LABEL=dittodata  /var/lib/ditto  ext4  defaults,noatime  0  2
-```
-
-```bash
-sudo mount -a
-sudo mkdir -p /var/lib/ditto/{sources,staged,trash,app}
-```
-
-This partition holds the application, the uploads and the database. It is the
-only writable storage once the overlay is on.
-
-Leave the ownership alone. `install.sh` creates the `ditto-svc` account in
-step 6 and takes the partition then.
-
----
-
-## 3. Packages
-
-```bash
-sudo apt update && sudo apt full-upgrade -y
-sudo apt install -y \
-  git ffmpeg \
-  python3-flask python3-waitress \
-  avahi-daemon \
-  overlayroot
-```
-
----
-
-## 4. USB host mode
-
-The Zero's data port defaults to host mode. Set it explicitly in
-`/boot/firmware/config.txt`:
-
-```ini
-dtoverlay=dwc2,dr_mode=host
-```
-
-Reboot, plug in the pedal, and check:
+The reboot is needed: USB host mode and the boot settings only take effect from
+`/boot/firmware/config.txt` at boot. Afterwards the pedal should enumerate:
 
 ```bash
 lsusb                          # TC Electronic Ditto Plus
 ls -l /dev/disk/by-label/      # DITTOPLUS
 ```
 
----
-
-## 5. Mounting
-
-`install.sh` writes this entry. `noauto,user` lets the service mount the pedal
-without root:
-
-```text
-LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto-svc,gid=ditto-svc  0  0
-```
-
-`fmask=077,dmask=077` makes the mounted files owner-only, owned by `ditto-svc`
-rather than by your login. `flush` pushes FAT writes out promptly instead of
-leaving them in cache.
-
-```bash
-sudo mkdir -p /media/ditto
-```
-
-Don't try mounting it yet. `mount` resolves `uid=`/`gid=` when it runs, so
-until step 6 creates `ditto-svc` this fails with "unknown user" for everyone,
-root included.
-
-The pedal stays enumerated after `umount` and won't return to looper operation
-while the cable is attached. That is expected, and unplugging is the only way
-back. See [pedal-format.md](pedal-format.md#release-behaviour).
+Boot is 20-40 s stock and about 10 s after this. Measure with
+`systemd-analyze` and `systemd-analyze blame | head -15`.
 
 ---
 
-## 6. Install
+## 3. Install
 
-Both parts of this step have to happen before step 8, because your home
+Both parts of this step have to happen before step 4, because your home
 directory and `/etc` both become read-only there: a checkout in your home
 directory could never be updated, and `install.sh` writes to `/etc`.
 
@@ -204,14 +120,28 @@ runs as, gives it `/var/lib/ditto`, writes the fstab entry and both sudoers
 rules, deploys the code and starts the unit. It is idempotent: run it again to
 apply a change to any of those.
 
-It does not install `overlayroot`. Step 3 is the only thing that does, so step
-3 is still required even though `install.sh` repeats the rest of it.
-
 Open `http://dittobacktracker.local/`, plug in the pedal, drop a track in.
+
+### The pedal mount entry
+
+`install.sh` wrote this entry. `noauto,user` lets the service mount the pedal
+without root:
+
+```text
+LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto-svc,gid=ditto-svc  0  0
+```
+
+`fmask=077,dmask=077` makes the mounted files owner-only, owned by `ditto-svc`
+rather than by your login. `flush` pushes FAT writes out promptly instead of
+leaving them in cache.
+
+The pedal stays enumerated after `umount` and won't return to looper operation
+while the cable is attached. That is expected, and unplugging is the only way
+back. See [pedal-format.md](pedal-format.md#release-behaviour).
 
 ### Checking the pedal mount by hand
 
-Optional. The `ditto-svc` account exists now, so the fstab entry from step 5
+Optional. The `ditto-svc` account exists now, so the fstab entry above
 can be tested. Stop the service first, or it is already holding the pedal:
 
 ```bash
@@ -228,39 +158,7 @@ fstab lets anyone mount but only the mounting user unmount.
 
 ---
 
-## 7. Boot time
-
-Stock boot is 20-40 s, and the device boots every time you use it. This gets
-it to about 10 s.
-
-```bash
-sudo systemctl disable --now \
-  triggerhappy.service \
-  keyboard-setup.service \
-  apt-daily.timer apt-daily-upgrade.timer \
-  man-db.timer \
-  dphys-swapfile.service \
-  bluetooth.service hciuart.service
-```
-
-Disable `dphys-swapfile` even if you skip the rest of this section: swap on a
-read-only root cannot work.
-
-In `/boot/firmware/config.txt`:
-
-```ini
-disable_splash=1
-dtoverlay=disable-bt
-boot_delay=0
-```
-
-Measure with `systemd-analyze` and `systemd-analyze blame | head -15`.
-
-Do this before step 8. Each attempt needs a writable root.
-
----
-
-## 8. Read-only root filesystem
+## 4. Read-only root filesystem
 
 Last, once everything above works.
 
@@ -350,7 +248,7 @@ sudo reboot
 
 ---
 
-## 9. Optional: measure write throughput
+## 5. Optional: measure write throughput
 
 Not needed. Useful if you want a number for your own card and cable.
 
