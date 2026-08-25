@@ -187,9 +187,11 @@ back. See [pedal-format.md](pedal-format.md#release-behaviour).
 
 ## 6. Install
 
-Clone onto the data partition. Your home directory is on the root filesystem,
-which becomes read-only in step 8, so a checkout there can't be updated
-afterwards.
+Both parts of this step have to happen before step 8, because your home
+directory and `/etc` both become read-only there: a checkout in your home
+directory could never be updated, and `install.sh` writes to `/etc`.
+
+Clone onto the data partition, which stays writable:
 
 ```bash
 git clone https://github.com/rlhatcher/DittoBackTracker.git /var/lib/ditto/src
@@ -197,22 +199,20 @@ cd /var/lib/ditto/src
 ./install.sh
 ```
 
-Run this before step 8. `install.sh` writes to `/etc`, and those writes are
-discarded once the root filesystem is read-only.
+`install.sh` installs the packages, creates the `ditto-svc` account the service
+runs as, gives it `/var/lib/ditto`, writes the fstab entry and both sudoers
+rules, deploys the code and starts the unit. It is idempotent: run it again to
+apply a change to any of those.
 
-It installs the packages, creates the `ditto-svc` account the service runs as,
-gives it `/var/lib/ditto`, writes the fstab entry and both sudoers rules,
-deploys the code and starts the unit. It is idempotent: run it again to apply
-a change to any of those. It repeats steps 3 and 5, but it does not install
-`overlayroot`, so don't skip step 3.
+It does not install `overlayroot`. Step 3 is the only thing that does, so step
+3 is still required even though `install.sh` repeats the rest of it.
 
 Open `http://dittobacktracker.local/`, plug in the pedal, drop a track in.
 
-The account exists now, so you can try the step 5 entry by hand. Run every
-line as `ditto-svc`, including the `ls`. `dmask=077` makes the mount `0700`
-owned by that account, so your login user cannot read it. And `user` in fstab
-lets anyone mount but only the mounting user unmount, so mounting it yourself
-leaves a volume the service cannot release.
+### Checking the pedal mount by hand
+
+Optional. The `ditto-svc` account exists now, so the fstab entry from step 5
+can be tested. Stop the service first, or it is already holding the pedal:
 
 ```bash
 sudo systemctl stop ditto-web
@@ -221,6 +221,10 @@ sudo -u ditto-svc ls /media/ditto      # 01track/ … 99track/
 sudo -u ditto-svc umount /media/ditto
 sudo systemctl start ditto-web
 ```
+
+Every line runs as `ditto-svc`, including the `ls`. `dmask=077` makes the mount
+`0700` owned by that account, so your login user cannot read it, and `user` in
+fstab lets anyone mount but only the mounting user unmount.
 
 ---
 
