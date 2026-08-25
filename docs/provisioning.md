@@ -10,9 +10,6 @@ verifies it.
 
 **Raspberry Pi OS Lite (64-bit)**, Bookworm or Trixie.
 
-64-bit works on the Zero 2 W and avoids the patchy ARMv6 wheel situation. It
-costs about 30 MB more RAM out of 512 MB.
-
 In Raspberry Pi Imager, use the gear icon to preconfigure:
 
 | Setting | Value |
@@ -149,9 +146,6 @@ sudo apt install -y \
   overlayroot
 ```
 
-Everything from apt, nothing from pip: a read-only root and a virtualenv are an
-awkward combination.
-
 ---
 
 ## 4. USB host mode
@@ -170,22 +164,19 @@ lsusb                          # TC Electronic Ditto Plus
 ls -l /dev/disk/by-label/      # DITTOPLUS
 ```
 
-Udev creates the `by-label` symlink. No custom rule needed.
-
 ---
 
 ## 5. Mounting
 
-An fstab entry with `noauto,user` lets the service mount the pedal without
-root. `install.sh` writes this line; it is here so you can read it:
+`install.sh` writes this entry. `noauto,user` is what lets the service mount
+the pedal without root:
 
 ```text
 LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto-svc,gid=ditto-svc  0  0
 ```
 
-`fmask=077,dmask=077` keeps the mounted files owner-only — owned by
-`ditto-svc`, the account the service runs as, not your login — rather than the
-world-writable `umask=000`. `flush` pushes FAT writes out promptly instead of
+`fmask=077,dmask=077` makes the mounted files owner-only, owned by `ditto-svc`
+rather than by your login. `flush` pushes FAT writes out promptly instead of
 leaving them in cache.
 
 ```bash
@@ -256,8 +247,8 @@ sudo systemctl disable --now \
   bluetooth.service hciuart.service
 ```
 
-`dphys-swapfile` has to go regardless — swap on a read-only root makes no
-sense.
+Disable `dphys-swapfile` even if you skip the rest of this section: swap on a
+read-only root cannot work.
 
 In `/boot/firmware/config.txt`:
 
@@ -326,8 +317,7 @@ The `rm` matters: without it, modules deleted upstream linger in the deployed
 copy.
 
 Every step runs as `ditto-svc` because the data partition belongs to it. Run
-the `git pull` as yourself and git refuses with "detected dubious ownership"
-rather than doing something half-right.
+the `git pull` as yourself and git refuses with "detected dubious ownership".
 
 Or press **Update** in the web UI for the same result over the air — how it
 works is in [api.md](api.md#post-apiupdate).
