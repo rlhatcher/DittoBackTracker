@@ -4,7 +4,7 @@
 
 | Part | Notes | ~Cost |
 |---|---|---|
-| Raspberry Pi Zero 2 W | 65×30 mm, WiFi, USB OTG host. No header needed | £18 |
+| Raspberry Pi Zero 2 W | 65×30 mm, WiFi, USB OTG host | £18 |
 | microSD card, 8 GB or larger | A1 rated | £6 |
 | micro-USB OTG adapter | Pi micro-B to USB-A | £3 |
 | USB-A to **mini-B** cable | The Ditto+ port is mini-B. One ships with the pedal | £4 |
@@ -16,7 +16,7 @@ The Pi's other micro-USB port (PWR) takes the supply.
 
 The pedal keeps its own 9 V supply and doesn't draw meaningfully from USB.
 
-One board, nothing on the GPIO header. The web UI is the only interface.
+The web UI is the only interface.
 
 ---
 
@@ -44,8 +44,7 @@ The failure mode to avoid is unplugging while the UI says it is writing. The
 status line at the bottom of the page turns amber and reads "— don't unplug"
 whenever the pedal is being written to. That message is the only warning.
 
-Anything left behind by a cut is swept on the next start, because the clean-up
-that used to run only at session end now also runs at boot: interrupted
+Anything left behind by a cut is swept on the next start: interrupted
 transcodes (`staged/*.wav.part`), stranded upload temporaries (`tmp*` in the
 data directory, once they're an hour old so an upload in flight is never
 reaped), and orphaned staged and source files. Interrupted pedal writes

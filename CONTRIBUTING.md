@@ -114,6 +114,36 @@ A release is: bump `__version__`, update the example in `docs/api.md` (a test
 fails if you forget), commit, and `git tag -a vX.Y.Z`. The device keeps
 comparing commit SHAs against the branch it tracks and does not look at tags.
 
+The recurring failure here is **a removed choice leaving its scaffolding
+behind**. Every time this project narrowed, the docs kept the branch: two
+boards became one and "one board, nothing on the GPIO header" stayed; the panel
+LED went and a warning was still described as "the only warning there is now
+that the panel LED is gone"; "Bookworm or Trixie" outlived the fact that
+Raspberry Pi OS Lite is Trixie.
+
+A dead branch is not one stale sentence. It earns its keep. "Bookworm or
+Trixie" bought a paragraph on `init=...firstboot`, a hedge that "the token
+varies by image version", a partition offset qualified "on a Bookworm image",
+and a cross-reference to a `growpart` fallback that does not exist on Bookworm.
+One line of optionality, four descendants, none of them true.
+
+So when something is removed, grep the docs for it and delete what described
+it. In particular:
+
+- **Don't describe what isn't there.** "No HAT, no button, no LED" only reads
+  as useful to someone who remembers when there was one.
+- **Don't say "some" or "varies" about a set with one member.** If the doc
+  supports one image, name it and give one instruction.
+- **Don't narrate the reader disobeying.** The instruction is the content; what
+  happens if they do the opposite is not.
+- **Don't explain a decision the reader isn't making.** Rationale earns its
+  place when it changes what they do or helps them recover, not when it
+  defends a choice already made for them.
+
+History belongs in `git log`, which is why it is the design record. The
+exception is a rule with a concrete violation attached, like the layering
+example above: that is teaching the rule, not recording the past.
+
 ## Front end
 
 One file, on purpose. `ditto/static/app.js` stays a single classic script with

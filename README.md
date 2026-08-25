@@ -30,7 +30,7 @@ Unbuilt work is listed in [docs/roadmap.md](docs/roadmap.md).
 
 | Part | Notes |
 |---|---|
-| Raspberry Pi Zero 2 W | No GPIO header needed |
+| Raspberry Pi Zero 2 W | |
 | microSD card, 8 GB or larger | A1 rated |
 | micro-USB OTG adapter | Pi micro-B to USB-A |
 | USB-A to mini-B cable | One ships with the pedal |
