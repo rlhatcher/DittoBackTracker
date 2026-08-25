@@ -44,15 +44,16 @@ jobs:
             . venv/bin/activate
             ruff check ditto/ tests/
       - run:
-          name: Check the installer
-          # install.sh is the least-tested surface here — it cannot be unit
-          # tested and it runs as root on a device with a read-only root.
+          name: Check the shell scripts
+          # install.sh and provision.sh are the least-tested surface here. They
+          # cannot be unit tested, and they partition disks and run as root on a
+          # device with a read-only root.
           #
           # shellcheck ships in the cimg image, so there is nothing to install.
           # If a future image drops it this fails with "command not found",
           # which is the right way round: a missing checker should stop the
           # build rather than quietly pass it.
-          command: shellcheck install.sh
+          command: shellcheck install.sh provision.sh
       - run:
           name: Run tests
           command: |
