@@ -37,10 +37,11 @@ fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=GB ds=nocloud;i=rpi-im
 
 Keep it as one line.
 
-Check after first boot:
+Boot the Pi and check:
 
 ```bash
-df -h /        # expect ~2.5G, not the full card
+ssh ditto@dittobacktracker.local
+df -h /        # expect ~2.3G, not the full card
 ```
 
 If it reports the full card size the resize ran. A mounted ext4 root cannot be
@@ -70,7 +71,6 @@ settings. Fetch it directly rather than cloning: git is not installed yet, and
 the partition the repo belongs on does not exist yet either.
 
 ```bash
-ssh ditto@dittobacktracker.local
 curl -fsSL -o provision.sh https://raw.githubusercontent.com/rlhatcher/DittoBackTracker/main/provision.sh
 sudo bash provision.sh
 ```
