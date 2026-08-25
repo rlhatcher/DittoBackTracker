@@ -4,7 +4,7 @@
 
 **Authentication.** The web UI is open to anyone on the network, and the only
 guard in front of a state-changing request is the cross-site check in
-`web.py` — which stops another origin's page acting through your browser, and
+`web.py`. That stops another origin's page acting through your browser. It
 stops nothing typed at a terminal. Anyone who can route to port 80 can upload,
 clear slots, download a recorded loop, force a restart onto the tracked branch,
 or shut the device down.
@@ -15,7 +15,7 @@ not for anything else.
 
 The shape is not decided. The awkward part is not the login page, it is that
 `GET /api/events`, the loop download and the audio preview are all reached by
-the browser rather than by `fetch` — an `EventSource` cannot set a header, and
+the browser rather than by `fetch`. An `EventSource` cannot set a header, and
 neither can an `<a download>` or an `<audio src>`. So a bearer token in a
 header is out, and it comes down to a cookie or a query parameter.
 
@@ -26,7 +26,7 @@ in a `TRACK/` folder and plays whichever file was added last; the X4 holds
 *two*, in `TRACK1/` and `TRACK2/`, one per LOOP control. Neither has slots. The
 99-slot map, the library-to-slot assignment, filling a folder into a run of
 slots and dragging to reorder are all modelling something those pedals do not
-have — so this is a second product sharing a converter, not a port.
+have. It is a second product sharing a converter, not a port.
 
 The slot *count* is already parameterised, for what it is worth: nothing spells
 out 99 and clients read `slot_count` from the snapshot. The layout is not, and

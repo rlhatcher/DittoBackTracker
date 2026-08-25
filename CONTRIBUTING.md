@@ -87,7 +87,7 @@ is no formatter here (see below).
 
 `ruff check ditto/ tests/` gates CI. The rules are chosen in `pyproject.toml`
 and the reasoning is there too. A deliberate exception gets a per-line
-`# noqa: RULE` with its reason, never a global ignore — an ignore silences the
+`# noqa: RULE` with its reason, never a global ignore. An ignore silences the
 rule in new code as well, and the point is to record *this* decision.
 
 **`ruff format` is not used, deliberately.** There are no style arguments to
@@ -106,9 +106,9 @@ section or a section has no route, so a route change is not done until the doc
 changes.
 
 `ditto/__init__.py.__version__` is the single source of truth for the version.
-It is not in `pyproject.toml`, and it is not read from `importlib.metadata` —
-the device is deployed by copying `ditto/`, never pip-installed, so there is no
-`.dist-info` to read and that would raise on every Pi while passing CI.
+It is not in `pyproject.toml`, and it is not read from `importlib.metadata`.
+The device is deployed by copying `ditto/` and never pip-installed, so there is
+no `.dist-info` to read: that would raise on every Pi while passing CI.
 
 A release is: bump `__version__`, update the example in `docs/api.md` (a test
 fails if you forget), commit, and `git tag -a vX.Y.Z`. The device keeps
@@ -127,7 +127,7 @@ Adding a file to `static/` is two edits: the file, and `ASSETS` in `web.py`. A
 test catches the second if you forget.
 
 Colours come from the token layer in `app.css`. A component naming a raw ramp
-step fails the suite, and so does any text pair below its WCAG threshold — the
+step fails the suite, and so does any text pair below its WCAG threshold. The
 table in `test_frontend.py` is hand-maintained, so add a row when you add a new
 foreground/background pairing.
 

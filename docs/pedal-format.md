@@ -66,8 +66,8 @@ with a vendor block containing the string `tc electronic`:
 00000030: 726f 6e69 6300 0000 0000 0000 0000 0000  ronic...........
 ```
 
-ffmpeg emits `WAVE_FORMAT_EXTENSIBLE` instead — tag `0xFFFE`, 40-byte `fmt ` —
-for 24-bit audio.
+For 24-bit audio, ffmpeg emits `WAVE_FORMAT_EXTENSIBLE` instead: tag `0xFFFE`,
+40-byte `fmt `.
 
 The pedal plays ffmpeg's output anyway, so no header rewriting is needed. If
 that changes, copy the pedal's own 740-byte chunk verbatim; the format is fixed,
@@ -183,12 +183,11 @@ Built anyway, five things assume the Ditto+ layout:
   the column count lives in `app.js` and `app.css` with a test tying them.
 - `config.TRACK_FILENAME` and `config.LOOP_FILENAME` are one pair for the
   build. The X4 reportedly accepts AIFF as well as WAV, and no source here says
-  what it names a loop it recorded itself — which matters, because not
-  destroying that file is the one hard rule in this project.
+  what it names a loop it recorded itself. That matters, because not
+  destroying that file is the one hard rule here.
 - `config.PEDAL_LABEL` is one label per process, so a build serves one model.
   Both other pedals report as `DITTO`, so they cannot be told apart by label
-  either — distinguishing an X2 from an X4 means looking at what is on the
-  volume.
+  either. Telling an X2 from an X4 means reading what is on the volume.
 
 What is *not* in the way: the rest of the code already reads `config.SLOTS` and
 `config.SLOT_DIR` rather than spelling out 99, and clients read `slot_count`

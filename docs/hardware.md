@@ -24,7 +24,7 @@ display. The web UI is the only interface.
 ## Power
 
 The device runs from mains through the Pi's PWR port. There is no battery and no
-UPS, so **pulling the power is an abrupt power cut** — treat it as one.
+UPS, so **pulling the power is an abrupt power cut**. Treat it as one.
 
 ### Ending a session
 
@@ -36,10 +36,10 @@ will disconnect as the Pi goes down.
 
 | | Protection |
 |---|---|
-| The Pi's root filesystem | Read-only, so nothing to corrupt — see [provisioning.md](provisioning.md) |
+| The Pi's root filesystem | Read-only, so nothing to corrupt. See [provisioning.md](provisioning.md) |
 | The data partition (`/var/lib/ditto`) | SQLite in WAL mode with `synchronous=FULL`; every file that matters is written to a temp name, fsynced, then renamed |
 | Uploaded audio in `sources/` | fsynced on ingest before the upload is acknowledged. If that fsync fails the upload fails too, rather than reporting success for bytes that were never confirmed on the card |
-| **The pedal's FAT volume** | **The exposed one.** `BT.WAV` is written temp-then-rename with an fsync and the volume is mounted `flush`, so a cut leaves either the old file or the new one — but a cut *during* a write can still leave a `~bt*.tmp` behind (cleaned automatically on the next mount) and FAT has no journal |
+| **The pedal's FAT volume** | **The exposed one.** `BT.WAV` is written temp-then-rename with an fsync and the volume is mounted `flush`, so a cut leaves either the old file or the new one. A cut *during* a write can still leave a `~bt*.tmp` behind, cleaned automatically on the next mount, and FAT has no journal |
 
 So: the failure mode to avoid is unplugging while the UI says it is writing. The
 status line at the bottom of the page turns amber and reads "— don't unplug"
@@ -69,7 +69,7 @@ All are environment variables read at startup.
 | `DITTO_UPDATE_BRANCH` | `main` | Branch the device tracks for updates |
 | `DITTO_MAX_UPLOAD_MB` | `512` | Whole-request upload cap |
 
-Set them in the systemd unit, which lives on the read-only filesystem — see
+Set them in the systemd unit, which lives on the read-only filesystem. See
 [provisioning.md](provisioning.md#changing-anything-afterwards):
 
 ```ini
