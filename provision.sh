@@ -14,11 +14,18 @@ set -euo pipefail
 DISK=/dev/mmcblk0
 ROOT_PART=2
 DATA_PART=3
-# The root has to hold ffmpeg and its dependency stack, which the stock 2.3 GB
-# image cannot: a fresh Trixie Lite root has about 370 MB free, and step 3 needs
-# more than that. 8 GB leaves room for the packages and for future upgrades on a
-# device whose root is about to become read-only and awkward to grow.
-ROOT_SIZE=8GB
+# The root is the partition that gets locked read-only, so it is sized to what
+# it needs and never grows again. The data partition takes everything else,
+# because that is the half that fills up: it holds the library.
+#
+# A fresh Trixie Lite root uses 1.7 GB of its 2.3 GB, leaving about 370 MB,
+# which is why step 3 ran out of disk. ffmpeg and its dependency stack are a
+# few hundred MB more. 4 GB covers that with room to spare, and leaves 3.5 GB
+# for data on the smallest card this supports.
+ROOT_SIZE=4GB
+# Refuse rather than make a data partition too small to be useful. Below this
+# there is no point continuing: the library is the reason for the partition.
+DATA_MIN_GB=1
 DATA_LABEL=dittodata
 DATA_MOUNT=/var/lib/ditto
 BOOT_CONFIG=/boot/firmware/config.txt
@@ -60,6 +67,15 @@ sudo apt-get install -y parted usbutils cloud-guest-utils
 # which prompts because the partition is in use and cannot be scripted without
 # faking a terminal. growpart exists for exactly this and is what cloud-init
 # runs on a mounted root on every Pi that expands itself on first boot.
+
+disk_gb=$(( $(sudo blockdev --getsize64 "$DISK") / 1000000000 ))
+root_gb=${ROOT_SIZE%GB}
+if [ "$disk_gb" -lt $(( root_gb + DATA_MIN_GB + 1 )) ]; then
+  echo "error: $DISK is ${disk_gb} GB. A ${root_gb} GB root plus the boot" >&2
+  echo "partition leaves less than ${DATA_MIN_GB} GB for the library, which is" >&2
+  echo "the reason the data partition exists. Use a larger card." >&2
+  exit 1
+fi
 
 if [ -b "${DISK}p${DATA_PART}" ]; then
   say "data partition already exists"
