@@ -228,6 +228,11 @@ cd /var/lib/ditto/src
 ./install.sh
 ```
 
+That installs the packages, creates the `ditto-svc` system account the service
+runs as, hands it `/var/lib/ditto`, writes the fstab entry and both sudoers
+rules, deploys the code and starts the unit. It is idempotent, so running it
+again is how you pick up a change to any of those.
+
 Open `http://dittobacktracker.local/`, plug in the pedal, drop a track in.
 
 The account now exists, so the step 5 mount entry can be tried by hand. Mount
@@ -246,8 +251,9 @@ sudo systemctl start ditto-web
 Do this before enabling the overlay in step 8. `install.sh` writes to `/etc`,
 and those changes are discarded once the root filesystem is read-only.
 
-The installer is idempotent, and repeats the package install and fstab entry
-from steps 3 and 5. It does not install `overlayroot`, so don't skip step 3.
+It repeats the package install and the fstab entry from steps 3 and 5, so those
+steps are there to be understood rather than to be got exactly right. It does
+not install `overlayroot`, so don't skip step 3.
 
 ---
 
@@ -339,15 +345,13 @@ Every step runs as `ditto-svc` because the data partition belongs to it. Run
 the `git pull` as yourself and git refuses with "detected dubious ownership"
 rather than doing something half-right.
 
-Or press **Update** in the web UI for the same result over the air — how it works
-is in [api.md](api.md#post-apiupdate). It needs the `ditto-restart.service`
-unit and sudoers rule that `install.sh` installs; if you provisioned before those
-existed, re-run `install.sh` once with the overlay disabled (below) to add them.
+Or press **Update** in the web UI for the same result over the air — how it
+works is in [api.md](api.md#post-apiupdate).
 
-An update over the air replaces the Python and nothing else. It does not re-run
-`install.sh`, so a device that self-updates past 0.4.0 keeps running as whatever
-account it was installed with. Moving it to `ditto-svc` takes one `install.sh`
-run with the overlay off.
+Either way, only the `ditto/` package moves. A release that also changes the
+systemd unit, the sudoers rules, the fstab entry or the ownership of
+`/var/lib/ditto` needs `install.sh` run again, and `install.sh` writes to
+`/etc`, so the overlay has to come off for that boot — below.
 
 For changes under `/etc`:
 
@@ -372,85 +376,6 @@ and you edit `/etc/overlayroot.conf` directly — no chroot:
 sudo sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
 sudo reboot
 ```
-
-### Upgrading a device that is already running
-
-Most releases need none of this: press **Update** and the device redeploys
-itself. Do this only when a release changes something outside the `ditto/`
-package — the unit, the sudoers rules, the fstab entry or the ownership of
-`/var/lib/ditto`. An over-the-air update copies the Python and nothing else,
-so those stay as they were until `install.sh` runs again, and `install.sh`
-writes to `/etc`, which means the overlay has to be off for one boot.
-
-0.4.0 is such a release: it moves the service off your login account onto
-`ditto-svc`. Two reboots, and nothing on the pedal is touched.
-
-**1. Finish the session.** Press **Done** and unplug the pedal, so nothing is
-mid-write when the service stops. Power the Pi back up.
-
-**2. Turn the overlay off for a boot.** The edit has to happen inside the
-chroot or it lands on the tmpfs layer and is discarded:
-
-```bash
-sudo overlayroot-chroot
-sed -i 's/^overlayroot=.*/overlayroot=""/' /etc/overlayroot.conf
-exit
-sudo reboot
-```
-
-**3. Pull and install.** Which `git pull` depends on who owns the checkout,
-which depends on whether this device has been through the 0.4.0 migration
-already. Coming from 0.3.x it is still your login account:
-
-```bash
-cd /var/lib/ditto/src
-git pull
-./install.sh
-```
-
-On a device already running 0.4.0 or later, the checkout belongs to
-`ditto-svc` and git refuses it as anyone else:
-
-```bash
-cd /var/lib/ditto/src
-sudo -u ditto-svc git pull
-./install.sh
-```
-
-`install.sh` creates the account, stops the service, unmounts the pedal if it
-is still mounted, hands `/var/lib/ditto` to `ditto-svc`, rewrites the fstab
-entry and both sudoers rules, replaces the unit and starts it again. It is
-idempotent, so a second run costs nothing.
-
-If it fails it says which state it left the device in. "Restarting the service
-that was running" means nothing changed hands and you are back where you
-started. A part-migrated message means the data moved but the unit did not, and
-the service is deliberately left down — fix what it reported and run it again.
-
-**4. Check it took**, before putting the overlay back:
-
-```bash
-systemctl show ditto-web -p User        # User=ditto-svc
-id ditto-svc                            # no sudo group
-systemctl is-active ditto-web           # active
-```
-
-Then open the page, plug the pedal in, confirm the slot map fills, and press
-**Done** to confirm the poweroff rule still matches. That last one is the
-easiest to get wrong and the least obvious when it is: a refused poweroff
-arrives after the page has already said it is safe to unplug.
-
-**Done halts the Pi**, which is how you know the rule worked. Power it back up
-for the last step.
-
-**5. Put the overlay back.** Root is writable now, so no chroot:
-
-```bash
-sudo sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
-sudo reboot
-```
-
-From here on, updates that only touch the Python go over the air again.
 
 ---
 

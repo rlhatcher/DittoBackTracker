@@ -93,19 +93,19 @@ restore_service() {
   [ "$status" -eq 0 ] && return 0
   case "$STAGE" in
     stopped)
-      # Nothing has changed hands yet, so the old service is still coherent.
+      # Nothing has changed hands yet, so what was running is still coherent.
       if [ "$WAS_ACTIVE" -eq 1 ]; then
         echo >&2
         echo "install failed; restarting the service that was running" >&2
         sudo systemctl start ditto-web || true
       fi
       ;;
-    migrating)
+    chowning)
       echo >&2
-      echo "install failed after /var/lib/ditto changed hands. The device is" >&2
-      echo "part-migrated: the data belongs to $SVC and the installed unit" >&2
-      echo "does not. Starting the old service would only restart-loop it," >&2
-      echo "so it is left down. Fix what failed above and re-run install.sh." >&2
+      echo "install failed after /var/lib/ditto changed hands: the data now" >&2
+      echo "belongs to $SVC and the service is not yet set up to match." >&2
+      echo "Nothing is started, because starting it would only fail on every" >&2
+      echo "write. Fix what failed above and run install.sh again." >&2
       ;;
     installed)
       : # the unit matches the data; the message below this line is better
@@ -114,14 +114,14 @@ restore_service() {
 }
 trap restore_service EXIT
 
-# Stop before touching ownership. A recursive chown under a live SQLite writer
-# can leave a half-owned WAL, and on a device migrating off the old account the
-# service is still running as the wrong user right now.
+# Stop before touching ownership: a recursive chown under a live SQLite writer
+# can leave a half-owned WAL. A no-op on a first install, and the reason a
+# re-install over a running device is safe.
 sudo systemctl stop ditto-web 2>/dev/null || true
-# The pedal's fstab entry carries uid=/gid=, rewritten below. `user` in fstab
-# lets any user mount but only the mounting user unmount, so a volume the old
-# account mounted cannot be released by the new one. Root can, so do it here
-# rather than leaving a stuck mount for the first session to trip over.
+# The pedal's fstab entry carries uid=/gid= and is rewritten below, so anything
+# mounted under the old options has to come down first. `user` in fstab lets
+# any user mount but only the mounting user unmount; root is not bound by that,
+# so do it here rather than leave a stuck mount for the next session.
 if mountpoint -q /media/ditto; then
   sudo umount /media/ditto
 fi
@@ -134,9 +134,9 @@ echo "==> ownership -> $SVC"
 # it could not change, carries on with the rest, and exits non-zero -- so a
 # partial failure trips set -e with much of the tree already moved. Setting it
 # afterwards would leave the trap believing nothing had changed hands, and
-# restarting the old service onto data it no longer owns is the exact case this
-# variable exists to prevent.
-STAGE=migrating
+# starting a service onto data it does not own is the exact case this variable
+# exists to prevent.
+STAGE=chowning
 sudo chown -R "$SVC:$SVC" /var/lib/ditto
 
 echo "==> code -> $APP"

@@ -84,12 +84,10 @@ First-time setup needs the read-only overlay off for one boot
 ([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)); the
 mechanism is in [docs/api.md](docs/api.md#post-apiupdate).
 
-An over-the-air update replaces the Python and nothing else, so a release that
+An update replaces the `ditto/` package and nothing else. A release that also
 changes the systemd unit, the sudoers rules, the fstab entry or the ownership
-of `/var/lib/ditto` needs `install.sh` run again with the overlay off. **0.4.0
-is one of those** — it moves the service onto its own account. The procedure is
-[Upgrading a device that is already
-running](docs/provisioning.md#upgrading-a-device-that-is-already-running).
+of `/var/lib/ditto` needs `install.sh` run again with the overlay off
+([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)).
 
 ### Running it without hardware
 
@@ -191,14 +189,11 @@ helper. So a LAN user who reaches `POST /api/update` can still make the device
 restart on code from your tracked branch, and can still shut it down. They
 cannot get root.
 
-That is a smaller claim than it sounds and worth reading precisely. Until
-0.4.0 the service ran as `ditto`, the Raspberry Pi Imager login account, which
-is in the `sudo` group — so the same reach was root on the device. The rules
-in `etc/` documented an intention; now they bound it.
-
-Upgrading an existing device means re-running `install.sh` once with the
-overlay disabled — an over-the-air update replaces the Python and leaves the
-account alone. Steps in [docs/provisioning.md](docs/provisioning.md#upgrading-a-device-that-is-already-running).
+Read that precisely, because it is a smaller claim than it sounds. It holds
+only because the account is not the one you log in as. The Raspberry Pi Imager
+account is in the `sudo` group, so a service running as it would put root
+behind the same reach and make the rules in `etc/` a statement of intent rather
+than a boundary. `install.sh` creates `ditto-svc` for this and nothing else.
 
 ---
 

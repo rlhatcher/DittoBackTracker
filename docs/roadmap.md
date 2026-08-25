@@ -9,9 +9,9 @@ stops nothing typed at a terminal. Anyone who can route to port 80 can upload,
 clear slots, download a recorded loop, force a restart onto the tracked branch,
 or shut the device down.
 
-Since 0.4.0 that reach stops at the `ditto-svc` account rather than root, so
-this is now the last thing standing open rather than the second. Fine for a
-home LAN, not for anything else.
+That reach stops at the `ditto-svc` account the service runs as, so it is not
+root, and it is the only thing on this list standing open. Fine for a home LAN,
+not for anything else.
 
 The shape is not decided. The awkward part is not the login page, it is that
 `GET /api/events`, the loop download and the audio preview are all reached by
