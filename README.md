@@ -58,10 +58,11 @@ image will corrupt the card.
 ### 2. Install
 
 Clone onto the data partition. Provisioning makes the home directory read-only,
-so a checkout there cannot be updated afterwards.
+so a checkout there cannot be updated afterwards, and leaves `/var/lib/ditto`
+owned by root, so the clone needs `sudo`.
 
 ```bash
-git clone https://github.com/rlhatcher/DittoBackTracker.git /var/lib/ditto/src
+sudo git clone https://github.com/rlhatcher/DittoBackTracker.git /var/lib/ditto/src
 cd /var/lib/ditto/src
 ./install.sh
 ```

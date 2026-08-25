@@ -107,10 +107,12 @@ Both parts of this step have to happen before step 4, because your home
 directory and `/etc` both become read-only there: a checkout in your home
 directory could never be updated, and `install.sh` writes to `/etc`.
 
-Clone onto the data partition, which stays writable:
+Clone onto the data partition, which stays writable. The clone needs `sudo`
+because step 2 left `/var/lib/ditto` owned by root, and `install.sh` is what
+hands it to `ditto-svc`:
 
 ```bash
-git clone https://github.com/rlhatcher/DittoBackTracker.git /var/lib/ditto/src
+sudo git clone https://github.com/rlhatcher/DittoBackTracker.git /var/lib/ditto/src
 cd /var/lib/ditto/src
 ./install.sh
 ```

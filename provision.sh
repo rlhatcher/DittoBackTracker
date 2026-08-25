@@ -178,7 +178,7 @@ say "done"
 df -h / "$DATA_MOUNT"
 echo
 echo "Reboot for USB host mode and the boot settings, then:"
-echo "  git clone https://github.com/rlhatcher/DittoBackTracker.git $DATA_MOUNT/src"
+echo "  sudo git clone https://github.com/rlhatcher/DittoBackTracker.git $DATA_MOUNT/src"
 echo "  cd $DATA_MOUNT/src && ./install.sh"
 echo
 echo "Enable the read-only root (step 8) last, once the pedal and a track have"

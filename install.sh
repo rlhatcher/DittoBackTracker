@@ -58,8 +58,9 @@ fi
 # found".
 #
 # As $SRC's current owner, whoever that is: git refuses a work tree owned by
-# someone else ("detected dubious ownership"), and this has to work both on a
-# fresh clone owned by the admin and on a re-run where $SVC already owns it.
+# someone else ("detected dubious ownership"). On a first install that owner is
+# root, because /var/lib/ditto belongs to root until the chown below and the
+# clone therefore needs sudo. On a re-run it is $SVC.
 SRC_OWNER="$(stat -c '%U' "$SRC")"
 if ! sudo -u "$SRC_OWNER" git -C "$SRC" rev-parse --is-inside-work-tree \
      >/dev/null 2>&1; then
