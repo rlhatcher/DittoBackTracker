@@ -4,7 +4,7 @@ Everything the web UI does goes through this. There is no authentication.
 
 Base URL is the device, e.g. `http://dittobacktracker.local/`.
 
-Two things live here, and it's worth keeping them apart. The **library** is
+Two things live here, and they are not the same. The **library** is
 every track on the device. It survives slots being cleared, and only an
 explicit delete removes one. **Slots** are what the pedal is carrying right now:
 99 assignments pointing at library tracks. A slot's `display_name` and
@@ -505,7 +505,7 @@ request and `416` for an unsatisfiable one.
 The URL is content-addressed, so the response is cacheable indefinitely. Nothing
 on the device plays audio. This is bytes to the browser.
 
-Note that `.ogg`, `.opus`, `.wma` and (in older browsers) `.flac` are accepted
+`.ogg`, `.opus`, `.wma` and (in older browsers) `.flac` are accepted
 for upload but not playable everywhere, Safari especially. That is a browser
 limitation; the file still converts and writes normally.
 
@@ -523,7 +523,7 @@ progress.
 
 Over-the-air self-update. Pulls the tracked branch, redeploys the app, and
 restarts the service. The restart runs out of process (a separate oneshot unit),
-so the browser's `EventSource` simply drops and reconnects; watch `revision` in
+so the browser's `EventSource` drops and reconnects; watch `revision` in
 the snapshot change to confirm the new code is running.
 
 ```json

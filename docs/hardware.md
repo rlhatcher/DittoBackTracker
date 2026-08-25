@@ -16,8 +16,7 @@ The Pi's other micro-USB port (PWR) takes the supply.
 
 The pedal keeps its own 9 V supply and doesn't draw meaningfully from USB.
 
-A single board, and nothing on the GPIO header: no HAT, no button, no LED, no
-display. The web UI is the only interface.
+One board, nothing on the GPIO header. The web UI is the only interface.
 
 ---
 
@@ -41,10 +40,9 @@ will disconnect as the Pi goes down.
 | Uploaded audio in `sources/` | fsynced on ingest before the upload is acknowledged. If that fsync fails the upload fails too, rather than reporting success for bytes that were never confirmed on the card |
 | **The pedal's FAT volume** | **The exposed one.** `BT.WAV` is written temp-then-rename with an fsync and the volume is mounted `flush`, so a cut leaves either the old file or the new one. A cut *during* a write can still leave a `~bt*.tmp` behind, cleaned automatically on the next mount, and FAT has no journal |
 
-So: the failure mode to avoid is unplugging while the UI says it is writing. The
+The failure mode to avoid is unplugging while the UI says it is writing. The
 status line at the bottom of the page turns amber and reads "— don't unplug"
-whenever the pedal is being written to. That message is the only warning there is
-now that the panel LED is gone.
+whenever the pedal is being written to. That message is the only warning.
 
 Anything left behind by a cut is swept on the next start, because the clean-up
 that used to run only at session end now also runs at boot: interrupted
