@@ -34,11 +34,11 @@ In Raspberry Pi Imager, use the gear icon to preconfigure:
 
 The card needs room for a third partition, so disable the first-boot resize.
 Imager ejects the card when it finishes; reinsert it and edit `cmdline.txt` on
-the `bootfs` partition before the first boot. On macOS that's
-`/Volumes/bootfs/cmdline.txt`; on Linux, mount the partition first.
+`bootfs` before the first boot — `/Volumes/bootfs/cmdline.txt` on macOS, or
+mount the partition first on Linux.
 
-Look at the file before editing — the token varies by image version. Recent
-cloud-init images use a bare `resize`. Delete that token and nothing else:
+Read the file before editing: the token varies by image version. Recent
+cloud-init images use a bare `resize`. Delete that and nothing else:
 
 ```text
 console=serial0,115200 console=tty1 root=PARTUUID=... rootfstype=ext4
@@ -61,13 +61,13 @@ Check after first boot:
 df -h /        # expect ~2.5G, not the full card
 ```
 
-If it reports the full card size, the resize ran. You cannot shrink a mounted ext4 root, so
-reflash rather than trying to recover.
+If it reports the full card size the resize ran. A mounted ext4 root cannot be
+shrunk, so reflash rather than try to recover.
 
-If it expands despite the edit, cloud-init's `growpart` did it. Merge the
-following into the `user-data` file on the boot partition — it's a fragment, so
-add it to the existing cloud-config rather than replacing the file, and keep
-`#cloud-config` as the first line or cloud-init ignores the whole file:
+If it expands despite the edit, cloud-init's `growpart` did it. Merge this
+fragment into the existing `user-data` on the boot partition rather than
+replacing the file, keeping `#cloud-config` as the first line or cloud-init
+ignores all of it:
 
 ```yaml
 #cloud-config
@@ -111,10 +111,10 @@ sudo mkfs.ext4 -L dittodata /dev/mmcblk0p3
 sudo mkdir -p /var/lib/ditto
 ```
 
-Adjust `3300MB` to suit what the previous command reported; parted refuses
-overlapping partitions, so a wrong value fails loudly rather than silently. Don't use `0%` as the start — that
-means the start of the disk, which is occupied, and parted will pick the small
-gap before partition 1 instead.
+Adjust `3300MB` to what the previous command reported. Parted refuses
+overlapping partitions, so a wrong value fails rather than corrupts. Don't use
+`0%` as the start: that means the start of the disk, which is occupied, and
+parted picks the small gap before partition 1 instead.
 
 If `mkfs` runs before the device node appears, p3 will have no filesystem. Run
 `mkfs.ext4` again.
@@ -140,9 +140,8 @@ sudo mkdir -p /var/lib/ditto/{sources,staged,trash,app}
 This partition holds the application, the uploads and the database. It is the
 only writable storage once the overlay is on.
 
-Ownership is left alone here on purpose. `install.sh` creates the `ditto-svc`
-account in step 6 and hands it the whole partition, so chowning it to the login
-user now only means chowning it twice.
+Leave the ownership alone. `install.sh` creates the `ditto-svc` account in
+step 6 and takes the partition then.
 
 ---
 
@@ -157,11 +156,8 @@ sudo apt install -y \
   overlayroot
 ```
 
-Everything from apt, nothing from pip. A read-only root and a virtualenv are an
+Everything from apt, nothing from pip: a read-only root and a virtualenv are an
 awkward combination.
-
-There is nothing on the GPIO header, so no I2C, no `i2c-tools` and no group
-membership to arrange.
 
 ---
 
@@ -194,25 +190,22 @@ root. `install.sh` writes this line; it is here so you can read it:
 LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto-svc,gid=ditto-svc  0  0
 ```
 
-`fmask=077,dmask=077` keeps the mounted files owner-only (the `ditto-svc`
-account the service runs as, not your login) rather than the world-writable
-`umask=000`.
+`fmask=077,dmask=077` keeps the mounted files owner-only — owned by
+`ditto-svc`, the account the service runs as, not your login — rather than the
+world-writable `umask=000`. `flush` pushes FAT writes out promptly instead of
+leaving them in cache.
 
 ```bash
 sudo mkdir -p /media/ditto
 ```
 
-There is nothing to test by hand yet. The entry names `ditto-svc`, and mount
-resolves `uid=`/`gid=` when it runs, so until step 6 creates that account the
-mount fails with "unknown user" whoever runs it — including root. The hand test
-is in step 6, after `install.sh`.
+Don't try mounting it yet. `mount` resolves `uid=`/`gid=` when it runs, so
+until step 6 creates `ditto-svc` this fails with "unknown user" for everyone,
+root included.
 
-`flush` pushes FAT writes out promptly instead of leaving them in cache.
-
-The pedal stays enumerated after `umount` and does not return to looper
-operation while the cable is attached. That is expected — see
-[pedal-format.md](pedal-format.md#release-behaviour). Unplug the dongle when
-you're done with it.
+The pedal stays enumerated after `umount` and won't return to looper operation
+while the cable is attached. That is expected, and unplugging is the only way
+back — see [pedal-format.md](pedal-format.md#release-behaviour).
 
 ---
 
@@ -228,17 +221,22 @@ cd /var/lib/ditto/src
 ./install.sh
 ```
 
-That installs the packages, creates the `ditto-svc` system account the service
-runs as, hands it `/var/lib/ditto`, writes the fstab entry and both sudoers
-rules, deploys the code and starts the unit. It is idempotent, so running it
-again is how you pick up a change to any of those.
+Run this before step 8. `install.sh` writes to `/etc`, and those writes are
+discarded once the root filesystem is read-only.
+
+It installs the packages, creates the `ditto-svc` account the service runs as,
+gives it `/var/lib/ditto`, writes the fstab entry and both sudoers rules,
+deploys the code and starts the unit. Idempotent: re-running it is how a change
+to any of those is applied. It repeats steps 3 and 5 but does not install
+`overlayroot`, so don't skip step 3.
 
 Open `http://dittobacktracker.local/`, plug in the pedal, drop a track in.
 
-The account now exists, so the step 5 mount entry can be tried by hand. Mount
-as `ditto-svc`: `user` in fstab lets anyone mount but only the mounting user
-unmount, so mounting it as yourself leaves a volume the service cannot release.
-Stop the service first, or it will be holding the pedal already.
+The account exists now, so the step 5 entry can be tried by hand. Every line
+runs as `ditto-svc`, including the `ls`: `dmask=077` makes the mount `0700`
+owned by that account, and `user` in fstab lets anyone mount but only the
+mounting user unmount, so doing it as yourself leaves a volume the service
+cannot release.
 
 ```bash
 sudo systemctl stop ditto-web
@@ -247,17 +245,6 @@ sudo -u ditto-svc ls /media/ditto      # 01track/ … 99track/
 sudo -u ditto-svc umount /media/ditto
 sudo systemctl start ditto-web
 ```
-
-Every line is `ditto-svc`, including the `ls`. `dmask=077` makes the mounted
-directory `0700` owned by that account, so your login user cannot read it —
-which is the masks working, not a mistake.
-
-Do this before enabling the overlay in step 8. `install.sh` writes to `/etc`,
-and those changes are discarded once the root filesystem is read-only.
-
-It repeats the package install and the fstab entry from steps 3 and 5, so those
-steps are there to be understood rather than to be got exactly right. It does
-not install `overlayroot`, so don't skip step 3.
 
 ---
 
@@ -328,7 +315,7 @@ sudo -u ditto-svc touch /var/lib/ditto/x && echo ok && sudo rm /var/lib/ditto/x
 ```
 
 The write test runs as `ditto-svc` because that is the account that has to be
-able to write there. Your login user cannot, and that is the point.
+able to write there. Your login user cannot.
 
 ### Changing anything afterwards
 
