@@ -8,7 +8,7 @@ verifies it.
 
 ## 1. Image
 
-**Raspberry Pi OS Lite (64-bit)**, Bookworm or Trixie.
+**Raspberry Pi OS Lite (64-bit)**.
 
 In Raspberry Pi Imager, use the gear icon to preconfigure:
 
@@ -27,8 +27,7 @@ Imager ejects the card when it finishes. Reinsert it and edit `cmdline.txt` on
 the `bootfs` partition before the first boot. On macOS that file is at
 `/Volumes/bootfs/cmdline.txt`. On Linux, mount the partition first.
 
-Read the file before editing: the two supported images do this differently.
-Trixie carries a bare `resize` token. Delete that and nothing else:
+Delete the `resize` token and nothing else:
 
 ```text
 console=serial0,115200 console=tty1 root=PARTUUID=... rootfstype=ext4
@@ -37,12 +36,6 @@ fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=GB ds=nocloud;i=rpi-im
 ```
 
 Keep it as one line.
-
-Bookworm has no bare `resize`. It resizes through
-`init=/usr/lib/raspberrypi-sys-mods/firstboot`, and that same entry is what
-applies your Imager settings. Leave `cmdline.txt` alone on Bookworm and create
-the third partition on the card before the first boot instead. The `growpart`
-override below is cloud-init, so it does not apply there.
 
 Check after first boot:
 
@@ -90,8 +83,8 @@ Check where p2 actually ends before choosing a start point:
 sudo parted /dev/mmcblk0 unit MB print free
 ```
 
-Then create p3 from just past the end of p2, rounding up. On a Bookworm image
-p2 typically ends near 3.2 GB, so:
+Then create p3 from just past the end of p2, rounding up. p2 typically ends
+near 3.2 GB, so:
 
 ```bash
 sudo parted -a optimal /dev/mmcblk0 --script mkpart primary ext4 3300MB 100%
