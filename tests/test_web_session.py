@@ -30,7 +30,7 @@ def test_ending_twice_still_halts_once(client, service):
     before = len(conftest.sudo_attempts)
     assert client.post("/api/session/end").status_code == 200
     assert client.post("/api/session/end").status_code == 200
-    service._drain(timeout=5.0)
+    conftest.drain(service)
 
     poweroffs = [c for c in conftest.sudo_attempts[before:]
                  if c[-1].endswith("poweroff")]
@@ -67,7 +67,7 @@ def test_the_poweroff_is_the_command_the_sudoers_rule_allows(client, service):
     browser, because the response has already gone."""
     before = len(conftest.sudo_attempts)
     client.post("/api/session/end")
-    service._drain(timeout=5.0)
+    conftest.drain(service)
 
     poweroffs = [c for c in conftest.sudo_attempts[before:]
                  if c[-1].endswith("poweroff")]

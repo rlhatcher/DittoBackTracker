@@ -10,6 +10,16 @@ long as anyone kept reading those.
 config → {media, db, update} → pedal → core → web
 ```
 
+| Module | Owns |
+|---|---|
+| `config.py` | Paths and constants |
+| `db.py` | SQLite storage |
+| `media.py` | ffprobe and ffmpeg |
+| `pedal.py` | Detect, mount, write `BT.WAV`, unmount |
+| `update.py` | Over-the-air self-update: git, systemd |
+| `core.py` | Session lifecycle and work queue |
+| `web.py` | Flask routes and server-sent events |
+
 Acyclic, and it stays that way. New code goes in the layer that owns the
 resource: SQL in `db.py` and nowhere else, subprocess calls to ffmpeg in
 `media.py`, mount and unmount in `pedal.py`.
@@ -77,7 +87,7 @@ is no formatter here (see below).
 
 `ruff check ditto/ tests/` gates CI. The rules are chosen in `pyproject.toml`
 and the reasoning is there too. A deliberate exception gets a per-line
-`# noqa: RULE` with its reason, never a global ignore — an ignore silences the
+`# noqa: RULE` with its reason, never a global ignore. An ignore silences the
 rule in new code as well, and the point is to record *this* decision.
 
 **`ruff format` is not used, deliberately.** There are no style arguments to
@@ -96,13 +106,43 @@ section or a section has no route, so a route change is not done until the doc
 changes.
 
 `ditto/__init__.py.__version__` is the single source of truth for the version.
-It is not in `pyproject.toml`, and it is not read from `importlib.metadata` —
-the device is deployed by copying `ditto/`, never pip-installed, so there is no
-`.dist-info` to read and that would raise on every Pi while passing CI.
+It is not in `pyproject.toml`, and it is not read from `importlib.metadata`.
+The device is deployed by copying `ditto/` and never pip-installed, so there is
+no `.dist-info` to read: that would raise on every Pi while passing CI.
 
 A release is: bump `__version__`, update the example in `docs/api.md` (a test
 fails if you forget), commit, and `git tag -a vX.Y.Z`. The device keeps
 comparing commit SHAs against the branch it tracks and does not look at tags.
+
+The recurring failure here is **a removed choice leaving its scaffolding
+behind**. Every time this project narrowed, the docs kept the branch: two
+boards became one and "one board, nothing on the GPIO header" stayed; the panel
+LED went and a warning was still described as "the only warning there is now
+that the panel LED is gone"; "Bookworm or Trixie" outlived the fact that
+Raspberry Pi OS Lite is Trixie.
+
+A dead branch is not one stale sentence. It earns its keep. "Bookworm or
+Trixie" bought a paragraph on `init=...firstboot`, a hedge that "the token
+varies by image version", a partition offset qualified "on a Bookworm image",
+and a cross-reference to a `growpart` fallback that does not exist on Bookworm.
+One line of optionality, four descendants, none of them true.
+
+So when something is removed, grep the docs for it and delete what described
+it. In particular:
+
+- **Don't describe what isn't there.** "No HAT, no button, no LED" only reads
+  as useful to someone who remembers when there was one.
+- **Don't say "some" or "varies" about a set with one member.** If the doc
+  supports one image, name it and give one instruction.
+- **Don't narrate the reader disobeying.** The instruction is the content; what
+  happens if they do the opposite is not.
+- **Don't explain a decision the reader isn't making.** Rationale earns its
+  place when it changes what they do or helps them recover, not when it
+  defends a choice already made for them.
+
+History belongs in `git log`, which is why it is the design record. The
+exception is a rule with a concrete violation attached, like the layering
+example above: that is teaching the rule, not recording the past.
 
 ## Front end
 
@@ -117,7 +157,7 @@ Adding a file to `static/` is two edits: the file, and `ASSETS` in `web.py`. A
 test catches the second if you forget.
 
 Colours come from the token layer in `app.css`. A component naming a raw ramp
-step fails the suite, and so does any text pair below its WCAG threshold — the
+step fails the suite, and so does any text pair below its WCAG threshold. The
 table in `test_frontend.py` is hand-maintained, so add a row when you add a new
 foreground/background pairing.
 

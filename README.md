@@ -4,66 +4,61 @@
 
 Load backing tracks onto a TC Electronic Ditto+ looper over WiFi.
 
-The Ditto+ plays backing tracks, but getting them onto it needs a computer. The
-pedal mounts as a USB drive and wants 44.1 kHz / 24-bit / **mono** WAV in a
-specific folder layout.
+The Ditto+ plays backing tracks but has no way to receive them. It mounts as a
+USB mass storage device and expects 44.1 kHz / 24-bit / mono WAV in numbered
+slot directories. DittoBackTracker is a Raspberry Pi Zero 2 W that stays
+connected to the pedal, serves a web page on the local network, converts
+whatever is uploaded and writes it to the pedal.
 
-DittoBackTracker is a small dongle that sits between them. Plug it
-into the pedal, open a web page, drag MP3s in. It converts them to the pedal's
-format and writes them to the right slots.
+- Upload from any browser. A leading number in the filename ("07 Blue
+  Bossa.mp3") assigns that slot; anything else lands in the library.
+- A 99-slot map showing what is loaded, converting or written. Drag to
+  reorder, swap or remove.
+- A library on the device. Uploads persist, so changing what the pedal carries
+  is an assignment rather than another upload.
+- Folders, search, rename and in-browser preview.
+- Capacity in minutes rather than slots, because the pedal holds about 63
+  minutes in total.
+- Loops recorded on the pedal can be downloaded or removed. `LOOP.WAV` is
+  never written.
 
-```text
-  Phone / laptop                    ┌──────────────────────┐
-  ┌──────────────┐    your WiFi     │  DittoBackTracker    │
-  │  drag & drop │ ───────────────▶ │   Pi Zero 2 W        │      mini-USB
-  │   web page   │                  │   USB power          │ ───────────────▶ Ditto+
-  └──────────────┘                  └──────────────────────┘
-```
-
-## What it does
-
-- Drag and drop from any browser: files land in the library, and a leading
-  number — "07 Blue Bossa.mp3" — sends one straight to that slot
-- Converts to the pedal's format
-- 99-slot map showing what is loaded, converting or written
-- Drag between slots to reorder; dropping onto an occupied slot swaps them
-- Drag to the bin to remove, with undo
-- Print the loaded track list
-- Capacity shown in minutes, because the pedal holds about 63 minutes in total
-- Keep a library on the device: uploads stay until you delete them, so you can
-  swap what the pedal carries without uploading again
-- Group the library into folders, and fill a run of slots from one in a click
-- Rename, search and preview library tracks in the browser
-- Download or remove a loop the pedal recorded
-- Never writes `LOOP.WAV`, so recorded loops are safe
-- Read-only root filesystem, so cutting the Pi's power is unlikely to corrupt
-  the system partition. `state.db`, `sources/`, `staged/` and `trash/` live on
-  a separate writable partition and still need a clean unmount — end the
-  session from the web page rather than pulling the power
-
-What isn't built yet is in [docs/roadmap.md](docs/roadmap.md).
+Unbuilt work is listed in [docs/roadmap.md](docs/roadmap.md).
 
 ---
 
-## Parts
+## Requirements
 
-| Part                                         |
-| -------------------------------------------- |
-| Raspberry Pi Zero 2 W                        |
-| microSD card, 8 GB or larger                 |
-| micro-USB OTG adapter                        |
-| USB-A to **mini-B** cable                    |
+| Part | Notes |
+|---|---|
+| Raspberry Pi Zero 2 W | |
+| microSD card, 8 GB or larger | A1 rated |
+| micro-USB OTG adapter | Pi micro-B to USB-A |
+| USB-A to mini-B cable | One ships with the pedal |
+| USB power supply | 5 V, 2 A |
 
-Details in [docs/hardware.md](docs/hardware.md).
+About £39. Costs and the cable chain are in
+[docs/hardware.md](docs/hardware.md).
 
 ---
 
-## Install
+## Installation
 
-Set the Pi up first. It needs a separate data partition and a read-only root
-filesystem, which is covered in [docs/provisioning.md](docs/provisioning.md).
+### 1. Provision the Pi
 
-Clone onto the data partition — your home directory becomes read-only.
+Follow [docs/provisioning.md](docs/provisioning.md). Allow about an hour, most
+of it waiting on `apt`. Flashing the card is manual; the rest is
+`provision.sh`, which partitions the card, installs the packages and sets USB
+host mode and the boot options.
+
+This step is required, not a recommendation. The device has no battery and
+loses power the moment the plug comes out, so it needs a read-only root
+filesystem and a separate writable data partition. Installing onto a stock
+image will corrupt the card.
+
+### 2. Install
+
+Clone onto the data partition. Provisioning makes the home directory read-only,
+so a checkout there cannot be updated afterwards.
 
 ```bash
 git clone https://github.com/rlhatcher/DittoBackTracker.git /var/lib/ditto/src
@@ -71,27 +66,55 @@ cd /var/lib/ditto/src
 ./install.sh
 ```
 
-Open `http://dittobacktracker.local/` and plug the pedal in.
+`install.sh` installs the packages, creates the `ditto-svc` service account and
+gives it `/var/lib/ditto`, writes the pedal's fstab entry and both sudoers
+rules, deploys the code and starts the unit. It is idempotent, and re-running
+it is how changes to any of those are applied.
 
-### Updating over the air
+It must run before the read-only overlay is enabled, because it writes to
+`/etc`.
 
-The device updates itself. It checks for a new version at startup and whenever
-you press **Check for update** at the bottom of the web page; when one is
-available that control becomes **Update available**, and pressing it pulls the
-new code and restarts.
+### 3. Verify
 
-First-time setup needs the read-only overlay off for one boot
-([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)); the
-mechanism is in [docs/api.md](docs/api.md#post-apiupdate).
+Open `http://dittobacktracker.local/` and connect the pedal.
 
-### Running it without hardware
+Work through the [checklist](docs/provisioning.md#checklist) before calling it
+done. It covers the two privileged operations that fail silently: a refused
+poweroff arrives after the page has said it is safe to unplug, and a refused
+restart leaves the device serving old code after reporting an update.
 
-The web UI runs anywhere. With no pedal attached, uploads convert and wait.
+---
 
-`ffmpeg` and `ffprobe` must be on your `PATH` first — without `ffprobe` every
-upload is rejected as "not a readable audio file". On macOS `brew install
-ffmpeg`; on Debian or Ubuntu `sudo apt install ffmpeg python3-venv` (the venv
-package isn't present on a minimal install).
+## Configuration
+
+Port, pedal volume label, data and mount paths, tracked branch and upload cap
+are environment variables read at startup and set in the systemd unit. Listed
+in [docs/hardware.md](docs/hardware.md#settings).
+
+---
+
+## Updating
+
+The device checks its tracked branch for a new commit at startup and when
+**Check for update** is pressed. When one exists that control becomes **Update
+available**; pressing it deploys the new code and restarts. The mechanism is in
+[docs/api.md](docs/api.md#post-apiupdate).
+
+An update replaces the `ditto/` package and nothing else. A release that also
+changes the systemd unit, the sudoers rules, the fstab entry or the ownership
+of `/var/lib/ditto` needs `install.sh` run again with the overlay off
+([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)).
+
+---
+
+## Running without hardware
+
+The web UI runs on any machine. With no pedal attached, uploads convert and
+wait.
+
+`ffmpeg` and `ffprobe` must be on `PATH` first, or every upload is rejected as
+"not a readable audio file". On macOS, `brew install ffmpeg`. On Debian or
+Ubuntu, `sudo apt install ffmpeg python3-venv`.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install flask
@@ -99,65 +122,68 @@ DITTO_DATA=/tmp/ditto-data DITTO_MOUNT=/tmp/ditto-mount \
   .venv/bin/python -m ditto --host 127.0.0.1 --port 8080 --debug
 ```
 
-`--debug` uses Flask's built-in server, so `waitress` isn't needed here. `--host 127.0.0.1` keeps the
-unauthenticated dev server off your network; the default is `0.0.0.0`.
+`--debug` uses Flask's built-in server, so `waitress` is not required.
+`--host 127.0.0.1` keeps the unauthenticated development server off the
+network; the default is `0.0.0.0`.
 
 ---
 
 ## How it works
 
-The pedal is mounted for the length of a session and released when you press
-Done. Uploads are stored by content hash, converted in the background, and
-written as they become ready.
+The pedal is mounted for the length of a session and released on **Done**.
+Uploads are stored by content hash, converted in the background and written as
+they become ready.
 
 ```text
   POST /api/upload
         ▼
-  sources/<hash>.<ext>              the upload, unmodified
+  sources/<hash>.<ext>                     the upload, unmodified
         ▼  ffmpeg
   staged/<hash>-<codec>-<rate>-<ch>.wav    cache, keyed on target format
         ▼
-  <slot>track/BT.WAV                on the pedal
+  <slot>track/BT.WAV                       on the pedal
 ```
 
-The format tag in the staged filename means a change of target format
-invalidates the cache instead of silently reusing a wrong-format file.
-
-Content addressing means moving a track between slots is a database change and
-one file copy, with no re-conversion.
-
-`sources/` is the library, and it is the durable half. A row in the `library`
-table is the only thing keeping a file there alive: clearing a slot ends an
-assignment and nothing more, and the audio survives until you delete the track
-outright. `staged/` is the disposable half — a cache kept only for slots about
-to be written, because a full library's worth of 24-bit WAV would be several
-gigabytes and losing one only costs a re-transcode.
-
-That split is the point of the feature. The pedal holds about twelve
-five-minute tracks; the card holds as many as you like. Changing what the pedal
-carries is an assign, not another upload.
-
-| Module      | Does                                   |
-| ----------- | -------------------------------------- |
-| `config.py` | Paths and constants                    |
-| `db.py`     | SQLite storage                         |
-| `media.py`  | ffprobe and ffmpeg                     |
-| `pedal.py`  | Detect, mount, write `BT.WAV`, unmount |
-| `update.py` | Over-the-air self-update: git, systemd |
-| `core.py`   | Session lifecycle and work queue       |
-| `web.py`    | Flask routes and server-sent events    |
-
-The HTTP API is documented in [docs/api.md](docs/api.md).
+`sources/` is durable and `staged/` is a cache. Clearing a slot ends an
+assignment and nothing more, so moving a track between slots is a database
+change plus one file copy rather than another conversion. Module layering is in
+[CONTRIBUTING.md](CONTRIBUTING.md#layering).
 
 ---
 
-## The pedal
+## Security
 
-[docs/pedal-format.md](docs/pedal-format.md) documents what the Ditto+ actually
-expects: the audio format, the folder layout, the `BT.WAV` and `LOOP.WAV`
-distinction, real capacity, and what happens when you try to make it release
-over USB. None of that is in TC Electronic's documentation. If you're building
-something else for this pedal, start there.
+There is no authentication. The service binds `0.0.0.0:80`, so anyone on the
+network can upload, clear slots, download a recorded loop, trigger a
+self-update or shut the device down. The update only pulls the branch the
+device already tracks from its own remote, so it fetches your code rather than
+an attacker's, but a LAN user can still force a restart. Built for a home LAN.
+Do not put it on a network you do not control.
+
+The service runs as `ditto-svc`, a system account with no shell that is not in
+the `sudo` group. `etc/99-ditto-poweroff` and `etc/99-ditto-restart` are scoped
+to one command each and are the whole of what the service may do as root: power
+the device off, and start the restart helper. A LAN user reaching
+`POST /api/update` can restart the device onto code from the tracked branch and
+can shut it down. They cannot get root.
+
+That holds only because the account is not the login account. The Raspberry Pi
+Imager user is in the `sudo` group, so a service running as it would put root
+behind the same reach and reduce the rules in `etc/` to a statement of intent.
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| [provisioning.md](docs/provisioning.md) | Setting up the Pi, start to finish |
+| [hardware.md](docs/hardware.md) | Parts, power, settings |
+| [api.md](docs/api.md) | HTTP API |
+| [pedal-format.md](docs/pedal-format.md) | What the Ditto+ expects, measured. Not in TC Electronic's docs |
+| [loop-processing.md](docs/loop-processing.md) | Reading loops off the pedal |
+| [roadmap.md](docs/roadmap.md) | Unbuilt and not planned |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Layering, tests, commit conventions |
 
 ---
 
@@ -167,31 +193,11 @@ MIT. See [LICENSE](LICENSE).
 
 ---
 
-## Security
-
-There is no authentication. The service binds `0.0.0.0:80`, so anyone on the
-same network can upload, clear slots, trigger a self-update, or shut the device
-down. The update only ever pulls the branch this device already tracks from its
-own GitHub remote, so it fetches your code, not an attacker's — but it does let a
-LAN user force a restart. It is built for a home LAN. Don't put it on a network
-you don't control.
-
-The two `sudo` rules the app relies on are scoped to one command each
-(`etc/99-ditto-poweroff`, `etc/99-ditto-restart`). Read those as
-defence-in-depth and as documentation of what the service is allowed to do, not
-as the ceiling. The service runs as `ditto`, which is the account Raspberry Pi
-Imager creates, and that account is in the `sudo` group — so the real ceiling is
-whatever that user can do. Narrowing it means a separate system account, which
-changes the data partition's ownership on every device already provisioned;
-worth doing alongside authentication rather than before it.
-
----
-
 ## Disclaimer
 
 Not affiliated with or endorsed by TC Electronic or Music Tribe. "Ditto" and
 "TC Electronic" are their trademarks, used here to describe compatibility.
 
-This writes to your pedal's internal storage. It uses atomic writes, flushes
-before unmounting, and never touches `LOOP.WAV`, but it comes with no warranty.
+This writes to the pedal's internal storage. It uses atomic writes, flushes
+before unmounting and never touches `LOOP.WAV`, but comes with no warranty.
 Back up any loops you care about before first use.

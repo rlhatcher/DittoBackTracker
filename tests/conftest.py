@@ -127,6 +127,32 @@ def data_tree(tmp_path, monkeypatch):
     _forget_connection()
 
 
+# Service._drain returns silently when it gives up, so a timeout that is too
+# short does not fail as a timeout. It fails later, on whatever the test was
+# about to assert, with a message that blames the wrong thing: CircleCI build
+# 140 reported "ending the session never reached poweroff" when the poweroff
+# was merely still coming.
+#
+# The end job is the slowest thing a test waits for. It sleeps 1.5 s on purpose
+# (core._halt, so the last snapshot reaches the browser before the power goes)
+# and calls os.sync(), which flushes every filesystem on the host and is
+# unbounded on a shared runner. 5 s left about 3.5 s for that. Local runs use
+# 1.6 s of it, which looked like room and was not.
+#
+# This is not a deadline anything is measured against. _drain polls at 50 ms and
+# returns the moment the worker is idle, so a generous timeout costs a healthy
+# run nothing and only bounds a hang.
+DRAIN_TIMEOUT = 60.0
+
+
+def drain(svc, timeout: float = DRAIN_TIMEOUT) -> None:
+    """Wait for the worker to go idle, and say so when it doesn't."""
+    svc._drain(timeout=timeout)
+    assert svc._work.empty() and not svc._in_flight.is_set(), (
+        f"worker still busy after {timeout}s: "
+        f"queued={not svc._work.empty()} in_flight={svc._in_flight.is_set()}")
+
+
 @pytest.fixture
 def service(data_tree):
     """A running Service on its own data tree.
@@ -138,7 +164,7 @@ def service(data_tree):
     """
     svc = core.Service()
     try:
-        svc._drain(timeout=5.0)
+        drain(svc)
         yield svc
     finally:
         svc.shutdown(timeout=2.0)

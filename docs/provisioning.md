@@ -1,24 +1,14 @@
 # Provisioning the Pi
 
-Setting up a Raspberry Pi Zero 2 W to run DittoBackTracker. About an hour, most
-of it waiting on `apt`.
-
-Two things here are unusual: a **separate data partition** and a **read-only
-root filesystem**. The device has no battery, so it can lose power the moment
-the plug comes out — nothing may be written to the OS card during normal
-operation.
-
 End state: a Zero 2 W on WiFi at `dittobacktracker.local`, read-only root, and
-the pedal mountable by an unprivileged service.
+the pedal mountable by an unprivileged service. The [checklist](#checklist)
+verifies it.
 
 ---
 
 ## 1. Image
 
-**Raspberry Pi OS Lite (64-bit)**, Bookworm or Trixie.
-
-64-bit works on the Zero 2 W and avoids the patchy ARMv6 wheel situation. It
-costs about 30 MB more RAM out of 512 MB.
+**Raspberry Pi OS Lite (64-bit)**.
 
 In Raspberry Pi Imager, use the gear icon to preconfigure:
 
@@ -33,12 +23,11 @@ In Raspberry Pi Imager, use the gear icon to preconfigure:
 ### Stop the root filesystem auto-expanding
 
 The card needs room for a third partition, so disable the first-boot resize.
-Imager ejects the card when it finishes; reinsert it and edit `cmdline.txt` on
-the `bootfs` partition before the first boot. On macOS that's
-`/Volumes/bootfs/cmdline.txt`; on Linux, mount the partition first.
+Imager ejects the card when it finishes. Reinsert it and edit `cmdline.txt` on
+the `bootfs` partition before the first boot. On macOS that file is at
+`/Volumes/bootfs/cmdline.txt`. On Linux, mount the partition first.
 
-Look at the file before editing — the token varies by image version. Recent
-cloud-init images use a bare `resize`. Delete that token and nothing else:
+Delete the `resize` token and nothing else:
 
 ```text
 console=serial0,115200 console=tty1 root=PARTUUID=... rootfstype=ext4
@@ -48,26 +37,20 @@ fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=GB ds=nocloud;i=rpi-im
 
 Keep it as one line.
 
-**Leave `init=/usr/lib/raspberrypi-sys-mods/firstboot` alone if you see it.**
-That entry is what applies the Imager `custom.toml` settings — hostname, user,
-WiFi, SSH — on first boot, so removing it costs you the whole configuration.
-On an image that uses it rather than a bare `resize`, don't edit `cmdline.txt`
-at all: either create the third partition on the card before first boot, or
-let the root expand and use the `growpart` override below.
-
-Check after first boot:
+Boot the Pi and check:
 
 ```bash
-df -h /        # expect ~2.5G, not the full card
+ssh ditto@dittobacktracker.local
+df -h /        # expect ~2.3G, not the full card
 ```
 
-If it reports the full card size, the resize ran. You cannot shrink a mounted ext4 root, so
-reflash rather than trying to recover.
+If it reports the full card size the resize ran. A mounted ext4 root cannot be
+shrunk, so reflash rather than try to recover.
 
-If it expands despite the edit, cloud-init's `growpart` did it. Merge the
-following into the `user-data` file on the boot partition — it's a fragment, so
-add it to the existing cloud-config rather than replacing the file, and keep
-`#cloud-config` as the first line or cloud-init ignores the whole file:
+If it expands despite the edit, cloud-init's `growpart` did it. Merge this
+fragment into the existing `user-data` on the boot partition rather than
+replacing the file, keeping `#cloud-config` as the first line or cloud-init
+ignores all of it:
 
 ```yaml
 #cloud-config
@@ -81,145 +64,50 @@ boot.
 
 ---
 
-## 2. Data partition
+## 2. Prepare the Pi
+
+`provision.sh` does the partitioning, the packages, USB host mode and the boot
+settings. Fetch it directly rather than cloning: git is not installed yet, and
+the partition the repo belongs on does not exist yet either.
 
 ```bash
-ssh ditto@dittobacktracker.local
+curl -fsSL -o provision.sh https://raw.githubusercontent.com/rlhatcher/DittoBackTracker/main/provision.sh
+sudo bash provision.sh
 ```
 
-`parted` and `usbutils` (for `lsusb`, below) aren't guaranteed on a Lite image,
-so install them before you need them:
+It gives the root 5 GB and the data partition everything else. The root is the
+one that gets locked read-only in step 4 and then never grows, so it is sized
+to what it holds: 2.6 GB after these packages, of which ffmpeg and its
+dependencies are about 900 MB. The data partition takes the rest because it is
+the half that fills up, and on a 32 GB card that is around 26 GB.
+
+It is idempotent, and it will not format a partition that already holds a
+filesystem, so re-running it cannot take the library with it.
 
 ```bash
-sudo apt update && sudo apt install -y parted usbutils
+sudo reboot
 ```
 
-The root filesystem is around 2.5 GB and the rest of the card is unallocated.
-Check where p2 actually ends before choosing a start point:
-
-```bash
-sudo parted /dev/mmcblk0 unit MB print free
-```
-
-Then create p3 from just past the end of p2, rounding up. On a Bookworm image
-p2 typically ends near 3.2 GB, so:
-
-```bash
-sudo parted -a optimal /dev/mmcblk0 --script mkpart primary ext4 3300MB 100%
-sudo partprobe /dev/mmcblk0
-sudo mkfs.ext4 -L dittodata /dev/mmcblk0p3
-sudo mkdir -p /var/lib/ditto
-```
-
-Adjust `3300MB` to suit what the previous command reported; parted refuses
-overlapping partitions, so a wrong value fails loudly rather than silently. Don't use `0%` as the start — that
-means the start of the disk, which is occupied, and parted will pick the small
-gap before partition 1 instead.
-
-If `mkfs` runs before the device node appears, p3 will have no filesystem. Run
-`mkfs.ext4` again.
-
-```bash
-lsblk -o NAME,SIZE,FSTYPE,LABEL /dev/mmcblk0
-```
-
-Expect `p3` to fill the rest of the card, ext4, labelled `dittodata`. Around
-2 GB is enough; the rest is spare.
-
-Add to `/etc/fstab`:
-
-```text
-LABEL=dittodata  /var/lib/ditto  ext4  defaults,noatime  0  2
-```
-
-```bash
-sudo mount -a
-sudo mkdir -p /var/lib/ditto/{sources,staged,trash,app}
-sudo chown -R ditto:ditto /var/lib/ditto
-```
-
-This partition holds the application, the uploads and the database. It is the
-only writable storage once the overlay is on.
-
----
-
-## 3. Packages
-
-```bash
-sudo apt update && sudo apt full-upgrade -y
-sudo apt install -y \
-  git ffmpeg \
-  python3-flask python3-waitress \
-  avahi-daemon \
-  overlayroot
-```
-
-Everything from apt, nothing from pip. A read-only root and a virtualenv are an
-awkward combination.
-
-There is nothing on the GPIO header, so no I2C, no `i2c-tools` and no group
-membership to arrange.
-
----
-
-## 4. USB host mode
-
-The Zero's data port defaults to host mode. Set it explicitly in
-`/boot/firmware/config.txt`:
-
-```ini
-dtoverlay=dwc2,dr_mode=host
-```
-
-Reboot, plug in the pedal, and check:
+The reboot is needed: USB host mode and the boot settings only take effect from
+`/boot/firmware/config.txt` at boot. Afterwards the pedal should enumerate:
 
 ```bash
 lsusb                          # TC Electronic Ditto Plus
 ls -l /dev/disk/by-label/      # DITTOPLUS
 ```
 
-Udev creates the `by-label` symlink. No custom rule needed.
+Boot is 20-40 s stock and about 10 s after this. Measure with
+`systemd-analyze` and `systemd-analyze blame | head -15`.
 
 ---
 
-## 5. Mounting
+## 3. Install
 
-An fstab entry with `noauto,user` lets the service mount the pedal without
-root:
+Both parts of this step have to happen before step 4, because your home
+directory and `/etc` both become read-only there: a checkout in your home
+directory could never be updated, and `install.sh` writes to `/etc`.
 
-```text
-LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto,gid=ditto  0  0
-```
-
-`fmask=077,dmask=077` keeps the mounted files owner-only (the `ditto` user the
-service runs as) rather than the world-writable `umask=000`.
-
-```bash
-sudo mkdir -p /media/ditto
-```
-
-As the `ditto` user, with no sudo:
-
-```bash
-mount /media/ditto
-ls /media/ditto          # 01track/ … 99track/
-umount /media/ditto
-```
-
-`flush` pushes FAT writes out promptly instead of leaving them in cache.
-
-The pedal stays enumerated after `umount` and does not return to looper
-operation while the cable is attached. That is expected — see
-[pedal-format.md](pedal-format.md#release-behaviour). Unplug the dongle when
-you're done with it.
-
----
-
-## 6. Install
-
-Clone onto the data partition. Your home directory is on the root filesystem,
-which becomes read-only in step 8, so a checkout there can't be updated
-afterwards.
+Clone onto the data partition, which stays writable:
 
 ```bash
 git clone https://github.com/rlhatcher/DittoBackTracker.git /var/lib/ditto/src
@@ -227,49 +115,50 @@ cd /var/lib/ditto/src
 ./install.sh
 ```
 
+`install.sh` installs the packages, creates the `ditto-svc` account the service
+runs as, gives it `/var/lib/ditto`, writes the fstab entry and both sudoers
+rules, deploys the code and starts the unit. It is idempotent: run it again to
+apply a change to any of those.
+
 Open `http://dittobacktracker.local/`, plug in the pedal, drop a track in.
 
-Do this before enabling the overlay in step 8. `install.sh` writes to `/etc`,
-and those changes are discarded once the root filesystem is read-only.
+### The pedal mount entry
 
-The installer is idempotent, and repeats the package install and fstab entry
-from steps 3 and 5. It does not install `overlayroot`, so don't skip step 3.
+`install.sh` wrote this entry. `noauto,user` lets the service mount the pedal
+without root:
 
----
+```text
+LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=ditto-svc,gid=ditto-svc  0  0
+```
 
-## 7. Boot time
+`fmask=077,dmask=077` makes the mounted files owner-only, owned by `ditto-svc`
+rather than by your login. `flush` pushes FAT writes out promptly instead of
+leaving them in cache.
 
-Stock boot is 20–40 s, and the device boots every time you use it. Around 10 s
-is achievable.
+The pedal stays enumerated after `umount` and won't return to looper operation
+while the cable is attached. That is expected, and unplugging is the only way
+back. See [pedal-format.md](pedal-format.md#release-behaviour).
+
+### Checking the pedal mount by hand
+
+Optional. The `ditto-svc` account exists now, so the fstab entry above
+can be tested. Stop the service first, or it is already holding the pedal:
 
 ```bash
-sudo systemctl disable --now \
-  triggerhappy.service \
-  keyboard-setup.service \
-  apt-daily.timer apt-daily-upgrade.timer \
-  man-db.timer \
-  dphys-swapfile.service \
-  bluetooth.service hciuart.service
+sudo systemctl stop ditto-web
+sudo -u ditto-svc mount /media/ditto
+sudo -u ditto-svc ls /media/ditto      # 01track/ … 99track/
+sudo -u ditto-svc umount /media/ditto
+sudo systemctl start ditto-web
 ```
 
-`dphys-swapfile` has to go regardless — swap on a read-only root makes no
-sense.
-
-In `/boot/firmware/config.txt`:
-
-```ini
-disable_splash=1
-dtoverlay=disable-bt
-boot_delay=0
-```
-
-Measure with `systemd-analyze` and `systemd-analyze blame | head -15`.
-
-Do this before step 8. Each attempt needs a writable root.
+Every line runs as `ditto-svc`, including the `ls`. `dmask=077` makes the mount
+`0700` owned by that account, so your login user cannot read it, and `user` in
+fstab lets anyone mount but only the mounting user unmount.
 
 ---
 
-## 8. Read-only root filesystem
+## 4. Read-only root filesystem
 
 Last, once everything above works.
 
@@ -300,8 +189,11 @@ Verify:
 ```bash
 mount | grep ' / '            # overlay
 df -h /var/lib/ditto          # must be /dev/mmcblk0p3, not an overlay
-touch /var/lib/ditto/x && echo ok && rm /var/lib/ditto/x
+sudo -u ditto-svc touch /var/lib/ditto/x && echo ok && sudo rm /var/lib/ditto/x
 ```
+
+Run the write test as `ditto-svc`. That is the account that has to write
+there, and your login user cannot.
 
 ### Changing anything afterwards
 
@@ -309,19 +201,25 @@ Application code lives on `/var/lib/ditto/app`, which stays writable, so
 updating is:
 
 ```bash
-cd /var/lib/ditto/src && git pull
-rm -rf /var/lib/ditto/app/ditto
-cp -r ditto /var/lib/ditto/app/
+sudo -u ditto-svc git -C /var/lib/ditto/src pull
+sudo -u ditto-svc rm -rf /var/lib/ditto/app/ditto
+sudo -u ditto-svc cp -r /var/lib/ditto/src/ditto /var/lib/ditto/app/
 sudo systemctl restart ditto-web
 ```
 
 The `rm` matters: without it, modules deleted upstream linger in the deployed
 copy.
 
-Or press **Update** in the web UI for the same result over the air — how it works
-is in [api.md](api.md#post-apiupdate). It needs the `ditto-restart.service`
-unit and sudoers rule that `install.sh` installs; if you provisioned before those
-existed, re-run `install.sh` once with the overlay disabled (below) to add them.
+Every step runs as `ditto-svc` because the data partition belongs to it. Run
+the `git pull` as yourself and git refuses with "detected dubious ownership".
+
+Or press **Update** in the web UI for the same result over the air. How that
+works is in [api.md](api.md#post-apiupdate).
+
+Either way, only the `ditto/` package moves. A release that also changes the
+systemd unit, the sudoers rules, the fstab entry or the ownership of
+`/var/lib/ditto` needs `install.sh` run again, and `install.sh` writes to
+`/etc`, so the overlay has to come off for that boot. See below.
 
 For changes under `/etc`:
 
@@ -329,8 +227,9 @@ For changes under `/etc`:
 sudo overlayroot-chroot        # writes land on the real root filesystem
 ```
 
-Or disable the overlay for a session. Note this edit has to happen inside the
-chroot, since editing the file normally writes to the discarded tmpfs layer:
+Or disable the overlay for a session. This edit has to happen inside the
+chroot: editing the file normally writes to the tmpfs layer, which is then
+discarded:
 
 ```bash
 sudo overlayroot-chroot
@@ -340,7 +239,7 @@ sudo reboot
 ```
 
 Re-enable it once you're done. The overlay is off now, so the root is writable
-and you edit `/etc/overlayroot.conf` directly — no chroot:
+and you edit `/etc/overlayroot.conf` directly, with no chroot:
 
 ```bash
 sudo sed -i 's/^overlayroot=.*/overlayroot="tmpfs:recurse=0"/' /etc/overlayroot.conf
@@ -349,20 +248,19 @@ sudo reboot
 
 ---
 
-## 9. Optional: measure write throughput
+## 5. Optional: measure write throughput
 
 Not needed. Useful if you want a number for your own card and cable.
 
-With the pedal mounted. The trailing `sync` is required or you measure the page
-cache:
+With the pedal mounted, and as `ditto-svc`, since the volume is owner-only.
+The trailing `sync` is required or you measure the page cache:
 
 ```bash
-time { dd if=/dev/zero of=/media/ditto/speed.bin bs=1M count=50; sync; }
-rm /media/ditto/speed.bin
+sudo -u ditto-svc sh -c 'time { dd if=/dev/zero of=/media/ditto/speed.bin bs=1M count=50; sync; }'
+sudo -u ditto-svc rm /media/ditto/speed.bin
 ```
 
-Expect roughly 1 MB/s. That figure is what sizes the loop-staging timeout in
-`config.LOOP_STAGE_TIMEOUT`.
+Expect roughly 1 MB/s. That is where `config.LOOP_STAGE_TIMEOUT` comes from.
 
 ---
 
@@ -370,13 +268,32 @@ Expect roughly 1 MB/s. That figure is what sizes the loop-staging timeout in
 
 - [ ] `dittobacktracker.local` resolves from your laptop
 - [ ] Pedal appears at `/dev/disk/by-label/DITTOPLUS` when connected
-- [ ] The `ditto` user can mount and unmount without `sudo`
+- [ ] `systemctl show ditto-web -p User` reports `ditto-svc`
+- [ ] `id ditto-svc` shows it is **not** in the `sudo` group
+- [ ] `ditto-svc` can mount and unmount the pedal without becoming root
+- [ ] Both scoped rules answer for `ditto-svc` (below)
+- [ ] **Done** in the web UI powers the device off
 - [ ] `systemctl status ditto-web` is active, with no restart loop
 - [ ] The web UI loads and shows the slot grid
 - [ ] A dropped MP3 converts and plays back from the pedal
 - [ ] Boot to SSH in under 15 s
 - [ ] `df -h /var/lib/ditto` shows `/dev/mmcblk0p3`, not an overlay
 - [ ] Ten hard power cuts leave no fsck and nothing corrupt on the pedal
+
+Check the two sudoers rules without firing either, by asking sudo whether it
+would allow them. Each prints the command back if the rule matches and fails if
+it does not:
+
+```bash
+sudo -u ditto-svc sudo -n -l /sbin/poweroff
+sudo -u ditto-svc sudo -n -l /usr/bin/systemctl start --no-block ditto-restart.service
+```
+
+Worth doing explicitly, because both fail quietly in use. A refused poweroff
+arrives after the page has already said it is safe to unplug, and a refused
+restart leaves the device serving the old code after reporting an update.
+Pressing **Done** tests the poweroff rule for real, so it makes a good last
+step.
 
 The `df` check is the one people miss. If the data partition is overlaid,
 everything works until the first reboot, then every upload is gone and nothing

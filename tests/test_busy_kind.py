@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 
+import conftest
 import pytest
 
 from ditto import config, core, pedal
@@ -71,7 +72,7 @@ def test_the_worker_clears_the_warning_when_the_job_ends(service, fake_pedal):
         time.sleep(0.05)
     assert not (fake_pedal / config.TRACK_FILENAME).exists(), "erase never ran"
 
-    service._drain(timeout=5.0)
+    conftest.drain(service)
     snap = service.snapshot()
     assert snap["busy_kind"] is None
     assert snap["busy"] is None
@@ -266,7 +267,7 @@ def test_the_update_gate_holds_a_job_that_arrives_after_it_closes(service):
     service._do_erase = lambda slot: ran.append(slot)
     # Let the boot sweep finish and the worker settle into its blocking get(),
     # which is the state that exposes the hole rather than hiding it.
-    service._drain(timeout=5.0)
+    conftest.drain(service)
     time.sleep(0.6)
 
     service.updater.admitted.set()
@@ -296,7 +297,7 @@ def test_the_worker_claims_in_flight_before_its_final_gate_check(service,
     the last gate check, which is what makes whichever side runs second see
     what the first did.
     """
-    service._drain(timeout=5.0)
+    conftest.drain(service)
     events = []
 
     real_gate_is_set = service.updater.admitted.is_set

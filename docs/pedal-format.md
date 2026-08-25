@@ -66,8 +66,8 @@ with a vendor block containing the string `tc electronic`:
 00000030: 726f 6e69 6300 0000 0000 0000 0000 0000  ronic...........
 ```
 
-ffmpeg emits `WAVE_FORMAT_EXTENSIBLE` instead — tag `0xFFFE`, 40-byte `fmt ` —
-for 24-bit audio.
+For 24-bit audio, ffmpeg emits `WAVE_FORMAT_EXTENSIBLE` instead: tag `0xFFFE`,
+40-byte `fmt `.
 
 The pedal plays ffmpeg's output anyway, so no header rewriting is needed. If
 that changes, copy the pedal's own 740-byte chunk verbatim; the format is fixed,
@@ -143,3 +143,56 @@ workaround is to generate four beats instead of one.
 
 **Flush before unplugging.** On FAT, a rename in particular doesn't reliably
 stick without an explicit `sync`.
+
+---
+
+## Other models
+
+Nothing in this section was measured. Everything above it was, on a Ditto+.
+This is secondhand from TC Electronic's manuals and owner reports, kept here
+for whoever has an X2 or an X4 in front of them, and worth confirming on the
+hardware before building anything on it.
+
+| | Ditto+ | Ditto X2 | Ditto X4 |
+|---|---|---|---|
+| Volume label | `DITTOPLUS` | `DITTO` | `DITTO` |
+| Backing tracks | `01track/` … `99track/` | one `TRACK/` folder | `TRACK1/`, `TRACK2/` |
+| Track file | `BT.WAV` | last file added wins | `TRACK.WAV` or `TRACK.AIF` |
+| How many | 99 | 1 | 2, one per LOOP control |
+
+The headline is not that a folder is named differently. **Neither model has
+slots.** The X2 holds one backing track and plays whichever file was added
+last; the X4 holds two, addressed by which LOOP control plays them. The 99-slot
+map, the library-to-slot assignment, filling a folder into a run of slots and
+dragging to reorder are all modelling something these pedals do not have. That
+is a second product sharing a converter, not a port.
+
+Built anyway, five things assume the Ditto+ layout:
+
+- `pedal.detect_format()` finds a file to probe by walking slots 1 to
+  `config.SLOTS` and stat-ing `SLOT_DIR.format(n)`. The audio format is read
+  from the pedal at mount time rather than hardcoded, but the *search* for
+  something to read is not layout-independent, so it has to be taught the new
+  layout before it can detect anything on one.
+- `db.slots.slot` is `INTEGER PRIMARY KEY`, and the move/swap parks a row at
+  `slot = -1` while it exchanges two others. Both assume one small integer
+  keyspace. A model whose tracks aren't identified by a number in that range
+  needs a schema change, not just new paths.
+- The slot map is ten columns wide because a row of ten is a decade and 99
+  slots divide into it. A different count wants a different arrangement, and
+  the column count lives in `app.js` and `app.css` with a test tying them.
+- `config.TRACK_FILENAME` and `config.LOOP_FILENAME` are one pair for the
+  build. The X4 reportedly accepts AIFF as well as WAV, and no source here says
+  what it names a loop it recorded itself. That matters, because not
+  destroying that file is the one hard rule here.
+- `config.PEDAL_LABEL` is one label per process, so a build serves one model.
+  Both other pedals report as `DITTO`, so they cannot be told apart by label
+  either. Telling an X2 from an X4 means reading what is on the volume.
+
+What is *not* in the way: the rest of the code already reads `config.SLOTS` and
+`config.SLOT_DIR` rather than spelling out 99, and clients read `slot_count`
+from the state snapshot. Slot count is not the hard part. The data model is.
+
+Sources: TC Electronic's Ditto X4 manual, on importing loops from a computer
+(`TRACK1`/`TRACK2`, holding `TRACK.WAV` and `TRACK.AIF`); and owner reports of
+the X2 presenting a `DITTO` volume with a single `TRACK` folder.

@@ -4,8 +4,8 @@ Everything the web UI does goes through this. There is no authentication.
 
 Base URL is the device, e.g. `http://dittobacktracker.local/`.
 
-Two things live here, and it's worth keeping them apart. The **library** is
-every track on the device — it survives slots being cleared, and only an
+Two things live here, and they are not the same. The **library** is
+every track on the device. It survives slots being cleared, and only an
 explicit delete removes one. **Slots** are what the pedal is carrying right now:
 99 assignments pointing at library tracks. A slot's `display_name` and
 `duration` are read from its library track, so renaming once changes it
@@ -27,7 +27,7 @@ Full snapshot. The same object is pushed over `/api/events`.
   "ending": false,
   "error": null,
   "ip": "192.168.1.42",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "revision": "a1b2c3d",
   "update_available": false,
   "remote_revision": null,
@@ -71,7 +71,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
 | `version` | Package version string |
 | `revision` | Short git commit of the deployed code, or `null` off a git checkout. Watch it change to confirm an update took |
-| `update_available` | `true` when the tracked remote branch's commit differs from the deployed commit (the device converges to the remote, so a rebased or force-pushed branch counts too, not only a strictly newer one). Checked once at startup and again on demand via `POST /api/update/check` — there is no background polling. `false` before the first check and when up to date. A check that can't run (offline, no checkout) leaves the last known value unchanged |
+| `update_available` | `true` when the tracked remote branch's commit differs from the deployed commit (the device converges to the remote, so a rebased or force-pushed branch counts too, not only a strictly newer one). Checked once at startup and again on demand via `POST /api/update/check`. There is no background polling. `false` before the first check and when up to date. A check that can't run (offline, no checkout) leaves the last known value unchanged |
 | `remote_revision` | Short git commit the remote is at, when `update_available`; else `null` |
 
 `capacity.used_seconds` is derived from the real bytes on the volume
@@ -106,7 +106,7 @@ Without `start`, a leading number in the filename picks the slot
 fill the lowest free slots. Slots holding a recorded `LOOP.WAV` are skipped
 during automatic assignment, though they can be targeted explicitly.
 
-With `start`, filename numbers are ignored — an explicit target wins. Files that
+With `start`, filename numbers are ignored: an explicit target wins. Files that
 would land past the last slot (`slot_count`) are reported as errors rather than
 placed elsewhere.
 
@@ -155,7 +155,7 @@ pedal on the next pass. A recorded `LOOP.WAV` in the same slot is left alone.
 Download the pedal-recorded loop in slot `n`. The worker copies `LOOP.WAV` off
 the pedal to a transient staging file on the Pi, the response streams that file
 as an attachment, and the staged copy is purged once the response completes.
-**Download never deletes** — the pedal keeps the original, so a failed or partial
+**Download never deletes.** The pedal keeps the original, so a failed or partial
 download costs nothing; just retry.
 
 ```bash
@@ -177,7 +177,7 @@ maximal ~477 MiB one over the ~1 MB/s USB link. It waits up to `LOOP_STAGE_TIMEO
 
 ## DELETE /api/loops/&lt;n&gt;
 
-Delete the loop in slot `n` from the pedal. Irreversible — a loop is a live take
+Delete the loop in slot `n` from the pedal. Irreversible, because a loop is a live take
 with no source and no undo. `BT.WAV` and the slot directory are never touched.
 
 ```json
@@ -215,7 +215,7 @@ The 50 most recent deletions, newest first.
     "duration": 311.0, "deleted": 1786070717.31 } ]
 ```
 
-Entries are kept 30 days. Expiry only retires the undo — the track itself
+Entries are kept 30 days. Expiry only retires the undo. The track itself
 stays in the library, and its audio with it.
 
 ---
@@ -223,7 +223,7 @@ stays in the library, and its audio with it.
 ## POST /api/trash/&lt;id&gt;/restore
 
 Put a deleted entry back in its original slot, reconverting if needed. Returns
-`{"slot": n}`, or `404` if the entry has gone — or if its track has since been
+`{"slot": n}`, or `404` if the entry has gone, or if its track has since been
 deleted from the library, leaving nothing to restore.
 
 ---
@@ -272,7 +272,7 @@ stream rotation.
 Add files to the library without assigning slots. Multipart, one or more `file`
 parts.
 
-`201` with per-file results, in the same shape as `POST /api/upload` — and with
+`201` with per-file results, in the same shape as `POST /api/upload`, and with
 the same caveat: it is a batch, so it returns `201` even when every file was
 rejected. Check `errors`; don't read `201` as "everything landed". A `400` means
 the whole request was unusable (no `file` part at all).
@@ -307,7 +307,7 @@ The folder is checked before anything is written, so a request naming a missing
 folder does not leave a rename applied.
 
 The new name appears in the slot list, the grid tooltips and the print view
-immediately — there is only one copy of it.
+immediately, because there is only one copy of it.
 
 ---
 
@@ -329,7 +329,7 @@ Add `?force` to clear those slots first. On success:
 { "ok": true, "cleared": [3, 7] }
 ```
 
-A `404` means there was no such track — but it can still have changed the
+A `404` means there was no such track. It can still have changed the
 device, so it carries `cleared` too. That happens when the library row had
 already gone (a concurrent delete, say) while slots still pointed at it: those
 slots are cleared regardless, and reporting an empty result would hide it.
@@ -449,14 +449,14 @@ at all for the first slot with room. Both methods answer with the same object:
 ```
 
 Tracks go in tree order into consecutive slots, skipping any slot that holds a
-loop — the same automatic-placement rule an unnumbered upload follows. `start`
+loop, the same automatic-placement rule an unnumbered upload follows. `start`
 and `end` are the first and last slot **actually written**, so they span those
 skips: nine tracks from 09 over one loop reads 09-18. Both are `null` when
 nothing was placed. Whatever was in a slot moves to the trash, as with a single
 assign.
 
 `201`, `404` if there is no such folder, `400` if `start` is not a slot number
-or is out of range. `start` may be a number or a numeric string — the page sends
+or is out of range. `start` may be a number or a numeric string, since the page sends
 what was typed rather than converting it, because a conversion turns junk into
 `null`, and `null` here means "wherever there is room" rather than "refuse
 this". `?start=` with nothing after it means the same as no
@@ -465,15 +465,15 @@ empty string in the JSON body is junk and is refused.
 
 **Read the body.** Like `POST /api/upload`, a `201` does not mean everything
 landed: `unplaced` names the tracks that ran out of pedal. Individual writes can
-still fail afterwards for capacity — a slot goes to `error` with
+still fail afterwards for capacity. A slot goes to `error` with
 `won't fit — over capacity by m:ss`, which arrives on the event stream, not
 here.
 
 **`loops_known: false` means the range is provisional.** The loop set is scanned
 at mount and emptied on unplug, so with no pedal connected the device cannot
-know which slots hold loops and cannot skip them. The harm is bounded — a
+know which slots hold loops and cannot skip them. The harm is bounded: a
 backing track lands under a loop, which is a slot the pedal plays together and
-not a recording destroyed — but the plan says so rather than letting a client
+not a recording destroyed. The plan says so rather than letting a client
 believe otherwise.
 
 This is one endpoint rather than N calls to `POST /api/slots/<n>/assign` for
@@ -492,7 +492,7 @@ again. Body `{"hash": "..."}`. Whatever was in the slot moves to the trash.
 the slot is out of range.
 
 The pedal holds about a dozen tracks and the library holds as many as the card
-does, so this — not another upload — is how you change what the pedal carries.
+does, so this is how you change what the pedal carries, not another upload.
 
 ---
 
@@ -503,9 +503,9 @@ a slot to it. Supports `Range`, so `<audio>` can seek; expect `206` for a range
 request and `416` for an unsatisfiable one.
 
 The URL is content-addressed, so the response is cacheable indefinitely. Nothing
-on the device plays audio — this is bytes to the browser.
+on the device plays audio. This is bytes to the browser.
 
-Note that `.ogg`, `.opus`, `.wma` and (in older browsers) `.flac` are accepted
+`.ogg`, `.opus`, `.wma` and (in older browsers) `.flac` are accepted
 for upload but not playable everywhere, Safari especially. That is a browser
 limitation; the file still converts and writes normally.
 
@@ -523,7 +523,7 @@ progress.
 
 Over-the-air self-update. Pulls the tracked branch, redeploys the app, and
 restarts the service. The restart runs out of process (a separate oneshot unit),
-so the browser's `EventSource` simply drops and reconnects; watch `revision` in
+so the browser's `EventSource` drops and reconnects; watch `revision` in
 the snapshot change to confirm the new code is running.
 
 ```json
@@ -532,20 +532,20 @@ the snapshot change to confirm the new code is running.
 
 Refused while the device is busy so a restart never interrupts a write. The
 device must have OTA set up (a git checkout at `/var/lib/ditto/src` and the
-restart sudoers rule) — see the README.
+restart sudoers rule). See the README.
 
 | Status | Meaning |
 |---|---|
 | `200` | Update deployed; the service is restarting |
-| `409` | Busy (work is in flight or queued, or an update is already running) — retry when idle |
+| `409` | Busy (work is in flight or queued, or an update is already running). Retry when idle |
 | `502` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
-| `503` | The device is shutting down — try again after it comes back up |
+| `503` | The device is shutting down. Try again after it comes back up |
 
 ---
 
 ## POST /api/update/check
 
-Check the remote for a newer version, on demand — the manual counterpart to the
+Check the remote for a newer version, on demand. This is the manual counterpart to the
 startup check, since the device does no background polling. Fetches the tracked
 branch and re-derives `update_available`; if it changed, the new state is also
 pushed over `/api/events`.
@@ -559,7 +559,7 @@ Always `200`. `ok` is `false` with an `error` string when the check couldn't run
 
 | Field | Meaning |
 |---|---|
-| `ok` | `false` when the check couldn't run — `error` says why: no deployment (not a git checkout), `couldn't reach the remote` or `couldn't read the remote branch` (offline or bad remote), or an update is already running |
+| `ok` | `false` when the check couldn't run. `error` says why: no deployment (not a git checkout), `couldn't reach the remote` or `couldn't read the remote branch` (offline or bad remote), or an update is already running |
 | `update_available` / `remote_revision` | Same meaning as in the state snapshot |
 
 Blocks briefly on the `git fetch` (seconds). State-changing, so the same
@@ -580,7 +580,7 @@ and reconnect.
 Frames may be **coalesced, never reordered**. Each frame is the whole state, so
 a consumer that falls behind has its backlog discarded and receives the newest
 snapshot rather than a queue of stale ones. Every frame carries a `seq`, and the
-stream only ever sends a frame whose `seq` is higher than the last one it sent —
+stream only ever sends a frame whose `seq` is higher than the last one it sent,
 including the very first, which can otherwise race frames queued while the
 stream was being set up. Don't treat the stream as a change log; treat each
 frame as the current truth.
@@ -597,26 +597,26 @@ curl -N http://dittobacktracker.local/api/events
 |---|---|---|
 | `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `PATCH /api/library/<hash>` | Bad input: slot out of range, non-audio file, a file ffprobe can't read, or an empty/overlong name. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
-| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign` | No such trash entry; the slot has no loop; or no such track in the library — which is also what a malformed hash returns, since it cannot name one |
+| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign` | No such trash entry; the slot has no loop; or no such track in the library, which is also what a malformed hash returns, since it cannot name one |
 | `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
-| `500` | `GET /api/loops/<n>`, `POST /api/slots/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error); or the upload could not be stored — a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
+| `500` | `GET /api/loops/<n>`, `POST /api/slots/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error); or the upload could not be stored: a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
 | `503` | `GET /api/loops/<n>` | No pedal mounted, or loop staging exceeded its time limit. Body is `{"error": "..."}` |
 | `503` | `POST /api/update`, `POST /api/slots/<n>` | The device is shutting down and is no longer accepting work. Body is `{"error": "..."}` |
-| `503` | `POST /api/upload`, `POST /api/library` | The device began shutting down part-way through the batch. Body is the usual `{"added": [...], "errors": [...]}` carrying whatever landed before that, **not** an `error` string — the files in `added` are committed and queued |
+| `503` | `POST /api/upload`, `POST /api/library` | The device began shutting down part-way through the batch. Body is the usual `{"added": [...], "errors": [...]}` carrying whatever landed before that, **not** an `error` string. The files in `added` are committed and queued |
 
 `POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both
-are batches, so they return `201` even when some — or all — files were rejected,
+are batches, so they return `201` even when some or all files were rejected,
 and report those per file in `errors`. A `400` from either means the whole
 request was unusable (no `file` part at all, or a `start` outside
 1–`slot_count`). Check `errors` on a `201`; don't treat `201` as "everything
 landed".
 
-A batch also reports per file when the device could not *store* a file — a full
-card, or bytes it could not confirm — rather than failing the whole request, so
+A batch also reports per file when the device could not *store* a file, a full
+card or bytes it could not confirm, rather than failing the whole request, so
 the files that did land are never silently lost. The one case that stops a batch
 early is the device beginning to shut down: that returns `503`, and the body
 still carries the `added` and `errors` accumulated so far.
