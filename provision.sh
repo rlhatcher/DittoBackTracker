@@ -18,11 +18,17 @@ DATA_PART=3
 # it needs and never grows again. The data partition takes everything else,
 # because that is the half that fills up: it holds the library.
 #
-# A fresh Trixie Lite root uses 1.7 GB of its 2.3 GB, leaving about 370 MB,
-# which is why step 3 ran out of disk. ffmpeg and its dependency stack are a
-# few hundred MB more. 4 GB covers that with room to spare, and leaves 3.5 GB
-# for data on the smallest card this supports.
-ROOT_SIZE=4GB
+# Measured on a device, not estimated. A fresh Trixie Lite root uses 1.7 GB of
+# its 2.3 GB, which is the 370 MB that ran out. After the packages below it
+# uses 2.6 GB, so ffmpeg and its dependencies cost about 900 MB.
+#
+# This is where the data partition starts, so the root gets it minus the boot
+# partition, minus ext4 overhead: 5 GB here yields a 4.2 GB filesystem and
+# leaves about 1.6 GB free. 4 GB was tried first and left the root at 86%,
+# which is too close for a partition that is about to be locked read-only.
+# Going further starts costing the library: on the smallest supported card,
+# every GB here is a GB the data partition does not get.
+ROOT_SIZE=5GB
 # Refuse rather than make a data partition too small to be useful. Below this
 # there is no point continuing: the library is the reason for the partition.
 DATA_MIN_GB=1
