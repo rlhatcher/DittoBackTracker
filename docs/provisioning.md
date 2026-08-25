@@ -1,15 +1,8 @@
 # Provisioning the Pi
 
-Setting up a Raspberry Pi Zero 2 W to run DittoBackTracker. About an hour, most
-of it waiting on `apt`.
-
-Two things here are unusual: a **separate data partition** and a **read-only
-root filesystem**. The device has no battery, so it can lose power the moment
-the plug comes out — nothing may be written to the OS card during normal
-operation.
-
 End state: a Zero 2 W on WiFi at `dittobacktracker.local`, read-only root, and
-the pedal mountable by an unprivileged service.
+the pedal mountable by an unprivileged service. The [checklist](#checklist)
+verifies it.
 
 ---
 
