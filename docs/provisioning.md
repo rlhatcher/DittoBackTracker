@@ -243,10 +243,14 @@ Stop the service first, or it will be holding the pedal already.
 ```bash
 sudo systemctl stop ditto-web
 sudo -u ditto-svc mount /media/ditto
-ls /media/ditto          # 01track/ … 99track/
+sudo -u ditto-svc ls /media/ditto      # 01track/ … 99track/
 sudo -u ditto-svc umount /media/ditto
 sudo systemctl start ditto-web
 ```
+
+Every line is `ditto-svc`, including the `ls`. `dmask=077` makes the mounted
+directory `0700` owned by that account, so your login user cannot read it —
+which is the masks working, not a mistake.
 
 Do this before enabling the overlay in step 8. `install.sh` writes to `/etc`,
 and those changes are discarded once the root filesystem is read-only.
@@ -383,12 +387,13 @@ sudo reboot
 
 Not needed. Useful if you want a number for your own card and cable.
 
-With the pedal mounted. The trailing `sync` is required or you measure the page
-cache:
+With the pedal mounted, as `ditto-svc` — the volume is owner-only, so your
+login user cannot write to it. The trailing `sync` is required or you measure
+the page cache:
 
 ```bash
-time { dd if=/dev/zero of=/media/ditto/speed.bin bs=1M count=50; sync; }
-rm /media/ditto/speed.bin
+sudo -u ditto-svc sh -c 'time { dd if=/dev/zero of=/media/ditto/speed.bin bs=1M count=50; sync; }'
+sudo -u ditto-svc rm /media/ditto/speed.bin
 ```
 
 Expect roughly 1 MB/s. That figure is what sizes the loop-staging timeout in
@@ -400,14 +405,31 @@ Expect roughly 1 MB/s. That figure is what sizes the loop-staging timeout in
 
 - [ ] `dittobacktracker.local` resolves from your laptop
 - [ ] Pedal appears at `/dev/disk/by-label/DITTOPLUS` when connected
+- [ ] `systemctl show ditto-web -p User` reports `ditto-svc`
 - [ ] `id ditto-svc` shows it is **not** in the `sudo` group
-- [ ] `ditto-svc` can mount and unmount the pedal without `sudo`
+- [ ] `ditto-svc` can mount and unmount the pedal without becoming root
+- [ ] Both scoped rules answer for `ditto-svc` (below)
+- [ ] **Done** in the web UI powers the device off
 - [ ] `systemctl status ditto-web` is active, with no restart loop
 - [ ] The web UI loads and shows the slot grid
 - [ ] A dropped MP3 converts and plays back from the pedal
 - [ ] Boot to SSH in under 15 s
 - [ ] `df -h /var/lib/ditto` shows `/dev/mmcblk0p3`, not an overlay
 - [ ] Ten hard power cuts leave no fsck and nothing corrupt on the pedal
+
+Check the two sudoers rules without firing either, by asking sudo whether it
+would allow them. Each prints the command back if the rule matches and fails if
+it does not:
+
+```bash
+sudo -u ditto-svc sudo -n -l /sbin/poweroff
+sudo -u ditto-svc sudo -n -l /usr/bin/systemctl start --no-block ditto-restart.service
+```
+
+Worth doing explicitly, because both fail quietly in use. A refused poweroff
+arrives after the page has already said it is safe to unplug, and a refused
+restart leaves the device serving the old code after reporting an update.
+**Done** is the end-to-end version of the first and a good last step.
 
 The `df` check is the one people miss. If the data partition is overlaid,
 everything works until the first reboot, then every upload is gone and nothing
