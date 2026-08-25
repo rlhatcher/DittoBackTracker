@@ -27,8 +27,8 @@ Imager ejects the card when it finishes. Reinsert it and edit `cmdline.txt` on
 the `bootfs` partition before the first boot. On macOS that file is at
 `/Volumes/bootfs/cmdline.txt`. On Linux, mount the partition first.
 
-Read the file before editing: the token varies by image version. Recent
-cloud-init images use a bare `resize`. Delete that and nothing else:
+Read the file before editing: the two supported images do this differently.
+Trixie carries a bare `resize` token. Delete that and nothing else:
 
 ```text
 console=serial0,115200 console=tty1 root=PARTUUID=... rootfstype=ext4
@@ -38,10 +38,11 @@ fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=GB ds=nocloud;i=rpi-im
 
 Keep it as one line.
 
-Some images resize through `init=/usr/lib/raspberrypi-sys-mods/firstboot`
-instead. If yours has that and no bare `resize`, don't edit `cmdline.txt` at
-all. Either create the third partition on the card before first boot, or let
-the root expand and use the `growpart` override below.
+Bookworm has no bare `resize`. It resizes through
+`init=/usr/lib/raspberrypi-sys-mods/firstboot`, and that same entry is what
+applies your Imager settings. Leave `cmdline.txt` alone on Bookworm and create
+the third partition on the card before the first boot instead. The `growpart`
+override below is cloud-init, so it does not apply there.
 
 Check after first boot:
 
