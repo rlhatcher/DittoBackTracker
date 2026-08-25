@@ -10,6 +10,16 @@ long as anyone kept reading those.
 config → {media, db, update} → pedal → core → web
 ```
 
+| Module | Owns |
+|---|---|
+| `config.py` | Paths and constants |
+| `db.py` | SQLite storage |
+| `media.py` | ffprobe and ffmpeg |
+| `pedal.py` | Detect, mount, write `BT.WAV`, unmount |
+| `update.py` | Over-the-air self-update: git, systemd |
+| `core.py` | Session lifecycle and work queue |
+| `web.py` | Flask routes and server-sent events |
+
 Acyclic, and it stays that way. New code goes in the layer that owns the
 resource: SQL in `db.py` and nowhere else, subprocess calls to ffmpeg in
 `media.py`, mount and unmount in `pedal.py`.
