@@ -38,14 +38,10 @@ fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=GB ds=nocloud;i=rpi-im
 
 Keep it as one line.
 
-The line may also carry `init=/usr/lib/raspberrypi-sys-mods/firstboot`, which
-applies the hostname, user, WiFi and SSH you set in Imager. **Leave that
-alone.**
-
-On an image that resizes through that entry rather than a bare `resize` token,
-don't edit `cmdline.txt` at all. Either create the third partition on the card
-before first boot, or let the root expand and use the `growpart` override
-below.
+Some images resize through `init=/usr/lib/raspberrypi-sys-mods/firstboot`
+instead. If yours has that and no bare `resize`, don't edit `cmdline.txt` at
+all. Either create the third partition on the card before first boot, or let
+the root expand and use the `growpart` override below.
 
 Check after first boot:
 
