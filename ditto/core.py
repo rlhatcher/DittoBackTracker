@@ -178,8 +178,8 @@ class Service:
             raise ValueError("not a readable audio file")
         h = media.file_hash(tmp_path)
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
-        inserted = db.library_add(h, display_name, info.duration)
-        self._place_source(h, tmp_path, stored, inserted)
+        self._place_source(tmp_path, stored)
+        db.library_add(h, display_name, info.duration)
         return h
 
     def assign(self, slot: int, source_hash: str) -> Optional[Dict]:
@@ -391,19 +391,14 @@ class Service:
 
     # -------------------------------------------------------------- internals
 
-    def _place_source(self, h: str, tmp_path: Path, stored: Path,
-                      inserted: bool) -> None:
-        """Get the bytes into sources/. A storage failure takes the library row
-        with it, if this call created it, so a row never outlives its audio."""
+    def _place_source(self, tmp_path: Path, stored: Path) -> None:
+        """Get the bytes into sources/ before any row names them. A file with
+        no row is swept at boot; a row with no file is an error the user has
+        to clear by hand."""
         if stored.exists():
             tmp_path.unlink(missing_ok=True)
             return
-        try:
-            self._store_source(tmp_path, stored)
-        except Exception:
-            if inserted:
-                db.library_delete(h)
-            raise
+        self._store_source(tmp_path, stored)
 
     @staticmethod
     def _store_source(tmp_path: Path, stored: Path) -> None:

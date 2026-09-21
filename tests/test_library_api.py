@@ -455,10 +455,10 @@ def test_upload_holds_the_lock_over_the_whole_mutation(app, monkeypatch,
     held = []
     real_place = core.Service._place_source
 
-    def watch(self, h, tmp, stored, inserted):
+    def watch(self, tmp, stored):
         # An RLock; if it is held, this thread already owns it.
         held.append(svc._lock._is_owned())
-        return real_place(self, h, tmp, stored, inserted)
+        return real_place(self, tmp, stored)
 
     monkeypatch.setattr(core.Service, "_place_source", watch)
     svc.upload(5, src, "Track")

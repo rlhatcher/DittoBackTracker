@@ -74,6 +74,30 @@ def _boot():
     svc.shutdown(timeout=2.0)
 
 
+def test_the_source_is_on_disk_before_its_library_row_exists(service,
+                                                             monkeypatch,
+                                                             tmp_path):
+    """Commit order. A file with no row is swept at boot; a row with no file
+    is an error slot the user has to clear, so the file lands first."""
+    src = tmp_path / "upload.mp3"
+    src.write_bytes(b"pretend audio")
+    h = "cccccccccccccccccccc"
+    monkeypatch.setattr(core.media, "probe",
+                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
+    monkeypatch.setattr(core.media, "file_hash", lambda p: h)
+    on_disk = []
+    real_add = core.db.library_add
+
+    def spy(*args):
+        on_disk.append(service.source_for(h) is not None)
+        return real_add(*args)
+
+    monkeypatch.setattr(core.db, "library_add", spy)
+    service.add_to_library(src, "Track")
+
+    assert on_disk == [True], "the row was committed before its bytes landed"
+
+
 def test_a_loop_delete_does_not_wait_for_a_running_job(service):
     """The worker holds the job lock for a whole write, minutes for a long
     track. A request thread that queues behind it looks like a hung page."""
