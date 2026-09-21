@@ -11,7 +11,6 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import NamedTuple, Optional
 
 from flask import (
     Flask,
@@ -106,33 +105,10 @@ def _is_audio(name: str) -> bool:
     return Path(name).suffix.lower() in config.AUDIO_SUFFIXES
 
 
-def _start_slot(raw) -> Optional[int]:
-    """The optional start slot on a batch assign. Absent means "wherever there
-    is room"; a value the caller got wrong is refused, not treated as absent."""
-    if raw is None:
-        return None
-    if isinstance(raw, bool):          # bool is an int subclass
-        raise ApiError(400, "start must be a slot number")
-    if isinstance(raw, int):
-        return raw
-    if isinstance(raw, str):
-        try:
-            return int(raw)
-        except ValueError:
-            raise ApiError(400, "start must be a slot number") from None
-    raise ApiError(400, "start must be a slot number")
-
-
-class IngestError(NamedTuple):
-    """Why one file could not be taken: a file ffprobe cannot read is the
-    client's problem (400), a card that will not take the bytes is ours (500)."""
-    message: str
-    status: int
-
-
 def _ingest(f, name: str, store):
     """Save an upload to a temp file and hand it to `store`, which then owns
-    the path. Returns (row, IngestError|None)."""
+    the path. Returns (row, None), or (None, why not): a file ffprobe cannot
+    read, or a card that would not take the bytes."""
     fd, tmp = tempfile.mkstemp(dir=str(config.DATA),
                                suffix=Path(name).suffix.lower())
     os.close(fd)
@@ -142,11 +118,11 @@ def _ingest(f, name: str, store):
         return (store(tmp_path, Path(name).stem), None)
     except ValueError as e:
         tmp_path.unlink(missing_ok=True)
-        return (None, IngestError(str(e), 400))
+        return (None, str(e))
     except OSError as e:
         tmp_path.unlink(missing_ok=True)
         log.warning("could not store %s: %s", name, e)
-        return (None, IngestError(f"could not be saved: {e}", 500))
+        return (None, f"could not be saved: {e}")
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -195,83 +171,49 @@ def create_app(service: Service) -> Flask:
     def state():
         return jsonify(service.snapshot())
 
-    @app.post("/api/slots/<int:slot>")
-    def upload(slot: int):
-        if "file" not in request.files:
-            return jsonify(error="no file"), 400
-        f = request.files["file"]
-        name = f.filename or "track"
-        if not _is_audio(name):
-            return jsonify(error=f"{Path(name).suffix} is not an audio file"), 400
-        row, err = _ingest(f, name, lambda p, stem: service.upload(slot, p, stem))
-        if err:
-            return jsonify(error=err.message), err.status
-        return jsonify(row), 201
-
     @app.post("/api/upload")
     def upload_auto():
-        """Multi-file drop. With `start`, consecutive slots from there.
-        Without it, a leading number in the name picks the slot and the rest
-        take the lowest free ones."""
-        files = request.files.getlist("file")
+        """Multi-file drop. A leading number in the name picks the slot; the
+        rest take the lowest free ones."""
+        files = [(f, f.filename or "track") for f in request.files.getlist("file")]
         if not files:
             return jsonify(error="no files"), 400
-        start = request.form.get("start", type=int)
-        if start is not None and not (1 <= start <= config.SLOTS):
-            return jsonify(error=f"start must be 1-{config.SLOTS}"), 400
+        errors = [{"name": name, "error": "not an audio file"}
+                  for f, name in files if not _is_audio(name)]
+        audio = [(f, name) for f, name in files if _is_audio(name)]
 
-        # A slot holding a loop counts as taken for automatic placement, so a
-        # backing track never lands under a recording by accident.
+        # A slot holding a loop counts as taken, so a backing track never lands
+        # under a recording by accident. Numbered files claim their slots
+        # before any unnumbered one is placed.
         reserved = {s["slot"] for s in db.all_slots()}
         if service.mounted:
             reserved |= {n for n in range(1, config.SLOTS + 1)
                          if service.has_loop(n)}
-        results, errors = [], []
-        # Numbered files claim their slots first, so an unnumbered file earlier
-        # in the batch cannot take a number a later one asked for.
-        planned = []
-        if start is not None:
-            for i, f in enumerate(files):
-                n = start + i
-                name = f.filename or "track"
-                if n > config.SLOTS:
-                    errors.append({"name": name,
-                                   "error": f"no room past slot {config.SLOTS}"})
-                else:
-                    planned.append((n, f, name))
-        else:
-            for f in files:
-                name = f.filename or "track"
-                n = slot_from_name(name) if _is_audio(name) else None
-                if n is not None and n not in reserved:
-                    reserved.add(n)
-                    planned.append((n, f, name))
-                else:
-                    planned.append((None, f, name))
+        slots = []
+        for _, name in audio:
+            n = slot_from_name(name)
+            if n is not None and n not in reserved:
+                reserved.add(n)
+                slots.append(n)
+            else:
+                slots.append(None)
 
-        def next_free():
-            for i in range(1, config.SLOTS + 1):
-                if i not in reserved:
-                    reserved.add(i)
-                    return i
-            return None
-
-        for n, f, name in planned:
-            if not _is_audio(name):
-                errors.append({"name": name, "error": "not an audio file"})
-                continue
+        added = []
+        for (f, name), n in zip(audio, slots, strict=True):
             if n is None:
-                n = next_free()
-            if n is None:
-                errors.append({"name": name, "error": "no free slots"})
-                continue
+                n = next((i for i in range(1, config.SLOTS + 1)
+                          if i not in reserved), None)
+                if n is None:
+                    errors.append({"name": name, "error": "no free slots"})
+                    continue
+                reserved.add(n)
             row, err = _ingest(f, name,
                                lambda p, stem, n=n: service.upload(n, p, stem))
             if err:
-                errors.append({"name": name, "error": err.message})
+                errors.append({"name": name, "error": err})
             else:
-                results.append(row)
-        return jsonify(added=results, errors=errors), 201
+                added.append(row)
+        return jsonify(added=added, errors=errors), 201
 
     @app.delete("/api/slots/<int:slot>")
     def clear(slot: int):
@@ -330,7 +272,7 @@ def create_app(service: Service) -> Flask:
                 continue
             row, err = _ingest(f, name, service.add_to_library)
             if err:
-                errors.append({"name": name, "error": err.message})
+                errors.append({"name": name, "error": err})
             else:
                 added.append(row)
         return jsonify(added=added, errors=errors), 201
@@ -385,11 +327,7 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="hashes must be a list of library hashes"), 400
         for h in hashes:
             _require_hash(h)
-        start = _start_slot(body.get("start"))
-        try:
-            plan = service.assign_tracks(hashes, start)
-        except ValueError as e:
-            return jsonify(error=str(e)), 400
+        plan = service.assign_tracks(hashes)
         if plan is None:
             return jsonify(error="not found"), 404
         return jsonify(plan), 201
@@ -412,14 +350,6 @@ def create_app(service: Service) -> Flask:
         try:
             service.move(slot, int(body.get("to", 0)))
         except (TypeError, ValueError) as e:
-            return jsonify(error=str(e)), 400
-        return jsonify(ok=True)
-
-    @app.post("/api/slots/<int:slot>/retry")
-    def retry(slot: int):
-        try:
-            service.retry(slot)
-        except ValueError as e:
             return jsonify(error=str(e)), 400
         return jsonify(ok=True)
 

@@ -136,16 +136,6 @@ def conn() -> sqlite3.Connection:
     return c
 
 
-def _row_to_dict(r: sqlite3.Row) -> Dict:
-    d = dict(r)
-    # `synced` is derived, never trusted from a stored flag.
-    if d.get("state") == "staged" and d.get("synced_hash") == d.get("source_hash"):
-        d["state"] = "synced"
-    elif d.get("state") == "synced" and d.get("synced_hash") != d.get("source_hash"):
-        d["state"] = "staged"
-    return d
-
-
 # LEFT join: a slot whose library row has gone still shows, as a visible
 # problem the user can clear, rather than vanishing.
 _SLOT_SELECT = """
@@ -156,13 +146,12 @@ _SLOT_SELECT = """
 
 
 def all_slots() -> List[Dict]:
-    return [_row_to_dict(r) for r in
-            conn().execute(_SLOT_SELECT + " ORDER BY s.slot")]
+    return [dict(r) for r in conn().execute(_SLOT_SELECT + " ORDER BY s.slot")]
 
 
 def get_slot(slot: int) -> Optional[Dict]:
     r = conn().execute(_SLOT_SELECT + " WHERE s.slot=?", (slot,)).fetchone()
-    return _row_to_dict(r) if r else None
+    return dict(r) if r else None
 
 
 def slots_for_hash(source_hash: str) -> List[int]:

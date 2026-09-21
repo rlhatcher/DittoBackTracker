@@ -548,29 +548,6 @@ def test_a_batch_reports_the_files_that_landed_when_one_cannot_be_stored(
     assert "could not be saved" in body["errors"][0]["error"]
 
 
-def test_a_single_upload_that_cannot_be_stored_is_a_500_not_a_400(
-        app, client, monkeypatch):
-    """A card that will not take the bytes is our failure, not the client's."""
-    monkeypatch.setattr(core.media, "probe",
-                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
-    monkeypatch.setattr(core.media, "file_hash", lambda p: H1)
-    monkeypatch.setattr(core.Service, "_store_source", staticmethod(
-        lambda t, s: (_ for _ in ()).throw(OSError("no space left on device"))))
-
-    rv = client.post("/api/slots/4", content_type="multipart/form-data",
-                     data={"file": _audio()})
-
-    assert rv.status_code == 500
-    assert "could not be saved" in rv.get_json()["error"]
-
-
-def test_a_single_upload_of_a_bad_file_is_still_a_400(app, client, monkeypatch):
-    monkeypatch.setattr(core.media, "probe", lambda p: None)
-    rv = client.post("/api/slots/4", content_type="multipart/form-data",
-                     data={"file": _audio()})
-    assert rv.status_code == 400
-
-
 # --- batch assign -----------------------------------------------------------
 
 def seeds(*names):
@@ -590,18 +567,18 @@ def seeds(*names):
 def test_a_batch_fills_consecutive_slots_in_the_order_given(client):
     hashes = seeds("Autumn Leaves", "Blue Bossa", "Ceora")
 
-    rv = client.post("/api/slots/assign", json={"hashes": hashes, "start": 9})
+    rv = client.post("/api/slots/assign", json={"hashes": hashes})
 
     assert rv.status_code == 201
     body = rv.get_json()
-    assert (body["start"], body["end"]) == (9, 11)
+    assert (body["start"], body["end"]) == (1, 3)
     assert [a["name"] for a in body["assigned"]] == \
         ["Autumn Leaves", "Blue Bossa", "Ceora"]
-    assert [db.get_slot(n)["display_name"] for n in (9, 10, 11)] == \
+    assert [db.get_slot(n)["display_name"] for n in (1, 2, 3)] == \
         ["Autumn Leaves", "Blue Bossa", "Ceora"]
 
 
-def test_a_batch_with_no_start_takes_the_first_slot_with_room(client):
+def test_a_batch_takes_the_first_slot_with_room(client):
     hashes = seeds("Autumn Leaves", "Blue Bossa")
     seed(H1)
     client.post("/api/slots/1/assign", json={"hash": H1})
@@ -616,17 +593,16 @@ def test_a_batch_skips_the_devices_own_loop_slots(client, service):
     working from a snapshot that can be fifteen seconds old would lose a replug
     race, so the skip happens here, under the lock that queues the work."""
     service.pedal_state = "mounted"
-    service._loops = frozenset({10})
+    service._loops = frozenset({2})
     hashes = seeds("Autumn Leaves", "Blue Bossa")
 
-    body = client.post("/api/slots/assign",
-                       json={"hashes": hashes, "start": 9}).get_json()
+    body = client.post("/api/slots/assign", json={"hashes": hashes}).get_json()
 
-    assert [a["slot"] for a in body["assigned"]] == [9, 11]
-    assert body["skipped_loops"] == [10]
-    assert (body["start"], body["end"]) == (9, 11), "the range spans the skip"
+    assert [a["slot"] for a in body["assigned"]] == [1, 3]
+    assert body["skipped_loops"] == [2]
+    assert (body["start"], body["end"]) == (1, 3), "the range spans the skip"
     assert body["loops_known"] is True
-    assert db.get_slot(10) is None, "wrote over a loop slot"
+    assert db.get_slot(2) is None, "wrote over a loop slot"
 
 
 def test_a_batch_cannot_skip_loops_while_the_pedal_is_absent(client, service):
@@ -635,8 +611,7 @@ def test_a_batch_cannot_skip_loops_while_the_pedal_is_absent(client, service):
     assert service.pedal_state == "absent"
     hashes = seeds("Autumn Leaves")
 
-    body = client.post("/api/slots/assign",
-                       json={"hashes": hashes, "start": 9}).get_json()
+    body = client.post("/api/slots/assign", json={"hashes": hashes}).get_json()
 
     assert body["loops_known"] is False
     assert body["skipped_loops"] == []
@@ -645,10 +620,11 @@ def test_a_batch_cannot_skip_loops_while_the_pedal_is_absent(client, service):
 def test_a_batch_reports_the_tracks_that_did_not_fit(client):
     """Silent truncation would put two tracks on the pedal and lose one."""
     hashes = seeds("Autumn Leaves", "Blue Bossa", "Ceora")
+    seed(H1)
+    for n in range(1, config.SLOTS - 1):
+        db.put_slot(n, H1, state="synced")
 
-    body = client.post("/api/slots/assign",
-                       json={"hashes": hashes,
-                             "start": config.SLOTS - 1}).get_json()
+    body = client.post("/api/slots/assign", json={"hashes": hashes}).get_json()
 
     assert [a["slot"] for a in body["assigned"]] == \
         [config.SLOTS - 1, config.SLOTS]
@@ -683,17 +659,6 @@ def test_a_malformed_hash_in_a_batch_is_404_not_a_glob(client):
     assert rv.status_code == 404
 
 
-@pytest.mark.parametrize("start", ["abc", "", True, 0, 200, -1])
-def test_a_batch_start_that_is_not_a_slot_number_is_400(client, start):
-    hashes = seeds("Autumn Leaves")
-
-    rv = client.post("/api/slots/assign",
-                     json={"hashes": hashes, "start": start})
-
-    assert rv.status_code == 400, f"{start!r} was accepted"
-    assert db.all_slots() == []
-
-
 def test_a_batch_emits_one_snapshot_for_the_whole_fill(client, service,
                                                        monkeypatch):
     """Three emits would each rebuild a full snapshot and broadcast 99 slots to
@@ -710,7 +675,7 @@ def test_a_batch_emits_one_snapshot_for_the_whole_fill(client, service,
         real()
 
     monkeypatch.setattr(service, "_emit", counting)
-    client.post("/api/slots/assign", json={"hashes": hashes, "start": 9})
+    client.post("/api/slots/assign", json={"hashes": hashes})
 
     assert len(emits) == 1, f"{len(emits)} snapshots for one fill"
 

@@ -93,10 +93,6 @@
     --space-4: 16px;
     --space-6: 24px;
     --space-8: 32px;
-
-    --radius-sm: 0;
-    --radius-md: 0;
-    --radius-lg: 0;
   }
 
   /* The ramps are roles, not brightnesses, so reversing them is the whole of
@@ -246,7 +242,7 @@
   /* Secondary. */
   .libbtn, .loopbtn, button.undo {
     background: none; border: var(--rule-minor) solid var(--rule);
-    color: var(--color-text); border-radius: var(--radius-md);
+    color: var(--color-text);
     font: inherit; font-size: var(--text-small); line-height: 1.5;
     padding: 3px var(--space-2); cursor: pointer; flex: none;
     text-decoration: none; display: inline-block; white-space: nowrap;
@@ -257,7 +253,6 @@
   .libbtn:active, .loopbtn:active, button.undo:active {
     background: color-mix(in srgb, var(--color-text) 14%, transparent);
   }
-  .libbtn:disabled { opacity: 0.45; cursor: default; background: none; }
   .libbtn.danger:hover, .loopbtn.danger:hover { color: var(--text-danger); }
   .libbtn.playing { border-color: var(--color-accent); color: var(--accent-legible); }
 
@@ -272,7 +267,7 @@
   #libq, #libsort, input.libedit {
     background: var(--color-surface); color: var(--color-text);
     caret-color: var(--color-accent);
-    border: var(--rule-minor) solid var(--rule); border-radius: var(--radius-md);
+    border: var(--rule-minor) solid var(--rule);
     font: inherit; font-size: var(--text-control);
     padding: 7px 10px; -webkit-appearance: none; appearance: none;
   }
@@ -309,7 +304,7 @@
   .num {
     font: var(--text-label) var(--font-mono); font-weight: var(--font-heading-weight);
     background: var(--color-text); color: var(--color-bg);
-    border-radius: var(--radius-sm); padding: 3px 6px;
+    padding: 3px 6px;
     flex: none; line-height: 1.2; white-space: nowrap;
   }
   /* The slot a track sits in, and the way to move it. */
@@ -318,7 +313,7 @@
     font: var(--text-small) var(--font-mono); font-weight: var(--font-heading-weight);
     color: var(--color-text); caret-color: var(--color-accent);
     background: var(--color-surface);
-    border: var(--rule-minor) solid var(--color-text); border-radius: var(--radius-sm);
+    border: var(--rule-minor) solid var(--color-text);
     -webkit-appearance: none; appearance: none;
   }
   .slotfield:focus-visible { border-color: var(--color-accent); outline-offset: 0; }

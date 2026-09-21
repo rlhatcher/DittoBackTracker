@@ -16,7 +16,7 @@ from .update import Updater
 
 log = logging.getLogger(__name__)
 
-_STOP = ("stop",)       # queued by shutdown() to wake the worker's get()
+_STOP = ("stop",)       # queued by shutdown() to wake the worker's get() at once
 
 
 def mmss(seconds: float) -> str:
@@ -104,8 +104,8 @@ class Service:
 
     # ---------------------------------------------------------------- state
 
-    def capacity(self) -> Dict:
-        """Free and used time on the pedal. Mounted, from the bytes on the
+    def capacity(self, slots: Optional[List[Dict]] = None) -> Dict:
+        """Used and total time on the pedal. Mounted, from the bytes on the
         volume, so loops count; unmounted, from the assigned durations."""
         free, total = pedal.capacity()
         rate = config.BYTES_PER_SECOND
@@ -113,11 +113,11 @@ class Service:
             used_secs = (total - free) / rate
             total_secs = total / rate
         else:
-            used_secs = sum(s["duration"] for s in db.all_slots())
+            if slots is None:
+                slots = db.all_slots()
+            used_secs = sum(s["duration"] for s in slots)
             total_secs = 0
         return {
-            "bytes_free": free, "bytes_total": total,
-            "rate": rate,
             "used_seconds": used_secs,
             "total_seconds": total_secs,
             "used_label": mmss(used_secs),
@@ -125,16 +125,17 @@ class Service:
         }
 
     def snapshot(self) -> Dict:
+        slots = db.all_slots()      # read once; this runs at 5 Hz mid-conversion
         return {
             "seq": next(self._snap_seq),
             "pedal": self.pedal_state,
             "busy": self.busy,
             "progress": self.progress,
             "error": self.last_error,
-            "slots": db.all_slots(),
+            "slots": slots,
             "slot_count": config.SLOTS,
             "loops": sorted(self._loops),
-            "capacity": self.capacity(),
+            "capacity": self.capacity(slots),
             "version": __version__,
             "revision": self.updater.revision,
             "update_available": self.updater.available,
@@ -149,19 +150,12 @@ class Service:
             raise ValueError(f"slot must be 1-{config.SLOTS}")
 
     def upload(self, slot: int, tmp_path: Path, display_name: str) -> Dict:
+        """Ingest a file and put it in a slot. One lock over the row, the
+        bytes and the assignment, so a forced forget cannot delete the row in
+        between and leave a slot pointing at nothing."""
         self.check_slot(slot)
-        info = media.probe(tmp_path)
-        if info is None or info.duration <= 0:
-            tmp_path.unlink(missing_ok=True)
-            raise ValueError("not a readable audio file")
-        h = media.file_hash(tmp_path)
-        stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
-        # One lock over the row, the bytes and the assignment, so a forced
-        # forget cannot delete the row in between and leave a slot pointing at
-        # nothing.
         with self._lock:
-            inserted = db.library_add(h, display_name, info.duration)
-            self._place_source(h, tmp_path, stored, inserted)
+            h = self._take(tmp_path, display_name)
             self._assign(slot, h)
             row = db.get_slot(slot)
         self._emit()
@@ -169,18 +163,24 @@ class Service:
 
     def add_to_library(self, tmp_path: Path, display_name: str) -> Dict:
         """Ingest a file without giving it a slot."""
+        with self._lock:
+            h = self._take(tmp_path, display_name)
+            row = db.library_get(h)
+        self._emit()
+        return row
+
+    def _take(self, tmp_path: Path, display_name: str) -> str:
+        """Probe, hash and store an upload, under the caller's lock. Returns
+        the hash. ValueError if ffprobe cannot read it."""
         info = media.probe(tmp_path)
         if info is None or info.duration <= 0:
             tmp_path.unlink(missing_ok=True)
             raise ValueError("not a readable audio file")
         h = media.file_hash(tmp_path)
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
-        with self._lock:
-            inserted = db.library_add(h, display_name, info.duration)
-            self._place_source(h, tmp_path, stored, inserted)
-            row = db.library_get(h)
-        self._emit()
-        return row
+        inserted = db.library_add(h, display_name, info.duration)
+        self._place_source(h, tmp_path, stored, inserted)
+        return h
 
     def assign(self, slot: int, source_hash: str) -> Optional[Dict]:
         """Put a track already in the library into a slot."""
@@ -206,31 +206,23 @@ class Service:
                 return
             self._work.put(("convert", slot, source_hash, src))
 
-    def plan_tracks(self, hashes: List[str],
-                    start: Optional[int] = None) -> Optional[Dict]:
-        """Which slots these library tracks would fill, in the order given.
-        None if any hash is unknown: the caller's list is stale, so nothing is
-        planned around the gap."""
+    def _plan(self, hashes: List[str]) -> Optional[Dict]:
+        """Which slots these library tracks would fill, in the order given:
+        consecutive from the first slot with room, skipping any that holds a
+        loop, the rule an unnumbered upload follows. `start` and `end` are the
+        first and last slot written, so they span the skips. None if any hash
+        is unknown: the caller's list is stale, so nothing is planned around
+        the gap."""
         tracks = []
         for h in hashes:
             row = db.library_get(h)
             if row is None:
                 return None
             tracks.append(row)
-        return self._plan(tracks, start)
-
-    def _plan(self, tracks: List[Dict], start: Optional[int]) -> Dict:
-        """Consecutive slots from `start`, skipping any that holds a loop, the
-        rule an unnumbered upload follows. Without `start`, from the first slot
-        with room. `start` and `end` are the first and last slot written, so
-        they span the skips."""
-        if start is not None:
-            self.check_slot(start)
         loops = self._loops
-        if start is None:
-            taken = {s["slot"] for s in db.all_slots()} | loops
-            start = next((n for n in range(1, config.SLOTS + 1) if n not in taken),
-                         config.SLOTS + 1)
+        taken = {s["slot"] for s in db.all_slots()} | loops
+        start = next((n for n in range(1, config.SLOTS + 1) if n not in taken),
+                     config.SLOTS + 1)
         assigned: List[Dict] = []
         unplaced: List[Dict] = []
         n = start
@@ -258,12 +250,11 @@ class Service:
             "loops_known": self.pedal_state == "mounted",
         }
 
-    def assign_tracks(self, hashes: List[str],
-                      start: Optional[int] = None) -> Optional[Dict]:
+    def assign_tracks(self, hashes: List[str]) -> Optional[Dict]:
         """Put a run of library tracks on the pedal as one locked step, with
         one snapshot at the end rather than one per track."""
         with self._lock:
-            plan = self.plan_tracks(hashes, start)
+            plan = self._plan(hashes)
             if plan is None:
                 return None
             for item in plan["assigned"]:
@@ -324,21 +315,6 @@ class Service:
                 self._work.put(("write", dst))
             else:
                 return
-        self._emit()
-
-    def retry(self, slot: int) -> None:
-        self.check_slot(slot)
-        row = db.get_slot(slot)
-        if not row:
-            return
-        src = self.source_for(row["source_hash"])
-        if not src:
-            db.set_state(slot, "error", "source file missing")
-            self._emit()
-            return
-        with self._lock:
-            db.set_state(slot, "converting")
-            self._work.put(("convert", slot, row["source_hash"], src))
         self._emit()
 
     # -------------------------------------------------------------- library

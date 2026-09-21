@@ -29,9 +29,6 @@ Full snapshot. The same object is pushed over `/api/events`.
   "update_available": false,
   "remote_revision": null,
   "capacity": {
-    "bytes_free": 496000000,
-    "bytes_total": 500170752,
-    "rate": 132300,
     "used_seconds": 3.024,
     "total_seconds": 3780,
     "used_label": "0:03",
@@ -67,10 +64,9 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `update_available` | `true` when the tracked remote branch's commit differs from the deployed commit (the device converges to the remote, so a rebased or force-pushed branch counts too, not only a strictly newer one). Checked once at startup and again on demand via `POST /api/update/check`. There is no background polling. `false` before the first check and when up to date. A check that can't run (offline, no checkout) leaves the last known value unchanged |
 | `remote_revision` | Short git commit the remote is at, when `update_available`; else `null` |
 
-`capacity.used_seconds` is derived from the real bytes on the volume
-(`(bytes_total − bytes_free) / rate`) while the pedal is mounted, so it already
-counts `LOOP.WAV` and anything else physically present. Unmounted, it falls back
-to summed backing-track durations.
+`capacity.used_seconds` is derived from the bytes on the volume while the pedal
+is mounted, so it already counts `LOOP.WAV` and anything else physically
+present. Unmounted, it falls back to summed backing-track durations.
 
 Slot `state` is one of `converting`, `staged`, `synced`, `error`. Slots with no
 entry are absent from the array. A slot reads as `synced` when
@@ -82,25 +78,13 @@ entry are absent from the array. A slot reads as `synced` when
 
 Multipart. One or more `file` parts. This is what the UI uses.
 
-| Field | Effect |
-|---|---|
-| `file` | Repeatable |
-| `start` | Optional, 1–`slot_count` (99 today). Files fill consecutive slots from here |
-
-`start` is checked before any file is taken, so a request aimed at a slot that
-does not exist lands nothing rather than half a batch.
-
-Without `start`, a leading number in the filename picks the slot
-(`07 Blue Bossa.mp3` → slot 7). Files without one, or whose number is taken,
-fill the lowest free slots. Slots holding a recorded `LOOP.WAV` are skipped
-during automatic assignment, though they can be targeted explicitly.
-
-With `start`, filename numbers are ignored: an explicit target wins. Files that
-would land past the last slot (`slot_count`) are reported as errors rather than
-placed elsewhere.
+A leading number in the filename picks the slot (`07 Blue Bossa.mp3` → slot
+7). Files without one, or whose number is taken, fill the lowest free slots.
+Slots holding a recorded `LOOP.WAV` are skipped. To put a track in a
+particular slot afterwards, move it with `POST /api/slots/<n>/move`.
 
 ```bash
-curl -F 'file=@track.mp3' -F 'start=7' http://dittobacktracker.local/api/upload
+curl -F 'file=@07 Blue Bossa.mp3' http://dittobacktracker.local/api/upload
 ```
 
 `201` with per-file results:
@@ -113,15 +97,6 @@ curl -F 'file=@track.mp3' -F 'start=7' http://dittobacktracker.local/api/upload
 ```
 
 Partial success is normal: `added` and `errors` can both be non-empty.
-
----
-
-## POST /api/slots/&lt;n&gt;
-
-Upload a single file to slot `n`. Multipart, one `file` part. Replaces whatever
-is there; the track it held stays in the library.
-
-`201` with the slot object, or `400` with `{"error": "..."}`.
 
 ---
 
@@ -178,12 +153,6 @@ with no source and no undo. `BT.WAV` and the slot directory are never touched.
 Moves to an empty destination, or **swaps** with an occupied one. Swapping is
 non-destructive, so reordering never loses a track. Moving to the same slot
 is a no-op.
-
----
-
-## POST /api/slots/&lt;n&gt;/retry
-
-Re-run a failed conversion. Ignored if the slot is empty.
 
 ---
 
@@ -289,8 +258,7 @@ does, so this is how you change what the pedal carries, not another upload.
 ## POST /api/slots/assign
 
 Put several library tracks on the pedal in one call. Body
-`{"hashes": ["b9ec…", "ff02…"]}`, with an optional `start`; without it the fill
-begins at the first slot with room.
+`{"hashes": ["b9ec…", "ff02…"]}`. The fill begins at the first slot with room.
 
 ```json
 { "start": 9, "end": 11,
@@ -307,8 +275,8 @@ holds a loop, the same automatic-placement rule an unnumbered upload follows.
 span those skips. Both are `null` when nothing was placed. Whatever was in a
 slot is replaced, as with a single assign.
 
-`201`. `400` if `hashes` is not a non-empty list of strings, or `start` is not
-a slot number. `404` if any hash is not in the library, and then nothing is
+`201`. `400` if `hashes` is not a non-empty list of strings. `404` if any hash
+is not in the library, and then nothing is
 placed: a set list with a track missing from it is one problem, and the
 client's list is stale.
 
@@ -414,23 +382,21 @@ curl -N http://dittobacktracker.local/api/events
 
 | Status | Where | Meaning |
 |---|---|---|
-| `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `POST /api/slots/assign`, `PATCH /api/library/<hash>` | Bad input: slot out of range, non-audio file, a file ffprobe can't read, a body without a list of hashes, or an empty/overlong name. Body is `{"error": "..."}` |
+| `400` | `POST /api/slots/<n>/move`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `POST /api/slots/assign`, `PATCH /api/library/<hash>` | Bad input: slot out of range, no files, a body without a list of hashes, or an empty/overlong name. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
 | `404` | `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign`, `POST /api/slots/assign` | The slot has no loop; or no such track in the library, which is also what a malformed hash returns, since it cannot name one |
 | `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
-| `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
-| `500` | `POST /api/slots/<n>` | The upload could not be stored: a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
+| `413` | `POST /api/upload`, `POST /api/library` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
 | `503` | `GET /api/loops/<n>` | No pedal mounted. Body is `{"error": "..."}` |
 
 `POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both
 are batches, so they return `201` even when some or all files were rejected,
 and report those per file in `errors`. A `400` from either means the whole
-request was unusable (no `file` part at all, or a `start` outside
-1–`slot_count`). Check `errors` on a `201`; don't treat `201` as "everything
-landed".
+request was unusable (no `file` part at all). Check `errors` on a `201`; don't
+treat `201` as "everything landed".
 
 A batch also reports per file when the device could not *store* a file, a full
 card or bytes it could not confirm, rather than failing the whole request, so
