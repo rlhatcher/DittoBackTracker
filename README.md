@@ -10,13 +10,13 @@ slot directories. DittoBackTracker is a Raspberry Pi Zero 2 W that stays
 connected to the pedal, serves a web page on the local network, converts
 whatever is uploaded and writes it to the pedal.
 
-- Upload from any browser. A leading number in the filename ("07 Blue
-  Bossa.mp3") assigns that slot; anything else lands in the library.
-- A 99-slot map showing what is loaded, converting or written. Drag to
-  reorder, swap or remove.
+- Upload from any browser. Files take the next free slots; a leading number
+  in the filename ("07 Blue Bossa.mp3") picks the slot.
+- A list of what the pedal holds, with what is converting or written. Change
+  a slot number to move a track, or to swap two.
 - A library on the device. Uploads persist, so changing what the pedal carries
-  is an assignment rather than another upload.
-- Folders, search, rename and in-browser preview.
+  is a click rather than another upload.
+- Search, sort, rename and in-browser preview.
 - Capacity in minutes rather than slots, because the pedal holds about 63
   minutes in total.
 - Loops recorded on the pedal can be downloaded or removed. `LOOP.WAV` is
@@ -68,9 +68,9 @@ cd /var/lib/ditto/src
 ```
 
 `install.sh` installs the packages, creates the `ditto-svc` service account and
-gives it `/var/lib/ditto`, writes the pedal's fstab entry and both sudoers
-rules, deploys the code and starts the unit. It is idempotent, and re-running
-it is how changes to any of those are applied.
+gives it `/var/lib/ditto`, writes the pedal's fstab entry, deploys the code
+and starts the unit. It is idempotent, and re-running it is how changes to any
+of those are applied.
 
 It must run before the read-only overlay is enabled, because it writes to
 `/etc`.
@@ -80,9 +80,7 @@ It must run before the read-only overlay is enabled, because it writes to
 Open `http://dittobacktracker.local/` and connect the pedal.
 
 Work through the [checklist](docs/provisioning.md#checklist) before calling it
-done. It covers the two privileged operations that fail silently: a refused
-poweroff arrives after the page has said it is safe to unplug, and a refused
-restart leaves the device serving old code after reporting an update.
+done.
 
 ---
 
@@ -102,7 +100,7 @@ available**; pressing it deploys the new code and restarts. The mechanism is in
 [docs/api.md](docs/api.md#post-apiupdate).
 
 An update replaces the `ditto/` package and nothing else. A release that also
-changes the systemd unit, the sudoers rules, the fstab entry or the ownership
+changes the systemd unit, the fstab entry or the ownership
 of `/var/lib/ditto` needs `install.sh` run again with the overlay off
 ([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)).
 
@@ -131,9 +129,9 @@ network; the default is `0.0.0.0`.
 
 ## How it works
 
-The pedal is mounted for the length of a session and released on **Done**.
-Uploads are stored by content hash, converted in the background and written as
-they become ready.
+The pedal is mounted while it is plugged in. Uploads are stored by content
+hash, converted in the background and written as they become ready. Unplug
+when the status line says Ready.
 
 ```text
   POST /api/upload
@@ -155,22 +153,21 @@ change plus one file copy rather than another conversion. Module layering is in
 ## Security
 
 There is no authentication. The service binds `0.0.0.0:80`, so anyone on the
-network can upload, clear slots, download a recorded loop, trigger a
-self-update or shut the device down. The update only pulls the branch the
+network can upload, clear slots, download a recorded loop or trigger a
+self-update. The update only pulls the branch the
 device already tracks from its own remote, so it fetches your code rather than
 an attacker's, but a LAN user can still force a restart. Built for a home LAN.
 Do not put it on a network you do not control.
 
-The service runs as `ditto-svc`, a system account with no shell that is not in
-the `sudo` group. `etc/99-ditto-poweroff` and `etc/99-ditto-restart` are scoped
-to one command each and are the whole of what the service may do as root: power
-the device off, and start the restart helper. A LAN user reaching
-`POST /api/update` can restart the device onto code from the tracked branch and
-can shut it down. They cannot get root.
+The service runs as `ditto-svc`, a system account with no shell, not in the
+`sudo` group and with no sudoers rule: nothing it does needs root, the
+self-update included, which exits and lets systemd start it again. A LAN user
+reaching `POST /api/update` can restart the device onto code from the tracked
+branch. They cannot get root.
 
 That holds only because the account is not the login account. The Raspberry Pi
 Imager user is in the `sudo` group, so a service running as it would put root
-behind the same reach and reduce the rules in `etc/` to a statement of intent.
+behind the same reach.
 
 ---
 
@@ -182,7 +179,6 @@ behind the same reach and reduce the rules in `etc/` to a statement of intent.
 | [hardware.md](docs/hardware.md) | Parts, power, settings |
 | [api.md](docs/api.md) | HTTP API |
 | [pedal-format.md](docs/pedal-format.md) | What the Ditto+ expects, measured. Not in TC Electronic's docs |
-| [loop-processing.md](docs/loop-processing.md) | Reading loops off the pedal |
 | [roadmap.md](docs/roadmap.md) | Unbuilt and not planned |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Layering, tests, commit conventions |
 

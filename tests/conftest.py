@@ -7,7 +7,6 @@ or is writable on CI.
 """
 
 import os
-import subprocess
 import tempfile
 
 import pytest
@@ -22,35 +21,22 @@ os.environ["DITTO_MOUNT"] = os.path.join(_tmp, "mount")
 # Imported after the environment is set, or config resolves the real paths.
 from ditto import config, core, db, media, update, web  # noqa: E402
 
-# Every sudo the app runs, recorded instead of executed. Read it in a test if
-# you want to assert one was attempted.
-sudo_attempts: list[list[str]] = []
+# Every restart the app asks for, counted instead of sent. Read it in a test
+# to assert one was requested.
+restart_requests: list[bool] = []
 
 
-def _block_sudo() -> None:
-    """Stop the suite from powering off the machine it is running on.
+def _block_restart() -> None:
+    """Stop the suite from killing itself.
 
-    _halt ends with `sudo -n /sbin/poweroff`, and install.sh grants the ditto
-    user a NOPASSWD rule for exactly that command. So a test that reaches _halt
-    — by leaving an end marker queued, say — powers off a provisioned device
-    part-way through the run. On a laptop the sudo call simply fails, which is
-    why this stayed invisible.
+    A successful update ends by sending this process SIGTERM, so systemd starts
+    it again on the new code. Here this process is pytest.
 
     Replaced at import rather than per-test, because the reach can happen during
-    fixture teardown, after a test's own monkeypatches have been undone. A test
-    that wants the real call recorded can still stub subprocess.run itself.
+    fixture teardown, after a test's own monkeypatches have been undone.
     """
-    for mod in (core, update):
-        real = mod.subprocess.run
-
-        def guard(*args, _real=real, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
-            if isinstance(cmd, (list, tuple)) and cmd and str(cmd[0]) == "sudo":
-                sudo_attempts.append([str(c) for c in cmd])
-                return subprocess.CompletedProcess(list(cmd), 0, "", "")
-            return _real(*args, **kwargs)
-
-        mod.subprocess.run = guard
+    update.Updater._request_restart = staticmethod(
+        lambda: restart_requests.append(True))
 
 
 def _block_ffmpeg() -> None:
@@ -92,7 +78,7 @@ def _block_ffmpeg() -> None:
     media.subprocess.Popen = guard_popen
 
 
-_block_sudo()
+_block_restart()
 _block_ffmpeg()
 
 
@@ -118,7 +104,7 @@ def data_tree(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(config, "DATA", tmp_path)
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "state.db")
-    for name in ("SOURCES", "STAGED", "TRASH", "LOOPS"):
+    for name in ("SOURCES", "STAGED"):
         d = tmp_path / name.lower()
         monkeypatch.setattr(config, name, d)
         d.mkdir(parents=True, exist_ok=True)
@@ -129,15 +115,9 @@ def data_tree(tmp_path, monkeypatch):
 
 # Service._drain returns silently when it gives up, so a timeout that is too
 # short does not fail as a timeout. It fails later, on whatever the test was
-# about to assert, with a message that blames the wrong thing: CircleCI build
-# 140 reported "ending the session never reached poweroff" when the poweroff
-# was merely still coming.
-#
-# The end job is the slowest thing a test waits for. It sleeps 1.5 s on purpose
-# (core._halt, so the last snapshot reaches the browser before the power goes)
-# and calls os.sync(), which flushes every filesystem on the host and is
-# unbounded on a shared runner. 5 s left about 3.5 s for that. Local runs use
-# 1.6 s of it, which looked like room and was not.
+# about to assert, with a message that blames the wrong thing. A job that calls
+# os.sync() flushes every filesystem on the host, which is unbounded on a shared
+# CI runner, and 5 s was not enough there.
 #
 # This is not a deadline anything is measured against. _drain polls at 50 ms and
 # returns the moment the worker is idle, so a generous timeout costs a healthy
@@ -157,10 +137,9 @@ def drain(svc, timeout: float = DRAIN_TIMEOUT) -> None:
 def service(data_tree):
     """A running Service on its own data tree.
 
-    The drain lets the boot sweep finish, so a test about a guard is not left
-    asserting on a refusal that came from the collector. try/finally because a
-    failure before the yield would otherwise leave the worker and monitor
-    threads running into the next test.
+    The drain lets any boot work finish first. try/finally because a failure
+    before the yield would otherwise leave the worker and monitor threads
+    running into the next test.
     """
     svc = core.Service()
     try:

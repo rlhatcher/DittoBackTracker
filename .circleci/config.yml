@@ -60,7 +60,7 @@ jobs:
             . venv/bin/activate
             pytest -q
           environment:
-            # test_frontend runs `node --check` over app.js. Without this the
+            # test_frontend runs `node --check` over app.mjs. Without this the
             # check turns into a permanent green skip the moment the image loses
             # node, and a page whose script never parses ships unnoticed.
             DITTO_STRICT_FRONTEND: "1"

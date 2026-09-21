@@ -118,9 +118,9 @@ cd /var/lib/ditto/src
 ```
 
 `install.sh` installs the packages, creates the `ditto-svc` account the service
-runs as, gives it `/var/lib/ditto`, writes the fstab entry and both sudoers
-rules, deploys the code and starts the unit. It is idempotent: run it again to
-apply a change to any of those.
+runs as, gives it `/var/lib/ditto`, writes the fstab entry, deploys the code
+and starts the unit. It is idempotent: run it again to apply a change to any of
+those.
 
 Open `http://dittobacktracker.local/`, plug in the pedal, drop a track in.
 
@@ -219,7 +219,7 @@ Or press **Update** in the web UI for the same result over the air. How that
 works is in [api.md](api.md#post-apiupdate).
 
 Either way, only the `ditto/` package moves. A release that also changes the
-systemd unit, the sudoers rules, the fstab entry or the ownership of
+systemd unit, the fstab entry or the ownership of
 `/var/lib/ditto` needs `install.sh` run again, and `install.sh` writes to
 `/etc`, so the overlay has to come off for that boot. See below.
 
@@ -262,7 +262,7 @@ sudo -u ditto-svc sh -c 'time { dd if=/dev/zero of=/media/ditto/speed.bin bs=1M 
 sudo -u ditto-svc rm /media/ditto/speed.bin
 ```
 
-Expect roughly 1 MB/s. That is where `config.LOOP_STAGE_TIMEOUT` comes from.
+Expect roughly 1 MB/s, so a five-minute track takes about 40 seconds to write.
 
 ---
 
@@ -273,29 +273,14 @@ Expect roughly 1 MB/s. That is where `config.LOOP_STAGE_TIMEOUT` comes from.
 - [ ] `systemctl show ditto-web -p User` reports `ditto-svc`
 - [ ] `id ditto-svc` shows it is **not** in the `sudo` group
 - [ ] `ditto-svc` can mount and unmount the pedal without becoming root
-- [ ] Both scoped rules answer for `ditto-svc` (below)
-- [ ] **Done** in the web UI powers the device off
 - [ ] `systemctl status ditto-web` is active, with no restart loop
-- [ ] The web UI loads and shows the slot grid
+- [ ] **Update** in the web UI, when one is offered, comes back on the new
+      revision
+- [ ] The web UI loads and shows the pedal's slot list
 - [ ] A dropped MP3 converts and plays back from the pedal
 - [ ] Boot to SSH in under 15 s
 - [ ] `df -h /var/lib/ditto` shows `/dev/mmcblk0p3`, not an overlay
 - [ ] Ten hard power cuts leave no fsck and nothing corrupt on the pedal
-
-Check the two sudoers rules without firing either, by asking sudo whether it
-would allow them. Each prints the command back if the rule matches and fails if
-it does not:
-
-```bash
-sudo -u ditto-svc sudo -n -l /sbin/poweroff
-sudo -u ditto-svc sudo -n -l /usr/bin/systemctl start --no-block ditto-restart.service
-```
-
-Worth doing explicitly, because both fail quietly in use. A refused poweroff
-arrives after the page has already said it is safe to unplug, and a refused
-restart leaves the device serving the old code after reporting an update.
-Pressing **Done** tests the poweroff rule for real, so it makes a good last
-step.
 
 The `df` check is the one people miss. If the data partition is overlaid,
 everything works until the first reboot, then every upload is gone and nothing

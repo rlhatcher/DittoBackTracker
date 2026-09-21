@@ -1,3 +1,0 @@
-# Let the ditto service trigger its own restart after a self-update, without a
-# password. Scoped to exactly the OTA restart helper, and nothing else.
-ditto-svc ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block ditto-restart.service

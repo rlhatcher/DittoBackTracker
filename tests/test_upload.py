@@ -54,10 +54,8 @@ def f(name, body=b"audio"):
     return (io.BytesIO(body), name)
 
 
-def post(client, files, **form):
-    data = {"file": files}
-    data.update(form)
-    return client.post("/api/upload", data=data,
+def post(client, files):
+    return client.post("/api/upload", data={"file": files},
                        content_type="multipart/form-data")
 
 
@@ -66,13 +64,6 @@ def post(client, files, **form):
 def test_no_files_is_a_400(client):
     assert client.post("/api/upload", data={},
                        content_type="multipart/form-data").status_code == 400
-
-
-@pytest.mark.parametrize("start", [0, -1, 100, 999])
-def test_a_start_outside_the_slot_range_is_a_400(client, start):
-    rv = post(client, [f("a.mp3")], start=start)
-    assert rv.status_code == 400
-    assert "start must be" in rv.get_json()["error"]
 
 
 # --- the filename-number rule ----------------------------------------------
@@ -116,25 +107,10 @@ def test_a_taken_number_falls_back_rather_than_overwriting(app_service, client):
         "a numbered file overwrote an occupied slot"
 
 
-# --- explicit start --------------------------------------------------------
-
-def test_start_fills_consecutive_slots(app_service, client):
-    post(client, [f("a.mp3"), f("b.mp3"), f("c.mp3")], start=10)
-    assert [s for s, _ in app_service.uploaded] == [10, 11, 12]
-
-
-def test_start_beats_the_filename_number(app_service, client):
-    post(client, [f("07 Blue Bossa.mp3")], start=30)
-    assert app_service.uploaded == [(30, "07 Blue Bossa")]
-
-
-def test_files_past_the_last_slot_are_reported_not_relocated(app_service,
-                                                             client):
-    rv = post(client, [f("a.mp3"), f("b.mp3")], start=99)
-    body = rv.get_json()
-    assert [s for s, _ in app_service.uploaded] == [99]
-    assert len(body["errors"]) == 1
-    assert "no room past slot" in body["errors"][0]["error"]
+def test_a_later_numbered_file_claims_its_slot_before_an_earlier_unnumbered_one(
+        app_service, client):
+    post(client, [f("a.mp3"), f("01 b.mp3")])
+    assert app_service.uploaded == [(2, "a"), (1, "01 b")]
 
 
 # --- a rejected file must not consume a slot -------------------------------

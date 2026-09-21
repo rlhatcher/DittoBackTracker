@@ -22,21 +22,13 @@ Full snapshot. The same object is pushed over `/api/events`.
   "seq": 4128,
   "pedal": "mounted",
   "busy": null,
-  "busy_kind": null,
   "progress": null,
-  "ending": false,
   "error": null,
-  "ip": "192.168.1.42",
   "version": "0.4.0",
   "revision": "a1b2c3d",
   "update_available": false,
   "remote_revision": null,
-  "format": { "codec": "pcm_s24le", "sample_rate": 44100, "channels": 1 },
-  "format_source": "probed from BT.WAV",
   "capacity": {
-    "bytes_free": 496000000,
-    "bytes_total": 500170752,
-    "rate": 132300,
     "used_seconds": 3.024,
     "total_seconds": 3780,
     "used_label": "0:03",
@@ -63,10 +55,8 @@ Full snapshot. The same object is pushed over `/api/events`.
 |---|---|
 | `seq` | Monotonically increasing snapshot counter. `/api/events` sends strictly increasing frames and drops the rest, so a consumer never sees state roll backwards; a hand-rolled consumer reading the queue itself should do the same |
 | `pedal` | `absent`, `mounted`, `error` |
-| `busy` | Description of current work, or `null` when idle |
-| `busy_kind` | `write` while the pedal is being written to, `read` while it is being read, else `null`. `write` is the device's only "don't unplug" signal |
+| `busy` | Description of current work, or `null` when idle. Unplug only when it is `null` |
 | `progress` | 0.0–1.0 during conversion, else `null` |
-| `format_source` | Which pedal file the target format was read from |
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
 | `version` | Package version string |
@@ -74,10 +64,9 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `update_available` | `true` when the tracked remote branch's commit differs from the deployed commit (the device converges to the remote, so a rebased or force-pushed branch counts too, not only a strictly newer one). Checked once at startup and again on demand via `POST /api/update/check`. There is no background polling. `false` before the first check and when up to date. A check that can't run (offline, no checkout) leaves the last known value unchanged |
 | `remote_revision` | Short git commit the remote is at, when `update_available`; else `null` |
 
-`capacity.used_seconds` is derived from the real bytes on the volume
-(`(bytes_total − bytes_free) / rate`) while the pedal is mounted, so it already
-counts `LOOP.WAV` and anything else physically present. Unmounted, it falls back
-to summed backing-track durations.
+`capacity.used_seconds` is derived from the bytes on the volume while the pedal
+is mounted, so it already counts `LOOP.WAV` and anything else physically
+present. Unmounted, it falls back to summed backing-track durations.
 
 Slot `state` is one of `converting`, `staged`, `synced`, `error`. Slots with no
 entry are absent from the array. A slot reads as `synced` when
@@ -89,29 +78,13 @@ entry are absent from the array. A slot reads as `synced` when
 
 Multipart. One or more `file` parts. This is what the UI uses.
 
-| Field | Effect |
-|---|---|
-| `file` | Repeatable |
-| `start` | Optional, 1–`slot_count` (99 today). Files fill consecutive slots from here |
-| `folder_id` | Optional. Files the uploaded tracks in this folder. Also accepted by `POST /api/library` and `POST /api/slots/<n>` |
-
-Both targeting fields are checked before any file is taken, so a request aimed
-somewhere that does not exist lands nothing rather than half a batch. An unknown
-`folder_id` is `404` for the whole request rather than an error per file: every
-file would fail identically, and the client's tree is stale, which is one
-problem and not N.
-
-Without `start`, a leading number in the filename picks the slot
-(`07 Blue Bossa.mp3` → slot 7). Files without one, or whose number is taken,
-fill the lowest free slots. Slots holding a recorded `LOOP.WAV` are skipped
-during automatic assignment, though they can be targeted explicitly.
-
-With `start`, filename numbers are ignored: an explicit target wins. Files that
-would land past the last slot (`slot_count`) are reported as errors rather than
-placed elsewhere.
+A leading number in the filename picks the slot (`07 Blue Bossa.mp3` → slot
+7). Files without one, or whose number is taken, fill the lowest free slots.
+Slots holding a recorded `LOOP.WAV` are skipped. To put a track in a
+particular slot afterwards, move it with `POST /api/slots/<n>/move`.
 
 ```bash
-curl -F 'file=@track.mp3' -F 'start=7' http://dittobacktracker.local/api/upload
+curl -F 'file=@07 Blue Bossa.mp3' http://dittobacktracker.local/api/upload
 ```
 
 `201` with per-file results:
@@ -127,51 +100,34 @@ Partial success is normal: `added` and `errors` can both be non-empty.
 
 ---
 
-## POST /api/slots/&lt;n&gt;
-
-Upload a single file to slot `n`. Multipart, one `file` part. Replaces whatever
-is there, moving the previous entry to the trash.
-
-`201` with the slot object, or `400` with `{"error": "..."}`.
-
----
-
 ## DELETE /api/slots/&lt;n&gt;
 
-Clear slot `n`. The entry moves to the trash and `BT.WAV` is removed from the
-pedal on the next pass. A recorded `LOOP.WAV` in the same slot is left alone.
+Clear slot `n`. `BT.WAV` is removed from the pedal on the next pass. A recorded
+`LOOP.WAV` in the same slot is left alone, and the track stays in the library,
+so putting it back is an assign.
 
 ```json
-{ "ok": true, "trash_id": 7 }
+{ "ok": true }
 ```
-
-`trash_id` names the entry this call created, for a subsequent restore. It is
-`null` if the slot was already empty.
 
 ---
 
 ## GET /api/loops/&lt;n&gt;
 
-Download the pedal-recorded loop in slot `n`. The worker copies `LOOP.WAV` off
-the pedal to a transient staging file on the Pi, the response streams that file
-as an attachment, and the staged copy is purged once the response completes.
-**Download never deletes.** The pedal keeps the original, so a failed or partial
-download costs nothing; just retry.
+Download the pedal-recorded loop in slot `n`, streamed straight off the pedal
+as an attachment. **Download never deletes.** A failed or partial download
+costs nothing; just retry. A whole-pedal loop is ~477 MiB and the USB link is
+~1 MB/s, so a large one takes minutes.
 
 ```bash
 curl -OJ http://dittobacktracker.local/api/loops/5    # -> loop-05.wav
 ```
 
-The request blocks while staging: seconds for a typical loop, up to ~8 min for a
-maximal ~477 MiB one over the ~1 MB/s USB link. It waits up to `LOOP_STAGE_TIMEOUT`
-(600 s) before giving up with a `503`.
-
 | Status | Meaning |
 |---|---|
 | `200` | `Content-Disposition: attachment; filename="loop-NN.wav"`, `audio/wav` body |
 | `404` | The slot has no loop |
-| `500` | Staging failed for another reason (e.g. a local I/O error copying off the pedal). Body is `{"error": "..."}` |
-| `503` | No pedal is mounted, or staging exceeded its time limit |
+| `503` | No pedal is mounted |
 
 ---
 
@@ -184,7 +140,8 @@ with no source and no undo. `BT.WAV` and the slot directory are never touched.
 { "ok": true }
 ```
 
-`404` if the slot has no loop.
+`404` if the slot has no loop. `409` while a job holds the pedal; retry when
+it finishes.
 
 ---
 
@@ -195,36 +152,8 @@ with no source and no undo. `BT.WAV` and the slot directory are never touched.
 ```
 
 Moves to an empty destination, or **swaps** with an occupied one. Swapping is
-non-destructive, so reordering never touches the trash. Moving to the same slot
+non-destructive, so reordering never loses a track. Moving to the same slot
 is a no-op.
-
----
-
-## POST /api/slots/&lt;n&gt;/retry
-
-Re-run a failed conversion. Ignored if the slot is empty.
-
----
-
-## GET /api/trash
-
-The 50 most recent deletions, newest first.
-
-```json
-[ { "id": 3, "slot": 12, "display_name": "Blue Bossa",
-    "duration": 311.0, "deleted": 1786070717.31 } ]
-```
-
-Entries are kept 30 days. Expiry only retires the undo. The track itself
-stays in the library, and its audio with it.
-
----
-
-## POST /api/trash/&lt;id&gt;/restore
-
-Put a deleted entry back in its original slot, reconverting if needed. Returns
-`{"slot": n}`, or `404` if the entry has gone, or if its track has since been
-deleted from the library, leaving nothing to restore.
 
 ---
 
@@ -234,29 +163,8 @@ Every track on the device, newest first.
 
 ```json
 [ { "source_hash": "b9ecf8c94d007de0a5ae", "name": "Blue Bossa",
-    "duration": 311.0, "added": 1786070717.31,
-    "folder_id": null, "position": 0 } ]
+    "duration": 311.0, "added": 1786070717.31 } ]
 ```
-
-**This endpoint returns newest first**, as it always has. `position` is not its
-order; see tree order below.
-
-`folder_id` is the folder holding the track, or `null` for the top level. A
-track whose folder has gone reads as `null` too, so it surfaces at the top level
-rather than nowhere.
-
-### Tree order
-
-A second, derived order, and not the order of any response body. It is how the
-client should render the tree, and how a folder's contents are walked
-server-side:
-
-> Depth-first pre-order: a folder's own tracks, ordered by
-> `(position, added, source_hash)`, then its subfolders in `(position, id)`
-> order, each expanded the same way.
-
-Both places use the same definition, so the order the tree draws in is the order
-a folder assign writes in.
 
 The whole list, unpaginated: a few hundred rows is a small response, and
 searching and sorting are the client's business. Deliberately **not** part of
@@ -288,33 +196,27 @@ the whole request was unusable (no `file` part at all).
 
 ## PATCH /api/library/&lt;hash&gt;
 
-Rename a track, file it in a folder, or both.
+Rename a track.
 
 ```json
-{ "name": "Blue Bossa", "folder_id": 3 }
+{ "name": "Blue Bossa" }
 ```
 
-Both fields optional, at least one required. `name` is 1–200 characters after
-trimming. `folder_id: null` files the track at the top level, which is why
-absent and `null` cannot mean the same thing. Returns the updated row.
+`name` is 1–200 characters after trimming. Returns the updated row.
 
 | Status | Meaning |
 |---|---|
-| `400` | Nothing to change, an empty or overlong name, or a `folder_id` that is not an integer or `null` |
-| `404` | No such track, or no such folder |
+| `400` | An empty or overlong name |
+| `404` | No such track |
 
-The folder is checked before anything is written, so a request naming a missing
-folder does not leave a rename applied.
-
-The new name appears in the slot list, the grid tooltips and the print view
-immediately, because there is only one copy of it.
+The new name appears in the slot list and the print view immediately, because
+there is only one copy of it.
 
 ---
 
 ## DELETE /api/library/&lt;hash&gt;
 
-Forget a track, and with it the only copy of its audio. The file itself goes on
-the next collector pass.
+Forget a track, and with it the only copy of its audio.
 
 Refuses with `409` while any slot still holds the track, naming them, so a
 client can ask before destroying something the pedal is using:
@@ -340,159 +242,54 @@ slots are cleared regardless, and reporting an empty result would hide it.
 
 ---
 
-## GET /api/folders
-
-Every folder on the device, flat. The client builds the tree.
-
-```json
-[ { "id": 1, "name": "Standards", "parent_id": null, "position": 0,
-    "created": 1786070001.0 } ]
-```
-
-`parent_id` is `null` for a top-level folder. Ordered top level first, then by
-`parent_id`, `position`, `id`.
-
-No counts or durations. The client already holds every track with its duration
-and its folder from `GET /api/library`, so folding a subtree costs one pass and
-no round trip, and it stays correct while the search box is filtering. Computing
-it here would be a recursive query per render, and a second source of truth that
-can disagree with the rows on screen.
-
-Folders are deliberately **not** in the state snapshot, for the same reason the
-library is not: that object is pushed several times a second during a conversion
-and has to stay small. Refetch this and `/api/library` when the event stream
-connects.
-
----
-
-## POST /api/folders
-
-```json
-{ "name": "Standards", "parent_id": null }
-```
-
-`parent_id` is optional and may be `null` for the top level. `201` with the new
-row.
-
-| Status | Meaning |
-|---|---|
-| `400` | Empty name, a name over 200 characters, a `parent_id` that is not an integer or `null`, or a nesting depth past `MAX_FOLDER_DEPTH` (8) |
-| `404` | `parent_id` names no folder |
-
----
-
-## PATCH /api/folders/&lt;id&gt;
-
-```json
-{ "name": "Set list", "parent_id": 4 }
-```
-
-Both fields optional, at least one required. A body with neither is `400`.
-`parent_id: null` moves the folder to the top level, which is why absent and
-`null` cannot mean the same thing. A move appends the folder to the end of its
-new parent. Returns the updated row.
-
-| Status | Meaning |
-|---|---|
-| `400` | Nothing to change, a bad name, a bad `parent_id`, a move into the folder's own subtree, or a move that would push the subtree past the depth limit |
-| `404` | No such folder, or no such new parent |
-
-The depth limit applies to the deepest leaf after the move, not to the folder
-being moved, so a shallow move of a tall subtree can be refused.
-
----
-
-## DELETE /api/folders/&lt;id&gt;[?force]
-
-Dissolve a folder. **Never deletes a track**, under any flag. A library row is
-the only thing keeping its audio alive, and a folder is a grouping rather than a
-container.
-
-Without `force`, a folder holding anything is refused so the client can say what
-would move:
-
-```json
-{ "error": "not empty", "folders": [4, 5], "tracks": 9 }
-```
-
-With `force`, the contents are promoted to the folder's own parent and appended
-there:
-
-```json
-{ "ok": true, "to": 1, "promoted": { "folders": [4, 5], "tracks": 9 } }
-```
-
-`to` is the folder the contents moved to, or `null` for the top level. `404` if
-there is no such folder.
-
----
-
-## GET /api/folders/&lt;id&gt;/assign[?start=n]
-
-The plan a `POST` to the same path would carry out. Writes nothing, queues
-nothing, and is what the Assign button reads its own label from.
-
-## POST /api/folders/&lt;id&gt;/assign
-
-Put a folder's tracks on the pedal in one call. Body `{"start": 9}`, or no body
-at all for the first slot with room. Both methods answer with the same object:
-
-```json
-{ "folder_id": 3, "folder": "Standards",
-  "start": 9, "end": 18,
-  "assigned": [ { "slot": 9, "source_hash": "b9ec...", "name": "Autumn Leaves" } ],
-  "skipped_loops": [ 12 ],
-  "unplaced": [ { "source_hash": "ff02...", "name": "Ceora",
-                  "error": "no room past slot 99" } ],
-  "loops_known": true,
-  "dry_run": false }
-```
-
-Tracks go in tree order into consecutive slots, skipping any slot that holds a
-loop, the same automatic-placement rule an unnumbered upload follows. `start`
-and `end` are the first and last slot **actually written**, so they span those
-skips: nine tracks from 09 over one loop reads 09-18. Both are `null` when
-nothing was placed. Whatever was in a slot moves to the trash, as with a single
-assign.
-
-`201`, `404` if there is no such folder, `400` if `start` is not a slot number
-or is out of range. `start` may be a number or a numeric string, since the page sends
-what was typed rather than converting it, because a conversion turns junk into
-`null`, and `null` here means "wherever there is room" rather than "refuse
-this". `?start=` with nothing after it means the same as no
-`start` at all, because that is what a cleared first-slot field renders; an
-empty string in the JSON body is junk and is refused.
-
-**Read the body.** Like `POST /api/upload`, a `201` does not mean everything
-landed: `unplaced` names the tracks that ran out of pedal. Individual writes can
-still fail afterwards for capacity. A slot goes to `error` with
-`won't fit — over capacity by m:ss`, which arrives on the event stream, not
-here.
-
-**`loops_known: false` means the range is provisional.** The loop set is scanned
-at mount and emptied on unplug, so with no pedal connected the device cannot
-know which slots hold loops and cannot skip them. The harm is bounded: a
-backing track lands under a loop, which is a slot the pedal plays together and
-not a recording destroyed. The plan says so rather than letting a client
-believe otherwise.
-
-This is one endpoint rather than N calls to `POST /api/slots/<n>/assign` for
-reasons a client cannot work around: the loop set is only correct under the lock
-that queues the work, the whole fill is one admission so a shutdown cannot take
-half of it, and it broadcasts one snapshot instead of one per track.
-
----
-
 ## POST /api/slots/&lt;n&gt;/assign
 
 Put a track that is already in the library into slot `n`, without uploading it
-again. Body `{"hash": "..."}`. Whatever was in the slot moves to the trash.
+again. Body `{"hash": "..."}`. Whatever was in the slot is replaced; the track
+it held stays in the library.
 
 `201` with the slot object. `404` if the track isn't in the library, `400` if
 the slot is out of range.
 
 The pedal holds about a dozen tracks and the library holds as many as the card
 does, so this is how you change what the pedal carries, not another upload.
+
+---
+
+## POST /api/slots/assign
+
+Put several library tracks on the pedal in one call. Body
+`{"hashes": ["b9ec…", "ff02…"]}`. The fill begins at the first slot with room.
+
+```json
+{ "start": 9, "end": 11,
+  "assigned": [ { "slot": 9, "source_hash": "b9ec...", "name": "Autumn Leaves" } ],
+  "skipped_loops": [ 10 ],
+  "unplaced": [ { "source_hash": "ff02...", "name": "Ceora",
+                  "error": "no room past slot 99" } ],
+  "loops_known": true }
+```
+
+Tracks go in the order given into consecutive slots, skipping any slot that
+holds a loop, the same automatic-placement rule an unnumbered upload follows.
+`start` and `end` are the first and last slot **actually written**, so they
+span those skips. Both are `null` when nothing was placed. Whatever was in a
+slot is replaced, as with a single assign.
+
+`201`. `400` if `hashes` is not a non-empty list of strings. `404` if any hash
+is not in the library, and then nothing is
+placed: a set list with a track missing from it is one problem, and the
+client's list is stale.
+
+**Read the body.** A `201` does not mean everything landed: `unplaced` names
+the tracks that ran out of pedal. `loops_known: false` means the range is
+provisional: with no pedal connected the device cannot know which slots hold
+loops and cannot skip them.
+
+This is one endpoint rather than N calls to `POST /api/slots/<n>/assign`: the
+loop set is only correct under the lock that queues the work, the whole fill
+is one locked step so a forced delete cannot interleave with it, and it
+broadcasts one snapshot instead of one per track.
 
 ---
 
@@ -511,35 +308,26 @@ limitation; the file still converts and writes normally.
 
 ---
 
-## POST /api/session/end
-
-Finish queued writes, flush, unmount the pedal, then power off. The only way
-to shut the device down. Returns immediately; watch `/api/events` for
-progress.
-
----
-
 ## POST /api/update
 
 Over-the-air self-update. Pulls the tracked branch, redeploys the app, and
-restarts the service. The restart runs out of process (a separate oneshot unit),
-so the browser's `EventSource` drops and reconnects; watch `revision` in
-the snapshot change to confirm the new code is running.
+exits; systemd starts it again on the new code (`Restart=always` in the unit).
+The browser's `EventSource` drops and reconnects; watch `revision` in the
+snapshot change to confirm the new code is running.
 
 ```json
 { "ok": true, "revision": "a1b2c3d" }
 ```
 
 Refused while the device is busy so a restart never interrupts a write. The
-device must have OTA set up (a git checkout at `/var/lib/ditto/src` and the
-restart sudoers rule). See the README.
+device must have OTA set up (a git checkout at `/var/lib/ditto/src`). See the
+README.
 
 | Status | Meaning |
 |---|---|
 | `200` | Update deployed; the service is restarting |
 | `409` | Busy (work is in flight or queued, or an update is already running). Retry when idle |
-| `502` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
-| `503` | The device is shutting down. Try again after it comes back up |
+| `502` | The update failed: no network, no git checkout, or new code that failed to load (rolled back). Body is `{"error": "..."}` |
 
 ---
 
@@ -595,30 +383,25 @@ curl -N http://dittobacktracker.local/api/events
 
 | Status | Where | Meaning |
 |---|---|---|
-| `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `PATCH /api/library/<hash>` | Bad input: slot out of range, non-audio file, a file ffprobe can't read, or an empty/overlong name. Body is `{"error": "..."}` |
+| `400` | `POST /api/slots/<n>/move`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `POST /api/slots/assign`, `PATCH /api/library/<hash>` | Bad input: slot out of range, no files, a body without a list of hashes, or an empty/overlong name. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
-| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign` | No such trash entry; the slot has no loop; or no such track in the library, which is also what a malformed hash returns, since it cannot name one |
+| `404` | `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign`, `POST /api/slots/assign` | The slot has no loop; or no such track in the library, which is also what a malformed hash returns, since it cannot name one |
 | `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
+| `409` | `DELETE /api/loops/<n>` | A job holds the pedal. Retry when it finishes |
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
-| `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
-| `500` | `GET /api/loops/<n>`, `POST /api/slots/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error); or the upload could not be stored: a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
-| `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
-| `503` | `GET /api/loops/<n>` | No pedal mounted, or loop staging exceeded its time limit. Body is `{"error": "..."}` |
-| `503` | `POST /api/update`, `POST /api/slots/<n>` | The device is shutting down and is no longer accepting work. Body is `{"error": "..."}` |
-| `503` | `POST /api/upload`, `POST /api/library` | The device began shutting down part-way through the batch. Body is the usual `{"added": [...], "errors": [...]}` carrying whatever landed before that, **not** an `error` string. The files in `added` are committed and queued |
+| `413` | `POST /api/upload`, `POST /api/library` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
+| `502` | `POST /api/update` | The update failed: no network, no git checkout, or new code that failed to load (rolled back). Body is `{"error": "..."}` |
+| `503` | `GET /api/loops/<n>` | No pedal mounted. Body is `{"error": "..."}` |
 
 `POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both
 are batches, so they return `201` even when some or all files were rejected,
 and report those per file in `errors`. A `400` from either means the whole
-request was unusable (no `file` part at all, or a `start` outside
-1–`slot_count`). Check `errors` on a `201`; don't treat `201` as "everything
-landed".
+request was unusable (no `file` part at all). Check `errors` on a `201`; don't
+treat `201` as "everything landed".
 
 A batch also reports per file when the device could not *store* a file, a full
 card or bytes it could not confirm, rather than failing the whole request, so
-the files that did land are never silently lost. The one case that stops a batch
-early is the device beginning to shut down: that returns `503`, and the body
-still carries the `added` and `errors` accumulated so far.
+the files that did land are never silently lost.
 
 Anything else is a bug.

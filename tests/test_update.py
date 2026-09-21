@@ -4,10 +4,12 @@ core guard/redeploy/update-check branches, using local git repos (no network).""
 import shutil
 import subprocess
 import threading
+import time
 
+import conftest
 import pytest
 
-from ditto import config, update, web
+from ditto import config, core, update, web
 
 # --- endpoint status mapping ----------------------------------------------
 
@@ -47,11 +49,6 @@ def test_update_failed_502():
     rv = _client((False, "git update failed: could not resolve host")) \
         .post("/api/update")
     assert rv.status_code == 502
-
-
-def test_update_shutting_down_503():
-    rv = _client((False, "the device is shutting down")).post("/api/update")
-    assert rv.status_code == 503
 
 
 def test_update_cross_site_403():
@@ -97,15 +94,55 @@ def test_update_refused_while_busy(service):
 
 
 def test_update_refused_while_job_in_flight(service):
-    # A job dequeued but not yet flagged busy still blocks admission, and the
-    # updating gate is cleared again on the refusal.
+    # A job dequeued but not yet flagged busy still blocks a deploy, and the
+    # job lock is given back on the refusal.
     service._in_flight.set()
     try:
         ok, msg = service.update()
     finally:
         service._in_flight.clear()
     assert ok is False and "busy" in msg
-    assert not service.updater.admitted.is_set()
+    assert not service._job_lock.locked(), "a refused update kept the job lock"
+
+
+def test_update_is_refused_while_a_job_runs(service, monkeypatch):
+    """The worker holds the job lock for the whole job, so an update that
+    arrives mid-write finds it taken and answers busy, without either side
+    reasoning about the other's timing."""
+    started, release = threading.Event(), threading.Event()
+
+    def slow_erase(self, slot):
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(core.Service, "_do_erase", slow_erase)
+    service._work.put(("erase", 5))
+    assert started.wait(timeout=5), "the worker never ran the job"
+    try:
+        ok, msg = service.update()
+    finally:
+        release.set()
+    assert ok is False and "busy" in msg
+
+
+def test_a_job_that_arrives_during_a_deploy_waits_for_it(service):
+    """A deploy holds the job lock, so work queued meanwhile waits on it and
+    runs once a failed update lets go, rather than being dropped or run
+    alongside a git reset."""
+    ran = []
+    service._do_erase = lambda slot: ran.append(slot)
+    conftest.drain(service)
+
+    assert service._job_lock.acquire(blocking=False)    # stand in for a deploy
+    service._work.put(("erase", 42))
+    time.sleep(1.0)
+    assert ran == [], "a job started while a deploy held the lock"
+
+    service._job_lock.release()                 # the update bailed; work resumes
+    deadline = time.monotonic() + 5
+    while not ran and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ran == [42], "the waiting job was dropped instead of run"
 
 
 def test_update_no_git_checkout(service, tmp_path, monkeypatch):
@@ -251,38 +288,42 @@ def test_update_rolls_back_when_new_code_wont_load(service, repos, tmp_path,
     (app / "ditto" / "__init__.py").write_text("# OLD deployed\n")
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "APP", app)
-    monkeypatch.setattr(config, "REVISION_FILE", app / "REVISION")
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    before = service.updater.revision
 
     ok, msg = service.update()
 
     assert ok is False and "rolled back" in msg
     assert (app / "ditto" / "__init__.py").read_text() == "# OLD deployed\n"
-    assert not (app / "REVISION").exists()      # no revision recorded on failure
+    assert service.updater.revision == before, "a failed deploy moved the revision"
 
 
-def test_update_rolls_back_when_revision_unwritable(service, repos, tmp_path,
-                                                    monkeypatch):
-    # The swap and smoke-check succeed, but recording the revision fails; the
-    # deploy must roll back rather than run code it can't record.
-    src = repos["src"]
+def test_a_rolled_back_deploy_leaves_the_checkout_on_the_running_code(
+        service, repos, tmp_path, monkeypatch):
+    """The next process reads HEAD as the deployed commit. Left on the
+    revision that failed to load, it would report up to date while the old
+    package runs, until something newer landed upstream."""
+    src, work = repos["src"], repos["work"]
     app = tmp_path / "app"
     (app / "ditto").mkdir(parents=True)
     (app / "ditto" / "__init__.py").write_text("# OLD deployed\n")
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "APP", app)
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
-    # A directory at the REVISION path makes the atomic replace fail.
-    (app / "REVISION").mkdir()
-    monkeypatch.setattr(config, "REVISION_FILE", app / "REVISION")
-    # Pretend the deployed code imports cleanly.
-    monkeypatch.setattr(update.Updater, "_import_check",
-                        staticmethod(lambda app: None))
+    running = _head(src)
+    service.updater._current_sha = running
 
+    # The fixture's ditto/ has no web module, so the deploy rolls back.
+    (work / "ditto" / "__init__.py").write_text("# newer\n")
+    _git("-C", str(work), "commit", "-am", "newer")
+    _git("-C", str(work), "push", "origin", "main")
     ok, msg = service.update()
+    assert ok is False and "rolled back" in msg
 
-    assert ok is False and "could not record the revision" in msg
-    assert (app / "ditto" / "__init__.py").read_text() == "# OLD deployed\n"
+    assert _head(src) == running, "the checkout stayed on the failed commit"
+    fresh = update.Updater(service._job_lock, lambda: False, lambda: False,
+                           lambda: None)
+    assert fresh.check_now()["update_available"] is True
 
 
 def test_a_successful_deploy_clears_the_remote_revision(service, repos,
@@ -290,14 +331,12 @@ def test_a_successful_deploy_clears_the_remote_revision(service, repos,
     """remote_revision is only meaningful while an update is available.
 
     Leaving it set after a deploy makes the device report "up to date" next to
-    a commit it supposedly needs. Observable whenever the process keeps running
-    past the deploy — which is exactly what happens when the restart is
-    refused, the case driven here.
+    a commit it supposedly needs. Observable here because conftest swallows the
+    restart request, so this process keeps running past the deploy.
     """
     src, work = repos["src"], repos["work"]
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(config, "APP", tmp_path / "app")
-    monkeypatch.setattr(config, "REVISION_FILE", tmp_path / "app" / "REVISION")
     monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
     (tmp_path / "app").mkdir()
     shutil.copytree(src / "ditto", tmp_path / "app" / "ditto")
@@ -311,20 +350,15 @@ def test_a_successful_deploy_clears_the_remote_revision(service, repos,
     assert service.updater.available is True
     assert service.updater.remote_revision is not None
 
-    # Deploy for real, but refuse the restart so this process survives to be
-    # asked. The smoke check is stubbed: the fixture repo is not a real package.
+    # Deploy for real. The smoke check is stubbed: the fixture repo is not a
+    # real package.
     monkeypatch.setattr(update.Updater, "_import_check",
                         staticmethod(lambda app: None))
-    real = update.subprocess.run
-
-    def no_systemd(cmd, **kw):
-        if "systemctl" in " ".join(map(str, cmd)):
-            raise OSError("restart refused")
-        return real(cmd, **kw)
-
-    monkeypatch.setattr(update.subprocess, "run", no_systemd)
-    ok, msg = service.update()
-    assert ok is False and "restart was refused" in msg
+    before = len(conftest.restart_requests)
+    ok, _ = service.update()
+    assert ok is True
+    assert conftest.restart_requests[before:] == [True], \
+        "a successful deploy did not ask for a restart"
 
     snap = service.snapshot()
     assert snap["update_available"] is False
@@ -332,13 +366,12 @@ def test_a_successful_deploy_clears_the_remote_revision(service, repos,
         "reported up to date while still naming a commit to update to"
 
 
-def test_the_gate_is_cleared_before_the_lock_is_released(service, monkeypatch):
-    """A failed update must not reopen the gate under a second one.
-
-    Releasing the lock first lets another update acquire it and set the gate;
-    this one's clear would then reopen it with that deploy already running,
-    leaving the worker free to touch the pedal during a git reset and a
-    restart. The window is a couple of bytecodes, so assert the ordering
+def test_a_failed_update_gives_the_job_lock_back_before_its_own(service,
+                                                                monkeypatch):
+    """Releasing the update lock first lets a second update acquire it and
+    take the job lock; this one's release would then free it under that
+    deploy, leaving the worker free to touch the pedal during a git reset and
+    a restart. The window is a couple of bytecodes, so assert the ordering
     rather than racing it.
     """
     order = []
@@ -348,24 +381,23 @@ def test_the_gate_is_cleared_before_the_lock_is_released(service, monkeypatch):
         """A stand-in for the lock itself — _thread.lock's methods are
         read-only, so the attribute is replaced rather than patched."""
 
-        def __init__(self):
+        def __init__(self, name):
             self._real = threading.Lock()
+            self._name = name
 
         def acquire(self, blocking=True):
             return self._real.acquire(blocking)
 
         def release(self):
-            order.append("release")
+            order.append(self._name)
             self._real.release()
 
-    monkeypatch.setattr(upd, "_lock", RecordingLock())
-    real_clear = upd.admitted.clear
-    monkeypatch.setattr(upd.admitted, "clear",
-                        lambda: (order.append("clear"), real_clear())[1])
+    monkeypatch.setattr(upd, "_lock", RecordingLock("update"))
+    monkeypatch.setattr(upd, "_job_lock", RecordingLock("job"))
 
     service.busy = "Writing something"          # forces the refusal path
     ok, _ = service.update()
 
     assert ok is False
-    assert order == ["clear", "release"], (
-        f"the gate outlived the lock: {order}")
+    assert order == ["job", "update"], (
+        f"the job lock outlived the update lock: {order}")

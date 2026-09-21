@@ -1,4 +1,4 @@
-"""ffprobe / ffmpeg. All audio work happens in ffmpeg, never in Python."""
+"""ffprobe and ffmpeg. All audio work happens in ffmpeg, never in Python."""
 
 from __future__ import annotations
 
@@ -10,16 +10,11 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 from . import config
 
 _CONVERT_TIMEOUT = 600.0
-
-BYTES_PER_SAMPLE = {"pcm_u8": 1, "pcm_s16le": 2, "pcm_s24le": 3,
-                    "pcm_s32le": 4, "pcm_f32le": 4}
-
-PCM_CODECS = set(BYTES_PER_SAMPLE)
 
 
 class ConvertError(Exception):
@@ -32,11 +27,6 @@ class AudioInfo:
     sample_rate: int
     channels: int
     duration: float
-
-
-def bytes_per_second(spec: Dict) -> int:
-    width = BYTES_PER_SAMPLE.get(spec["codec"], 2)
-    return spec["sample_rate"] * spec["channels"] * width
 
 
 def probe(path: Path) -> Optional[AudioInfo]:
@@ -70,28 +60,20 @@ def file_hash(path: Path) -> str:
     return h.hexdigest()[:20]
 
 
-def staged_path(source_hash: str, spec: Dict) -> Path:
-    """Content-addressed, keyed on the target format too, so a format change
-    invalidates the cache rather than silently reusing a wrong-format WAV."""
-    tag = f"{spec['codec']}-{spec['sample_rate']}-{spec['channels']}"
-    return config.STAGED / f"{source_hash}-{tag}.wav"
+def staged_path(source_hash: str) -> Path:
+    return config.STAGED / f"{source_hash}.wav"
 
 
-def convert(src: Path, source_hash: str, spec: Dict,
-            progress=None, duration: float = 0.0) -> Path:
-    """Transcode to the pedal's exact format. Returns the staged WAV path.
+def convert(src: Path, source_hash: str, progress=None,
+            duration: float = 0.0) -> Path:
+    """Transcode to the pedal's format. Returns the staged WAV path.
 
-    Both metadata flags matter: -map_metadata -1 alone still leaves ffmpeg
-    writing a LIST/INFO chunk with its own version string. -f wav is needed
-    because the .part suffix defeats format inference.
-
-    `duration` is only used to scale the progress fraction. Pass it if you
-    already know it — the caller usually does, since it is stored on the
-    library row — and save a whole ffprobe fork+exec+parse, which is a few
-    hundred milliseconds on a Pi Zero and is otherwise paid once per track on
-    every multi-file drop. Left at 0 it is probed here as before.
+    -map_metadata -1 and -fflags +bitexact together strip the tags; either one
+    alone leaves ffmpeg writing a LIST/INFO chunk with its version string. -f
+    wav because the .part suffix defeats format inference. `duration` scales
+    the progress fraction; passing it saves an ffprobe.
     """
-    dest = staged_path(source_hash, spec)
+    dest = staged_path(source_hash)
     if dest.exists() and dest.stat().st_size > 44:
         return dest
 
@@ -101,9 +83,9 @@ def convert(src: Path, source_hash: str, spec: Dict,
         "-loglevel", "error", "-progress", "pipe:1", "-nostats",
         "-i", str(src),
         "-vn",
-        "-ar", str(spec["sample_rate"]),
-        "-ac", str(spec["channels"]),
-        "-c:a", spec["codec"],
+        "-ar", str(config.SAMPLE_RATE),
+        "-ac", str(config.CHANNELS),
+        "-c:a", config.CODEC,
         "-map_metadata", "-1",
         "-fflags", "+bitexact",
         "-f", "wav",
@@ -116,19 +98,14 @@ def convert(src: Path, source_hash: str, spec: Dict,
         if info:
             total = info.duration
 
-    # stderr goes to a file, not a pipe: we only read stdout, and a chatty
-    # ffmpeg filling the stderr pipe buffer would deadlock the progress loop.
+    # stderr to a file: a chatty ffmpeg filling a pipe would deadlock the
+    # progress loop, which only reads stdout.
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8",
                                 errors="replace") as errf:
-        # Popen as a context manager closes stdout and reaps the process on
-        # every exit path; otherwise each conversion leaks the read pipe fd
-        # until GC, which bites on a long-lived service on a Pi Zero.
         with subprocess.Popen(cmd, stdout=subprocess.PIPE,
                               stderr=errf, text=True) as proc:
-            # `for line in proc.stdout` blocks until ffmpeg writes or closes
-            # stdout, so proc.wait's own timeout is never reached if ffmpeg
-            # stalls silently. A watchdog kills it at the deadline, which ends
-            # the read and surfaces as a non-zero exit below.
+            # The read blocks until ffmpeg writes, so a silent stall never
+            # reaches proc.wait's timeout; the watchdog ends it instead.
             watchdog = threading.Timer(_CONVERT_TIMEOUT, proc.kill)
             watchdog.start()
             try:
@@ -155,15 +132,9 @@ def convert(src: Path, source_hash: str, spec: Dict,
             raise ConvertError(
                 err[-1] if err else f"ffmpeg exited {proc.returncode}")
 
-    # The staged WAV is the cache: it must be durable before it can be treated
-    # as valid, or a power cut mid-write leaves a truncated file that looks
-    # good. Sync the file, then the directory so the rename itself survives.
+    # Sync before the rename, so a power cut cannot leave a complete-looking
+    # name over truncated bytes.
     with open(tmp, "rb") as f:
         os.fsync(f.fileno())
     tmp.replace(dest)
-    dfd = os.open(str(dest.parent), os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
     return dest

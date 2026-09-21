@@ -28,8 +28,8 @@ NOT_API = {"GET /", "GET /static/<*>"}
 def _normalise(rule: str) -> str:
     """Collapse every path parameter to one placeholder.
 
-    The doc writes <n>, <hash> and <id>; Flask writes <int:slot>, <h> and
-    <folder_id>. Both are naming the same thing — a parameter — and neither
+    The doc writes <n> and <hash>; Flask writes <int:slot> and <h>. Both are
+    naming the same thing — a parameter — and neither
     spelling is more correct, so compare the shape and let the names differ.
     """
     return re.sub(r"<[^>]+>", "<*>", rule)
