@@ -1,12 +1,6 @@
-/* Modernist: flat, ruled, zero radius, one red accent.
-
-   Archivo is served from /static rather than fetched from Google Fonts — the
-   device is often the only thing on its network, and a render-blocking request
-   to a host it cannot reach stalls first paint until DNS gives up. One variable
-   woff2 covers 400-800, so there is no second file to load.
-
-   @font-face declares a resource rather than painting anything, so it is the
-   one at-rule allowed outside the layers below. */
+/* Modernist: flat, ruled, zero radius, one red accent. Archivo is served from
+   /static: the device is often the only thing on its network, and a font
+   request to a host it cannot reach stalls first paint until DNS gives up. */
 @font-face {
   font-family: "Archivo";
   font-style: normal;
@@ -18,25 +12,9 @@
     U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
-/* Every style rule in this file lives in one of these four layers. An unlayered
-   rule beats every layered one, so a single stray rule at the bottom of the
-   file would silently outrank the whole sheet.
-
-   The contract, in order of what may reference what:
-
-     tokens      only custom properties. Nothing here paints.
-     base        the reset, body, headings, buttons, inputs, focus.
-     components  the parts: rows, the bar, the drop zone.
-     layout      the page skeleton and the breakpoint.
-
-   Components must name a *semantic* token (--text-danger), never a step of the
-   raw ramp. The ramp is the palette; the semantic block is the
-   vocabulary. A component reaching past the second into the first is how a
-   token layer rots back into a colour dictionary, so it is worth checking:
-
-     grep -n 'color-\(accent\|neutral\)-[0-9]' ditto/static/app.css
-
-   Every hit should be inside @layer tokens. */
+/* Every rule lives in one of four layers; an unlayered rule would outrank the
+   whole sheet. Components name a semantic token (--text-danger), never a step
+   of the raw ramp, and the suite checks both. */
 @layer tokens, base, components, layout;
 
 @layer tokens {
@@ -70,15 +48,8 @@
 
     /* -- Semantic: what the parts are allowed to say ---------------------- */
 
-    /* Text. Two weights of quiet, plus the one that means something is wrong.
-       Accent at full strength is ~3:1 on the ground — right for a bar or a
-       filled button, not for a sentence, which is why this is the 700.
-
-       One step darker than the design's 700/600 pair. Those land at 5.8:1 and
-       3.9:1 here, and everything --text-faint is used on is 11-12px: durations,
-       the version string, the loop line. 3.9 fails AA at that size, and it
-       would also be dimmer than what the page does today. Shifted so the quiet
-       tier still clears 4.5:1 while staying visibly quieter than body copy. */
+    /* Two weights of quiet, and the one that means something is wrong. One
+       step darker than the design's pair, so 11px text still clears 4.5:1. */
     --text-muted: var(--color-neutral-800);
     --text-faint: var(--color-neutral-700);
     --text-danger: var(--color-accent-700);
@@ -93,16 +64,11 @@
     --capacity-caution: var(--color-accent-600);
     --capacity-danger: var(--color-accent);
 
-    /* The ground a hovered row takes. Named here because a component may not
-       reach into the ramp. */
     --surface-hover: var(--color-neutral-200);
 
     --focus-ring: var(--color-accent);
-    /* Accent at a strength that can carry a word — either as the ink or as the
-       fill behind it. --color-accent is 3.76:1 on the light ground, which is
-       the right bar for a boundary or a bar and the wrong one for a label.
-       WCAG's large-text allowance is 18pt, or 14pt bold — that is 18.66px, not
-       14px bold, and every accent label on this page is 12-14px. */
+    /* Accent at a strength that can carry a word: --color-accent is 3.76:1 on
+       the light ground, enough for a bar and not for a 12px label. */
     --accent-legible: var(--color-accent-700);
     --hover-quiet: color-mix(in srgb, var(--color-text) 7%, transparent);
     --hover-loud: color-mix(in srgb, var(--color-accent) 10%, transparent);
@@ -133,18 +99,13 @@
     --radius-lg: 0;
   }
 
-  /* Modernist ships light only. The ramps are roles, not brightnesses: step 100
-     sits next to the background and step 900 next to the text, at both ends of
-     the scale. Reversing them keeps every one of those roles intact, so nothing
-     below this block has to know the page went dark — --text-muted is still the
-     quiet one. */
+  /* The ramps are roles, not brightnesses, so reversing them is the whole of
+     dark mode; nothing below this block knows the page went dark. */
   @media (prefers-color-scheme: dark) {
     :root {
       --color-bg: #1a1918;
       --color-surface: #242221;
       --color-text: #f3f2f2;
-      /* #ec3013 is ~3:1 on the light ground and barely 2:1 on this one. The
-         500 is the same hue with the lightness the dark ground needs. */
       --color-accent: #ff563c;
       /* 5.6:1 on this ground already, so the 700 would only be dimmer. */
       --accent-legible: var(--color-accent);
@@ -206,16 +167,11 @@
   :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   ::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
 
-  /* The [hidden] attribute is a UA rule, and every author rule in a layer beats
-     it — so any class that sets display, .libbtn and .libtools among them, was
-     quietly overriding it and leaving hidden elements on screen. An !important
-     in the lowest layer is what wins that: for important declarations the layer
-     order is reversed, so this outranks the components layer without needing to
-     out-specify anything in it. */
+  /* Every layered rule beats the UA's [hidden]; an !important in the lowest
+     layer wins it back, because important declarations reverse layer order. */
   [hidden] { display: none !important; }
 
-  /* Kept in the accessibility tree and focusable — display:none would take the
-     file input out of the tab order and off screen readers. */
+  /* Visually hidden but focusable, for the file inputs. */
   .vh {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
@@ -228,25 +184,22 @@
 
   /* -- chrome ------------------------------------------------------------- */
 
-  /* Nothing on this page is a box. Every division is a 2px rule, so the header
-     is a rule with content above it rather than a card floating on a ground. */
+  /* Nothing on this page is a box; every division is a 2px rule. */
   header {
     display: flex; align-items: center; gap: 10px;
     flex-wrap: wrap; row-gap: var(--space-1);
     padding: var(--space-3) 20px;
     border-bottom: var(--rule-major) solid var(--rule);
   }
-  /* Narrow: the brand takes the first line on its own and the three meta items
-     sit right-aligned under it. Left to wrap on their own they break inside the
-     phrase — "no / pedal", "Check for / update" — which reads as damage. */
+  /* Narrow: the brand takes a line of its own and the meta items sit under it,
+     so none of them wraps inside its phrase. */
   header h1 { flex: 1 0 100%; }
   #pedal, #ver, #update { white-space: nowrap; }
   /* Everything after the brand is pushed right as one group. */
   #pedal { margin-left: auto; font-size: var(--text-label); color: var(--text-muted); }
   /* A square, not a dot: nothing on this page is round. */
   .dot { width: 8px; height: 8px; display: inline-block; margin-right: 7px; }
-  /* Three states, not two. The unknown one is the first frame's worth of "—",
-     and painting that in the alarm colour would cry wolf on every page load. */
+  /* Three states: the unknown one is the first frame, and is not an alarm. */
   #pedal .dot { background: var(--text-faint); }
   #pedal.ok .dot { background: var(--color-text); }
   #pedal.off { color: var(--text-danger); }
@@ -265,8 +218,6 @@
     display: flex; justify-content: space-between; align-items: baseline;
     font-size: var(--text-label); color: var(--text-muted);
   }
-  /* The section head and the number beside it sit on one line, so the h2's
-     bottom margin would push the pair off the baseline it shares. */
   .row > h2 { margin: 0; }
   .listhead {
     display: flex; align-items: center; justify-content: space-between;
@@ -292,7 +243,7 @@
   }
   .link.avail:hover { opacity: 0.9; }
 
-  /* Secondary. .libbtn and .loopbtn were near-duplicates; they are one rule. */
+  /* Secondary. */
   .libbtn, .loopbtn, button.undo {
     background: none; border: var(--rule-minor) solid var(--rule);
     color: var(--color-text); border-radius: var(--radius-md);
@@ -354,17 +305,14 @@
   }
   .track:last-child { border-bottom: 0; }
   .track:hover { background: var(--surface-hover); }
-  /* A slot number that is not a control: a loop-only row's number, and the
-     library's badge for a track that is on the pedal. A filled block, so it
-     reads as a label rather than as text. */
+  /* A slot number that is not a control: a loop-only row, the library badge. */
   .num {
     font: var(--text-label) var(--font-mono); font-weight: var(--font-heading-weight);
     background: var(--color-text); color: var(--color-bg);
     border-radius: var(--radius-sm); padding: 3px 6px;
     flex: none; line-height: 1.2; white-space: nowrap;
   }
-  /* The slot a track sits in, and the way to move it. A bordered field rather
-     than a block, because it is something you type into. */
+  /* The slot a track sits in, and the way to move it. */
   .slotfield {
     width: 46px; text-align: center; padding: 3px 4px; flex: none;
     font: var(--text-small) var(--font-mono); font-weight: var(--font-heading-weight);
@@ -380,15 +328,13 @@
     font-size: var(--text-small); flex: none; min-width: 74px; text-align: right;
     text-transform: uppercase; letter-spacing: 0.04em;
   }
-  /* The word is already there, so state does not have to be carried by hue as
-     well — only "something needs you" is. */
+  /* The word carries the state; hue only says "something needs you". */
   .st.synced, .st.staged { color: var(--text-muted); }
   .st.converting, .st.error { color: var(--text-danger); }
   .st.loop { color: var(--text-faint); }
   .nm.loop-only { color: var(--text-faint); font-style: italic; }
-  /* The continuation line under a slot that holds a loop. Indented to the
-     track name, so it reads as belonging to the row above, and on its own line
-     so a narrow phone never has to squeeze it next to the name and state. */
+  /* The continuation line under a slot that holds a loop, indented to the
+     name so it reads as the row's. */
   .looprow {
     display: flex; flex-wrap: wrap; gap: var(--space-2);
     padding: 0 0 10px 56px; margin-top: -2px;
@@ -398,8 +344,7 @@
 
   /* -- library ------------------------------------------------------------ */
 
-  /* Search and sort. Uncontrolled DOM state: renderLibrary reads these and never
-     writes them, so a snapshot arriving mid-keystroke can't wipe what's typed. */
+  /* Search and sort, read on demand and never written by a render. */
   .libtools { display: flex; gap: var(--space-2); margin-bottom: 10px; }
   .librow {
     display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) 0;
@@ -413,10 +358,8 @@
   .libname:hover { text-decoration: underline dotted var(--text-faint); }
   .libdur { font-size: var(--text-small); color: var(--text-faint); flex: none; }
 
-  /* The buttons are one block that never splits. Every .libbtn is flex:none, so
-     a group that shrinks does not narrow its buttons, it spills them out of the
-     pane. Sized to its content and pushed right by the auto margin, the group
-     drops to a line of its own once the heading stops leaving room for it. */
+  /* One block that never splits; it drops to its own line when the heading
+     stops leaving room. */
   .libhead-acts { display: flex; gap: var(--space-2); flex: none; margin-left: auto; }
   #libfoot { margin-top: 10px; }
 
@@ -435,12 +378,8 @@
   }
   #dropnote { display: block; margin-top: 6px; font-size: var(--text-small); }
   #drop.over { border-color: var(--color-accent); background: var(--hover-loud); }
-  /* The input itself is off screen, so its focus ring has to land on the label.
-     Anchored on body: nothing would fail loudly if these pointed at a wrapper
-     that had gone — the two file inputs would simply have no visible focus. */
+  /* The file inputs are off screen, so their focus rings land on the labels. */
   body:has(#file:focus-visible) #drop { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-  /* Same for the Library's own file input, or a keyboard user reaching "Add
-     files" gets no visible focus at all. */
   body:has(#libfile:focus-visible) #libadd { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
   /* -- action bar --------------------------------------------------------- */
@@ -453,10 +392,8 @@
     padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
     display: flex; gap: var(--space-3); align-items: center; justify-content: space-between;
   }
-  /* Progress is the bar's own top rule filling in, laid over the 2px divider
-     rather than beside the message. It costs no layout, so a conversion can no
-     longer squeeze #msg to nothing, and the most Modernist thing on the page is
-     a rule that means something. */
+  /* Progress is the bar's top rule filling in, so it costs no layout and can
+     never squeeze #msg. */
   .prog {
     position: absolute; top: calc(var(--rule-major) * -1); left: 0; right: 0;
     height: var(--rule-major); background: transparent; overflow: hidden;
@@ -467,40 +404,27 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .err { color: var(--text-danger); }
-  /* A refusal the user has to notice: an out-of-range slot, a fill that did
-     not all fit. Weighted so it stands apart from the plain status. */
+  /* A refusal the user has to notice. */
   .msg.warn { color: var(--text-danger); font-weight: var(--font-heading-weight); }
   #undoslot { flex: none; }
 }
 
 @layer layout {
 
-  /* Narrow first. One column, the page scrolls, the action bar is pinned — the
-     layout a phone gets, and the fallback the desktop frame below reverts to. */
+  /* Narrow first: one column, the page scrolls, the action bar is pinned. */
   body { padding-bottom: 84px; }
   .pane-l { border-bottom: var(--rule-major) solid var(--rule); }
 
-  /* The device is managed from a laptop, so at this width the single column
-     becomes two: the pedal on the left, the library beside it, so putting a
-     track on the pedal and seeing it land are one glance rather than a scroll.
-
-     What binds the breakpoint is the list row. "On the pedal" spends about
-     195px on the slot field, duration, status and clear button before the
-     track name gets anything, plus 40px of section padding, so a 450px pane
-     leaves the name around 215px — roughly thirty characters, which is a song
-     title. Below that the names ellipsise while the columns are still half
-     empty, and one column reads better. */
+  /* Two columns from 900px: below that a pedal row leaves the track name under
+     thirty characters, and one column reads better. */
   @media (min-width: 900px) {
 
-    /* Header and bar are grid rows, not position:fixed. Same picture, minus the
-       padding-bottom that guesses at the bar's height and the safe-area maths
-       that guesses at the phone. */
+    /* Header and bar are grid rows, not position:fixed. */
     body {
       height: 100dvh; overflow: hidden; padding-bottom: 0;
       display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
     }
-    /* Relative, not static: the progress rule is absolutely positioned against
-       the bar, and a static bar would hand it the viewport instead. */
+    /* The progress rule is positioned against the bar. */
     .bar { position: relative; }
     header h1 { flex: 0 0 auto; }
 
@@ -510,18 +434,12 @@
     }
     .pane-l { border-right: var(--rule-major) solid var(--rule); border-bottom: 0; }
 
-    /* Each pane scrolls on its own, so reaching slot 80 on the left never takes
-       the library off screen, which is the thing two columns exist to fix.
-
-       min-height:0 on every grid ancestor is not optional: without it a grid
-       item refuses to shrink below its content, the panes silently never
-       scroll, and the action bar is pushed off the bottom of the screen. */
+    /* Each pane scrolls on its own. min-height:0 on every grid ancestor is
+       what lets them shrink below their content and scroll at all. */
     .pane { min-height: 0; }
     .pane-l { overflow-y: auto; }
 
-    /* The right pane is the one that stays put: its own head and search should
-       not scroll away with the rows, so the library is a grid and only the rows
-       are the part that moves. */
+    /* The library's head and search stay put; only the rows scroll. */
     .pane-r { overflow: hidden; display: grid; }
     #libcard {
       min-height: 0; display: grid;

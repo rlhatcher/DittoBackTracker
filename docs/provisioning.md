@@ -262,7 +262,7 @@ sudo -u ditto-svc sh -c 'time { dd if=/dev/zero of=/media/ditto/speed.bin bs=1M 
 sudo -u ditto-svc rm /media/ditto/speed.bin
 ```
 
-Expect roughly 1 MB/s. That is where `config.LOOP_STAGE_TIMEOUT` comes from.
+Expect roughly 1 MB/s, so a five-minute track takes about 40 seconds to write.
 
 ---
 

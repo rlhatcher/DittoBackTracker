@@ -1,15 +1,12 @@
-"""Detect, mount, write to, and release the Ditto+.
+"""Detect, mount, write to and release the Ditto+.
 
-BT.WAV is the only file this tool writes, and it is written and removed freely
-because it is re-derivable from sources/. LOOP.WAV is the user's own recording,
-with no source and no way to reconstruct it: it is only ever read (to stage a
-download) or removed on an explicit, deliberate user action — never as a side
-effect of anything else.
+BT.WAV is the only file this writes, and it is written and removed freely
+because it is re-derivable from sources/. LOOP.WAV is the user's own recording:
+read for a download, removed only on an explicit request.
 """
 
 from __future__ import annotations
 
-import errno
 import logging
 import os
 import shutil
@@ -19,14 +16,12 @@ import time
 from pathlib import Path
 from typing import Dict, Tuple
 
-from . import config, media
+from . import config
 
 log = logging.getLogger(__name__)
 
-# A wedged or half-unplugged USB device makes mount(8) block indefinitely.
-# The monitor thread calls mount() and the shutdown path calls umount(), so an
-# untimed call there would freeze pedal detection or stop the device powering
-# off — better to surface it as an error the panel can show.
+# A wedged USB device makes mount(8) block indefinitely, and the monitor thread
+# would block with it.
 _MOUNT_TIMEOUT = 30.0
 
 
@@ -35,14 +30,8 @@ class PedalError(Exception):
 
 
 def _run(cmd, what: str) -> subprocess.CompletedProcess:
-    """Run a mount helper, turning every failure into a PedalError.
-
-    OSError matters as much as the timeout: a missing or non-executable
-    mount(8) raises FileNotFoundError or PermissionError, which is not a
-    PedalError and so escapes the caller's handler entirely. In the monitor
-    that lands in the catch-all and logs a full traceback every POLL_SECS
-    forever, on a device with a read-only root and a small journal.
-    """
+    """Run a mount helper, turning a timeout or a missing binary into a
+    PedalError the monitor can show rather than a traceback every poll."""
     try:
         return subprocess.run(cmd, capture_output=True, text=True,
                               timeout=_MOUNT_TIMEOUT)
@@ -53,7 +42,7 @@ def _run(cmd, what: str) -> subprocess.CompletedProcess:
 
 
 def present() -> bool:
-    """Is the pedal enumerated? by-label is created by udev automatically."""
+    """Is the pedal enumerated? udev creates the by-label link."""
     return config.PEDAL_DEV.exists()
 
 
@@ -100,13 +89,11 @@ def loop_path(slot: int) -> Path:
 
 
 def has_loop(slot: int) -> bool:
-    """Did the user record a loop in this slot? Only ever read or, on an
-    explicit user action, removed — never overwritten."""
     return loop_path(slot).is_file()
 
 
 def occupied_slots() -> Dict[int, int]:
-    """slot -> BT.WAV size, for slots that actually have a backing track."""
+    """slot -> BT.WAV size, for slots that have a backing track."""
     out = {}
     if not mounted():
         return out
@@ -120,35 +107,6 @@ def occupied_slots() -> Dict[int, int]:
     return out
 
 
-def detect_format() -> Tuple[Dict, str]:
-    """Probe a pedal-written file for the exact target format.
-
-    Prefer an existing BT.WAV — a backing track the pedal has accepted is a
-    better template than a recorded loop, in case the two differ.
-    """
-    if not mounted():
-        return dict(config.DEFAULT_FORMAT), "default (pedal not mounted)"
-
-    candidates = []
-    for n in range(1, config.SLOTS + 1):
-        d = slot_dir(n)
-        bt, loop = d / config.TRACK_FILENAME, d / config.LOOP_FILENAME
-        if bt.is_file():
-            candidates.append((0, bt))
-        if loop.is_file():
-            candidates.append((1, loop))
-    candidates.sort(key=lambda t: t[0])
-
-    for _, path in candidates[:8]:
-        info = media.probe(path)
-        if info and info.codec in media.PCM_CODECS:
-            return ({"sample_rate": info.sample_rate,
-                     "channels": info.channels,
-                     "codec": info.codec},
-                    f"probed from {path.name}")
-    return dict(config.DEFAULT_FORMAT), "default (nothing to probe)"
-
-
 def capacity() -> Tuple[int, int]:
     """(free_bytes, total_bytes) on the pedal."""
     if not mounted():
@@ -157,115 +115,28 @@ def capacity() -> Tuple[int, int]:
     return (st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize)
 
 
-# errnos that mean "this filesystem has no directory fsync", as opposed to
-# "this write is in trouble". EINVAL is what vfat returns; ENOTSUP/EOPNOTSUPP
-# cover drivers that refuse the operation outright.
-#
-# Kept deliberately narrow. The same handler covers the open, the fsync and the
-# close, so anything wider starts absorbing failures that have nothing to do
-# with an unsupported operation — EACCES and EPERM are access or policy
-# problems, EBADF is a descriptor bug — and silence there would recreate exactly
-# the ambiguity this set exists to remove.
-_DIR_FSYNC_UNSUPPORTED = frozenset({
-    errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP,
-})
-
-
-def _atomic_copy(src: Path, dest: Path, prefix: str) -> None:
-    """Copy `src` over `dest` so `dest` is never seen half-written.
-
-    Temp file in the destination directory, fsync, chmod, rename, then fsync
-    the directory. Both directions of the pedal transfer use this — writing a
-    staged WAV into a slot, and copying a recorded loop back off — because both
-    have a reader that must never see a truncated file: the pedal's firmware in
-    one direction, the browser in the other.
-
-    Kept in one place deliberately. This is the durability-critical path on a
-    device whose whole threat model is a pulled plug, and it was previously two
-    byte-identical copies, so a correction had to land twice or land wrong.
-
-    `prefix` names the temp file. Interrupted writes are collected by name:
-    `~bt` on the pedal by clean_temp_files, `~loop` locally when the staging
-    directory is purged at startup.
-
-    What this does *not* make durable, and why that is fine:
-
-    - The slot directory itself, when mkdir has just created one. The entry for
-      it lives in the volume root, which is not fsynced here.
-    - Anything at all, for the loop direction.
-
-    Both are closed by the caller rather than here. `_do_write` runs `os.sync()`
-    between this returning and `db.mark_synced()`, so the database never records
-    a track as written until every filesystem is flushed — directory entry,
-    rename and mode together. The loop direction copies into the local staging
-    directory, which is emptied at startup by design, so durability there would
-    be work for something deliberately transient.
-
-    Syncing the volume root here instead would add a round trip to a ~1 MB/s USB
-    link on every track written, to guarantee something that is already
-    guaranteed a line later.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent),
-                                    prefix=prefix, suffix=".tmp")
-    tmp = Path(tmp_name)
-    try:
-        # os.fdopen first so it owns and closes fd even if opening the source
-        # raises — a staged file, or a loop, can vanish between check and copy.
-        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
-            shutil.copyfileobj(fsrc, fdst, length=1 << 19)
-            # Mode before the sync, not after the close: fsync covers this
-            # inode's metadata as well as its data, so doing it here makes the
-            # permissions as durable as the bytes. chmod after the fsync would
-            # leave a window where a power cut lands the rename but not the
-            # mode, and the file appears with mkstemp's private 0600.
-            os.fchmod(fdst.fileno(), 0o644)
-            fdst.flush()
-            os.fsync(fdst.fileno())
-        tmp.replace(dest)
-        try:
-            dirfd = os.open(str(dest.parent), os.O_RDONLY)
-            try:
-                os.fsync(dirfd)
-            finally:
-                os.close(dirfd)
-        except OSError as e:
-            # Plenty of FAT drivers simply do not implement fsync on a
-            # directory. That is the expected case here, it is harmless, and
-            # the os.sync() the caller does covers it — so it stays silent.
-            #
-            # A failing card is not that, and the two must not look alike. Say
-            # so, but do not raise: the rename has already happened, the file
-            # is in place and readable, and only its directory entry is
-            # unconfirmed. Failing the write here would report a loss that did
-            # not occur and would leave the caller retrying a copy that landed.
-            if e.errno not in _DIR_FSYNC_UNSUPPORTED:
-                log.warning("could not flush the directory entry for %s: %s. "
-                            "The file is written, but may not survive a power "
-                            "cut before the next sync.", dest, e)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
 def write_track(slot: int, wav: Path) -> None:
     """Copy a staged WAV into the slot as BT.WAV.
 
-    Temp file then rename, so a truncated WAV never appears in a slot. The
-    rename is exactly the operation that fails to stick without a flush, so
-    the caller must unmount cleanly afterwards.
+    Temp file, fsync, rename: the pedal never sees a truncated file, and a
+    power cut leaves either the old file or the new one. The caller runs
+    os.sync() afterwards, which is what makes the rename stick on FAT.
     """
-    _atomic_copy(wav, track_path(slot), "~bt")
-
-
-def copy_loop(slot: int, dest: Path) -> None:
-    """Copy a slot's LOOP.WAV off the pedal into a local `dest`.
-
-    The reverse direction of write_track: the pedal is the source, `dest` is a
-    local staging file. Raises FileNotFoundError if the loop is gone (e.g.
-    deleted on the pedal between has_loop() and here).
-    """
-    _atomic_copy(loop_path(slot), dest, "~loop")
+    dest = track_path(slot)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix="~bt",
+                                    suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fdst, open(wav, "rb") as fsrc:
+            shutil.copyfileobj(fsrc, fdst, length=1 << 19)
+            os.fchmod(fdst.fileno(), 0o644)   # before the sync, so it lands too
+            fdst.flush()
+            os.fsync(fdst.fileno())
+        tmp.replace(dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def remove_track(slot: int) -> None:
@@ -276,21 +147,15 @@ def remove_track(slot: int) -> None:
 
 
 def remove_loop(slot: int) -> None:
-    """Remove a slot's LOOP.WAV by exact name, on explicit user action only.
-
-    Never touches BT.WAV, never removes the slot directory, never recurses.
-    """
+    """Remove a slot's LOOP.WAV by exact name. Never touches BT.WAV."""
     p = loop_path(slot)
     if p.is_file():
         p.unlink()
 
 
 def clean_temp_files() -> int:
-    """Delete leftover ~bt*.tmp files from writes interrupted by power loss.
-
-    They are invisible to the pedal but consume its very limited capacity.
-    Returns the number removed.
-    """
+    """Delete ~bt*.tmp files left by interrupted writes. Invisible to the
+    pedal, but they consume its capacity. Returns the number removed."""
     if not mounted():
         return 0
     removed = 0

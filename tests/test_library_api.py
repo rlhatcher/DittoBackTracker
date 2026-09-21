@@ -2,8 +2,8 @@
 
 These run against a real Service on a throwaway data tree rather than the
 duck-typed FakeService in test_web_loops, because the interesting behaviour
-(refusing to delete a track a slot still holds, the collector's view of what is
-still referenced) lives in the service, not the route. The `service`, `app` and
+(refusing to delete a track a slot still holds, what a forget takes with it)
+lives in the service, not the route. The `service`, `app` and
 `client` fixtures come from conftest.
 """
 
@@ -234,8 +234,7 @@ def test_audio_rejects_anything_that_is_not_a_hash(client, bad):
 
 
 def test_audio_is_unreachable_once_the_track_is_deleted(client):
-    """Bytes can outlive the row by up to one collector pass. The row is the
-    gate, not the file."""
+    """The row is the gate, not the file."""
     seed(H1)
     db.library_delete(H1)
 

@@ -1,9 +1,4 @@
-"""Schema, migration and library lifetime.
-
-The v1 -> v2 and the v3 -> v4 migrations both rebuild a table, and db.py had no
-test file before the first, so these are deliberately thorough about the shapes
-the old database can be in.
-"""
+"""Schema, migration and library lifetime."""
 
 import sqlite3
 import threading
@@ -28,45 +23,6 @@ def fresh_db(tmp_path, monkeypatch):
             delattr(db._local, attr)
 
 
-V1_SCHEMA = """
-CREATE TABLE slots (
-    slot         INTEGER PRIMARY KEY,
-    source_hash  TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    duration     REAL NOT NULL DEFAULT 0,
-    state        TEXT NOT NULL,
-    synced_hash  TEXT,
-    error        TEXT,
-    updated      REAL NOT NULL
-);
-CREATE TABLE trash (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    slot         INTEGER NOT NULL,
-    source_hash  TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    duration     REAL NOT NULL DEFAULT 0,
-    deleted      REAL NOT NULL
-);
-"""
-
-
-def build_v1(path, slots=(), trash=()):
-    """Write a database in the pre-library shape, exactly as v1 left it —
-    including never stamping user_version."""
-    c = sqlite3.connect(str(path))
-    c.executescript(V1_SCHEMA)
-    c.executemany(
-        """INSERT INTO slots (slot, source_hash, display_name, duration, state,
-                              synced_hash, error, updated)
-           VALUES (?,?,?,?,?,?,?,?)""", slots)
-    c.executemany(
-        """INSERT INTO trash (id, slot, source_hash, display_name, duration,
-                              deleted) VALUES (?,?,?,?,?,?)""", trash)
-    c.commit()
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 0
-    c.close()
-
-
 # --- a brand-new database ---------------------------------------------------
 
 def test_fresh_database_is_created_and_stamped(fresh_db):
@@ -80,10 +36,10 @@ def test_fresh_database_is_created_and_stamped(fresh_db):
     assert db.library_all() == []
 
 
-def test_fresh_database_leaves_no_v1_backup(fresh_db):
+def test_fresh_database_leaves_no_backup(fresh_db):
     """The backup exists for the migration. A new file has nothing to back up."""
     db.conn()
-    assert not (fresh_db.parent / "state.db.v1").exists()
+    assert list(fresh_db.parent.glob("state.db.v*")) == []
 
 
 def test_reopening_a_current_database_is_a_no_op(fresh_db):
@@ -173,87 +129,6 @@ def build_v3(path, library=(), folders=(), slots=(), trash=()):
     c.close()
 
 
-# --- migrating a v1 database ------------------------------------------------
-
-def test_v1_migration_backfills_and_reshapes(fresh_db):
-    build_v1(
-        fresh_db,
-        slots=[(3, "aaaaaaaaaaaaaaaaaaaa", "Blue Bossa", 210.0, "synced",
-                "aaaaaaaaaaaaaaaaaaaa", None, 100.0)],
-        trash=[(7, 12, "bbbbbbbbbbbbbbbbbbbb", "Autumn Leaves", 180.0, 90.0)],
-    )
-
-    c = db.conn()
-
-    assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
-    lib = {r["source_hash"]: r for r in db.library_all()}
-    assert lib["aaaaaaaaaaaaaaaaaaaa"]["name"] == "Blue Bossa"
-    assert lib["aaaaaaaaaaaaaaaaaaaa"]["duration"] == 210.0
-    assert lib["bbbbbbbbbbbbbbbbbbbb"]["name"] == "Autumn Leaves"
-
-    # The denormalised columns are gone from the slot table, and the trash
-    # table is gone altogether...
-    slot_cols = {r[1] for r in c.execute("PRAGMA table_info(slots)")}
-    assert "display_name" not in slot_cols and "duration" not in slot_cols
-    assert c.execute("PRAGMA table_info(trash)").fetchall() == []
-
-    # ...but the API still reports them, joined from library.
-    row = db.get_slot(3)
-    assert row["display_name"] == "Blue Bossa"
-    assert row["duration"] == 210.0
-    assert row["state"] == "synced"
-
-
-def test_v1_migration_lets_the_slot_win_a_name_conflict(fresh_db):
-    """One source in a slot and in trash under two names: the slot's is the one
-    the user last saw."""
-    h = "cccccccccccccccccccc"
-    build_v1(
-        fresh_db,
-        slots=[(1, h, "Current name", 60.0, "synced", h, None, 100.0)],
-        trash=[(1, 9, h, "Old name", 60.0, 200.0)],
-    )
-
-    db.conn()
-
-    assert db.library_get(h)["name"] == "Current name"
-
-
-def test_v1_migration_lets_the_lower_slot_win(fresh_db):
-    """The same track in two slots resolves to the lower one, deterministically."""
-    h = "dddddddddddddddddddd"
-    build_v1(fresh_db, slots=[
-        (9, h, "From slot nine", 60.0, "synced", h, None, 100.0),
-        (2, h, "From slot two", 60.0, "synced", h, None, 100.0),
-    ])
-
-    db.conn()
-
-    assert db.library_get(h)["name"] == "From slot two"
-
-
-def test_v1_migration_writes_a_backup(fresh_db):
-    """The recovery path if a rollback ever strands old code on a new file."""
-    build_v1(fresh_db, slots=[(1, "aaaaaaaaaaaaaaaaaaaa", "A", 1.0, "synced",
-                              "aaaaaaaaaaaaaaaaaaaa", None, 100.0)])
-
-    db.conn()
-
-    backup = fresh_db.parent / "state.db.v1"
-    assert backup.exists()
-    c = sqlite3.connect(str(backup))
-    cols = {r[1] for r in c.execute("PRAGMA table_info(slots)")}
-    assert "display_name" in cols, "the backup must be the pre-migration shape"
-    c.close()
-
-
-def test_v1_migration_handles_an_empty_database(fresh_db):
-    build_v1(fresh_db)
-    db.conn()
-    assert db.all_slots() == []
-    assert db.library_all() == []
-
-
 def open_concurrently(n=6):
     """Have n threads first-connect at the same instant. Returns (errors, rows).
 
@@ -278,16 +153,6 @@ def open_concurrently(n=6):
     return errors, results
 
 
-def test_concurrent_first_connect_migrates_once(fresh_db):
-    build_v1(fresh_db, slots=[(1, "aaaaaaaaaaaaaaaaaaaa", "A", 1.0, "synced",
-                              "aaaaaaaaaaaaaaaaaaaa", None, 100.0)])
-
-    errors, results = open_concurrently()
-
-    assert errors == []
-    assert results == [1] * 6
-
-
 def test_concurrent_first_connect_to_a_new_database(fresh_db):
     """A device's very first boot. The file is still in rollback-journal mode,
     and `PRAGMA journal_mode=WAL` takes an exclusive lock without waiting on
@@ -301,7 +166,7 @@ def test_concurrent_first_connect_to_a_new_database(fresh_db):
 
 def test_a_future_schema_is_refused_loudly(fresh_db):
     c = sqlite3.connect(str(fresh_db))
-    c.executescript(V1_SCHEMA)
+    c.executescript(V2_SCHEMA)
     c.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
     c.commit()
     c.close()
@@ -402,8 +267,8 @@ A, B = "aaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbb"
 
 def test_a_v3_database_loses_its_folders_and_keeps_every_track(fresh_db):
     """The rebuild carries every row by hash. A library row is the only thing
-    keeping its audio alive, so a step that drops one destroys a file on the
-    next collector pass."""
+    keeping its audio alive, so a step that drops one loses a file at the next
+    boot."""
     build_v3(fresh_db,
              library=[(A, "Blue Bossa", 311.0, 100.0, 1, 0),
                       (B, "Autumn Leaves", 320.0, 200.0, None, 3)],
@@ -455,20 +320,17 @@ def test_a_v2_database_migrates_straight_to_v4(fresh_db):
     assert (fresh_db.parent / "state.db.v2").exists()
 
 
-def test_a_v1_database_migrates_all_the_way_to_v4_in_one_open(fresh_db):
-    """A device that has been off for three releases. It must never be left
-    stamped at an intermediate version that no build in the field writes."""
-    build_v1(fresh_db, slots=[(1, A, "A", 1.0, "synced", A, None, 100.0)],
-             trash=[(7, 12, B, "B", 2.0, 90.0)])
+def test_a_v1_database_is_refused_rather_than_read(fresh_db):
+    """v1 never stamped a version and kept names on the slot rows. Nothing has
+    migrated one since September 2026; opening one must say so rather than
+    create empty tables beside it."""
+    c = sqlite3.connect(str(fresh_db))
+    c.executescript("CREATE TABLE slots (slot INTEGER PRIMARY KEY, "
+                    "display_name TEXT);")
+    c.close()
 
-    c = db.conn()
-
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 4
-    assert {r["name"] for r in db.library_all()} == {"A", "B"}, \
-        "the v1 trash still seeds the library on its way out"
-    assert (fresh_db.parent / "state.db.v1").exists()
-    assert not (fresh_db.parent / "state.db.v3").exists(), \
-        "v3 never existed on this device"
+    with pytest.raises(RuntimeError, match="v1 database"):
+        db.conn()
 
 
 def test_a_fresh_database_is_created_at_v4_and_never_migrates(fresh_db):

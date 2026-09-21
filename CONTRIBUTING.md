@@ -46,8 +46,8 @@ model.
 **Pins**, for facts that are objectively decidable from the files and already
 one edit from going wrong silently. `tests/test_frontend.py` and
 `tests/test_docs.py` are entirely this. A pin earns its place when the failure
-it prevents is invisible: a stale API doc, a contrast ratio, an asset that
-404s into a fallback font. If
+it prevents is invisible: a stale API doc, an asset that 404s into a fallback
+font. If
 breaking the thing would produce a loud error anyway, it doesn't need a pin.
 
 **Mutation-check every new test.** Break the thing it pins, watch it fail, read
@@ -96,8 +96,8 @@ that carry the design record. `.git-blame-ignore-revs` only helps GitHub blame;
 `git log -L`, `git log -S` and most editors ignore it.
 
 `node --check` parses `app.js` in the suite. There is no JS linter and no
-`package.json`: the front end's real invariants are contrast, layer discipline
-and client/server constant parity, and those are tests, not lint rules.
+`package.json`: the front end's real invariants are layer discipline and the
+asset allowlist, and those are tests, not lint rules.
 
 ## Docs
 
@@ -157,9 +157,7 @@ Adding a file to `static/` is two edits: the file, and `ASSETS` in `web.py`. A
 test catches the second if you forget.
 
 Colours come from the token layer in `app.css`. A component naming a raw ramp
-step fails the suite, and so does any text pair below its WCAG threshold. The
-table in `test_frontend.py` is hand-maintained, so add a row when you add a new
-foreground/background pairing.
+step fails the suite.
 
 ## Hardware
 

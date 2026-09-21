@@ -75,49 +75,9 @@ then
   exit 1
 fi
 
-# From here on the service is down, and everything below can exit non-zero.
-# Put it back if we fail, rather than leaving a device with no web UI. A device
-# that was already stopped stays stopped.
-#
-# Only until the chown, though. Past that the data partition belongs to $SVC
-# while the installed unit still names the old account, so starting it would
-# restore a service that cannot write its own database -- a restart loop, and
-# more confusing than being down. Say what state the device is in instead.
-WAS_ACTIVE=0
-if systemctl is-active --quiet ditto-web 2>/dev/null; then
-  WAS_ACTIVE=1
-fi
-# How far in we got, so the trap knows what is safe to do about it.
-STAGE=stopped
-restore_service() {
-  local status=$?
-  [ "$status" -eq 0 ] && return 0
-  case "$STAGE" in
-    stopped)
-      # Nothing has changed hands yet, so what was running is still coherent.
-      if [ "$WAS_ACTIVE" -eq 1 ]; then
-        echo >&2
-        echo "install failed; restarting the service that was running" >&2
-        sudo systemctl start ditto-web || true
-      fi
-      ;;
-    chowning)
-      echo >&2
-      echo "install failed after /var/lib/ditto changed hands: the data now" >&2
-      echo "belongs to $SVC and the service is not yet set up to match." >&2
-      echo "Nothing is started, because starting it would only fail on every" >&2
-      echo "write. Fix what failed above and run install.sh again." >&2
-      ;;
-    installed)
-      : # the unit matches the data; the message below this line is better
-      ;;
-  esac
-}
-trap restore_service EXIT
-
 # Stop before touching ownership: a recursive chown under a live SQLite writer
-# can leave a half-owned WAL. A no-op on a first install, and the reason a
-# re-install over a running device is safe.
+# can leave a half-owned WAL. If anything below fails, fix it and run this
+# again; it is idempotent.
 sudo systemctl stop ditto-web 2>/dev/null || true
 # The pedal's fstab entry carries uid=/gid= and is rewritten below, so anything
 # mounted under the old options has to come down first. `user` in fstab lets
@@ -128,30 +88,14 @@ if mountpoint -q /media/ditto; then
 fi
 
 echo "==> ownership -> $SVC"
-# Everything below this line writes as $SVC, because from here $SVC owns the
-# tree and git refuses a work tree owned by anyone else.
-#
-# The stage is set before the chown rather than after. `chown -R` reports what
-# it could not change, carries on with the rest, and exits non-zero -- so a
-# partial failure trips set -e with much of the tree already moved. Setting it
-# afterwards would leave the trap believing nothing had changed hands, and
-# starting a service onto data it does not own is the exact case this variable
-# exists to prevent.
-STAGE=chowning
+# Everything below writes as $SVC, because from here $SVC owns the tree and
+# git refuses a work tree owned by anyone else.
 sudo chown -R "$SVC:$SVC" /var/lib/ditto
 
 echo "==> code -> $APP"
 sudo -u "$SVC" mkdir -p "$APP"
 sudo -u "$SVC" rm -rf "$APP/ditto"
 sudo -u "$SVC" cp -r "$HERE/ditto" "$APP/"
-# Record the deployed commit so the app reports its revision and the update
-# check has a baseline. Harmless if this checkout isn't a git repo. Piped
-# through tee because the redirect would run as the caller, who cannot write
-# into $APP any more.
-if sudo -u "$SVC" git -C "$HERE" rev-parse HEAD >/dev/null 2>&1; then
-  sudo -u "$SVC" git -C "$HERE" rev-parse HEAD \
-    | sudo -u "$SVC" tee "$APP/REVISION" >/dev/null
-fi
 
 # Check the rule parses before installing it. A malformed file in
 # /etc/sudoers.d breaks sudo for every user on a device whose root filesystem
@@ -177,8 +121,6 @@ sudo cp "$HERE/systemd/ditto-web.service" /etc/systemd/system/
 # OTA restart helper: started on demand after a self-update, not enabled at boot.
 sudo cp "$HERE/systemd/ditto-restart.service" /etc/systemd/system/
 sudo systemctl daemon-reload
-# Unit and data agree from here; the script owns the restart below.
-STAGE=installed
 sudo systemctl reset-failed ditto-web 2>/dev/null || true
 # enable (create the boot symlink) then restart, so re-installing over a running
 # service actually loads the new code. `enable --now` no-ops on an already-active

@@ -29,9 +29,8 @@ slots are all modelling something those pedals do not have. It is a second
 product sharing a converter, not a port.
 
 The slot *count* is already parameterised, for what it is worth: nothing spells
-out 99 and clients read `slot_count` from the snapshot. The layout is not, and
-it reaches past `pedal.py` into `detect_format()` and the `slots` schema. The
-four places, the layouts and their sources are in
+out 99 and clients read `slot_count` from the snapshot. The layout is not. The
+layouts and their sources are in
 [pedal-format.md](pedal-format.md#other-models), all secondhand and unconfirmed
 on hardware.
 

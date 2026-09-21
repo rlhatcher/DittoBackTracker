@@ -24,13 +24,10 @@ Full snapshot. The same object is pushed over `/api/events`.
   "busy": null,
   "progress": null,
   "error": null,
-  "ip": "192.168.1.42",
   "version": "0.4.0",
   "revision": "a1b2c3d",
   "update_available": false,
   "remote_revision": null,
-  "format": { "codec": "pcm_s24le", "sample_rate": 44100, "channels": 1 },
-  "format_source": "probed from BT.WAV",
   "capacity": {
     "bytes_free": 496000000,
     "bytes_total": 500170752,
@@ -63,7 +60,6 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `pedal` | `absent`, `mounted`, `error` |
 | `busy` | Description of current work, or `null` when idle. Unplug only when it is `null` |
 | `progress` | 0.0–1.0 during conversion, else `null` |
-| `format_source` | Which pedal file the target format was read from |
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
 | `version` | Package version string |
@@ -143,26 +139,20 @@ so putting it back is an assign.
 
 ## GET /api/loops/&lt;n&gt;
 
-Download the pedal-recorded loop in slot `n`. The worker copies `LOOP.WAV` off
-the pedal to a transient staging file on the Pi, the response streams that file
-as an attachment, and the staged copy is purged once the response completes.
-**Download never deletes.** The pedal keeps the original, so a failed or partial
-download costs nothing; just retry.
+Download the pedal-recorded loop in slot `n`, streamed straight off the pedal
+as an attachment. **Download never deletes.** A failed or partial download
+costs nothing; just retry. A whole-pedal loop is ~477 MiB and the USB link is
+~1 MB/s, so a large one takes minutes.
 
 ```bash
 curl -OJ http://dittobacktracker.local/api/loops/5    # -> loop-05.wav
 ```
 
-The request blocks while staging: seconds for a typical loop, up to ~8 min for a
-maximal ~477 MiB one over the ~1 MB/s USB link. It waits up to `LOOP_STAGE_TIMEOUT`
-(600 s) before giving up with a `503`.
-
 | Status | Meaning |
 |---|---|
 | `200` | `Content-Disposition: attachment; filename="loop-NN.wav"`, `audio/wav` body |
 | `404` | The slot has no loop |
-| `500` | Staging failed for another reason (e.g. a local I/O error copying off the pedal). Body is `{"error": "..."}` |
-| `503` | No pedal is mounted, or staging exceeded its time limit |
+| `503` | No pedal is mounted |
 
 ---
 
@@ -256,8 +246,7 @@ there is only one copy of it.
 
 ## DELETE /api/library/&lt;hash&gt;
 
-Forget a track, and with it the only copy of its audio. The file itself goes on
-the next collector pass.
+Forget a track, and with it the only copy of its audio.
 
 Refuses with `409` while any slot still holds the track, naming them, so a
 client can ask before destroying something the pedal is using:
@@ -432,9 +421,9 @@ curl -N http://dittobacktracker.local/api/events
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
 | `413` | `POST /api/slots/<n>`, `POST /api/upload` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
-| `500` | `GET /api/loops/<n>`, `POST /api/slots/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error); or the upload could not be stored: a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
+| `500` | `POST /api/slots/<n>` | The upload could not be stored: a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
-| `503` | `GET /api/loops/<n>` | No pedal mounted, or loop staging exceeded its time limit. Body is `{"error": "..."}` |
+| `503` | `GET /api/loops/<n>` | No pedal mounted. Body is `{"error": "..."}` |
 
 `POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both
 are batches, so they return `201` even when some or all files were rejected,

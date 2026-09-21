@@ -180,7 +180,6 @@ behind the same reach and reduce the rules in `etc/` to a statement of intent.
 | [hardware.md](docs/hardware.md) | Parts, power, settings |
 | [api.md](docs/api.md) | HTTP API |
 | [pedal-format.md](docs/pedal-format.md) | What the Ditto+ expects, measured. Not in TC Electronic's docs |
-| [loop-processing.md](docs/loop-processing.md) | Reading loops off the pedal |
 | [roadmap.md](docs/roadmap.md) | Unbuilt and not planned |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Layering, tests, commit conventions |
 

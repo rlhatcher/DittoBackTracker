@@ -117,7 +117,7 @@ def data_tree(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(config, "DATA", tmp_path)
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "state.db")
-    for name in ("SOURCES", "STAGED", "LOOPS"):
+    for name in ("SOURCES", "STAGED"):
         d = tmp_path / name.lower()
         monkeypatch.setattr(config, name, d)
         d.mkdir(parents=True, exist_ok=True)
@@ -150,10 +150,9 @@ def drain(svc, timeout: float = DRAIN_TIMEOUT) -> None:
 def service(data_tree):
     """A running Service on its own data tree.
 
-    The drain lets the boot sweep finish, so a test about a guard is not left
-    asserting on a refusal that came from the collector. try/finally because a
-    failure before the yield would otherwise leave the worker and monitor
-    threads running into the next test.
+    The drain lets any boot work finish first. try/finally because a failure
+    before the yield would otherwise leave the worker and monitor threads
+    running into the next test.
     """
     svc = core.Service()
     try:

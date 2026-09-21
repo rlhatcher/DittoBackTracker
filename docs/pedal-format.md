@@ -94,7 +94,9 @@ Each holds up to two files, and they coexist:
 | `LOOP.WAV` | the pedal | A loop recorded on the pedal |
 
 Writing `LOOP.WAV` would destroy a recording. A slot with both plays the backing
-track with the recorded loop over it, which is the point of the feature.
+track with the recorded loop over it, which is the point of the feature. The
+tool reads `LOOP.WAV` for a download and unlinks it on an explicit request, and
+never touches it otherwise.
 
 ---
 
@@ -160,35 +162,12 @@ hardware before building anything on it.
 | Track file | `BT.WAV` | last file added wins | `TRACK.WAV` or `TRACK.AIF` |
 | How many | 99 | 1 | 2, one per LOOP control |
 
-The headline is not that a folder is named differently. **Neither model has
-slots.** The X2 holds one backing track and plays whichever file was added
-last; the X4 holds two, addressed by which LOOP control plays them. The
-numbered slot list, the library-to-slot assignment and moving a track between
-slots are all modelling something these pedals do not have. That is a second
-product sharing a converter, not a port.
-
-Built anyway, four things assume the Ditto+ layout:
-
-- `pedal.detect_format()` finds a file to probe by walking slots 1 to
-  `config.SLOTS` and stat-ing `SLOT_DIR.format(n)`. The audio format is read
-  from the pedal at mount time rather than hardcoded, but the *search* for
-  something to read is not layout-independent, so it has to be taught the new
-  layout before it can detect anything on one.
-- `db.slots.slot` is `INTEGER PRIMARY KEY`, and the move/swap parks a row at
-  `slot = -1` while it exchanges two others. Both assume one small integer
-  keyspace. A model whose tracks aren't identified by a number in that range
-  needs a schema change, not just new paths.
-- `config.TRACK_FILENAME` and `config.LOOP_FILENAME` are one pair for the
-  build. The X4 reportedly accepts AIFF as well as WAV, and no source here says
-  what it names a loop it recorded itself. That matters, because not
-  destroying that file is the one hard rule here.
-- `config.PEDAL_LABEL` is one label per process, so a build serves one model.
-  Both other pedals report as `DITTO`, so they cannot be told apart by label
-  either. Telling an X2 from an X4 means reading what is on the volume.
-
-What is *not* in the way: the rest of the code already reads `config.SLOTS` and
-`config.SLOT_DIR` rather than spelling out 99, and clients read `slot_count`
-from the state snapshot. Slot count is not the hard part. The data model is.
+**Neither model has slots.** The X2 holds one backing track and plays whichever
+file was added last; the X4 holds two, addressed by which LOOP control plays
+them. The slot list, the library-to-slot assignment and moving a track between
+slots model something these pedals do not have, so supporting one is a second
+product sharing a converter, not a port. Both report as `DITTO`, so they cannot
+be told apart by label either.
 
 Sources: TC Electronic's Ditto X4 manual, on importing loops from a computer
 (`TRACK1`/`TRACK2`, holding `TRACK.WAV` and `TRACK.AIF`); and owner reports of
