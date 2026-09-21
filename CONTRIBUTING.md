@@ -146,12 +146,9 @@ example above: that is teaching the rule, not recording the past.
 
 ## Front end
 
-One file, on purpose. `ditto/static/app.js` stays a single classic script with
-no build step, no bundler and no ES modules: each module would cost a round trip
-on a page served `no-cache` from a Pi Zero, serialise on an import graph the
-preload scanner can't see, and need its own `ASSETS` allowlist entry where
-forgetting one is a silent 404. The map at the top of the file lists the
-sections. Revisit if it passes ~2500 lines.
+No build step. The device deploys by copying `ditto/`, so what is in `static/`
+is what runs. The page is viewed in a browser on a phone or laptop, which has
+its own internet access, so a script or stylesheet may come from a CDN.
 
 Adding a file to `static/` is two edits: the file, and `ASSETS` in `web.py`. A
 test catches the second if you forget.

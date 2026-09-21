@@ -10,10 +10,7 @@
      listeners             the drop zone, clearing a slot, undo
      the update            check and deploy, and the button's two states
      the event stream      EventSource, and the reconnect grace
-     library               fetching, the view, the rows, the ticked set
-
-   One file on purpose: ES modules would cost a round trip each on a page
-   served no-cache from a Pi Zero, and an ASSETS entry per module. */
+     library               fetching, the view, the rows, the ticked set */
 
 const $ = s => document.querySelector(s);
 

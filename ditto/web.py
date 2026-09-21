@@ -47,9 +47,7 @@ assert set(AUDIO_MIME) == config.AUDIO_SUFFIXES, \
 
 MAX_NAME_LEN = 200
 
-# Servable assets, by exact name. Archivo is served from here rather than a
-# CDN: the device is often the only thing on its network, and a render-blocking
-# request to a host it cannot reach stalls first paint until DNS gives up.
+# Servable assets, by exact name, so a stray file in static/ is never reachable.
 ASSETS = {
     "app.js": "text/javascript",
     "app.css": "text/css",

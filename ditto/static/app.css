@@ -1,6 +1,4 @@
-/* Modernist: flat, ruled, zero radius, one red accent. Archivo is served from
-   /static: the device is often the only thing on its network, and a font
-   request to a host it cannot reach stalls first paint until DNS gives up. */
+/* Modernist: flat, ruled, zero radius, one red accent. */
 @font-face {
   font-family: "Archivo";
   font-style: normal;
