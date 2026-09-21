@@ -140,7 +140,8 @@ with no source and no undo. `BT.WAV` and the slot directory are never touched.
 { "ok": true }
 ```
 
-`404` if the slot has no loop.
+`404` if the slot has no loop. `409` while a job holds the pedal; retry when
+it finishes.
 
 ---
 
@@ -386,6 +387,7 @@ curl -N http://dittobacktracker.local/api/events
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
 | `404` | `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign`, `POST /api/slots/assign` | The slot has no loop; or no such track in the library, which is also what a malformed hash returns, since it cannot name one |
 | `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
+| `409` | `DELETE /api/loops/<n>` | A job holds the pedal. Retry when it finishes |
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
 | `413` | `POST /api/upload`, `POST /api/library` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |

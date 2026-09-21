@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import queue
+import threading
 
 import conftest
 import pytest
@@ -71,6 +72,18 @@ def _boot():
     """A Service constructed and stopped, for what its constructor sweeps."""
     svc = core.Service()
     svc.shutdown(timeout=2.0)
+
+
+def test_a_loop_delete_does_not_wait_for_a_running_job(service):
+    """The worker holds the job lock for a whole write, minutes for a long
+    track. A request thread that queues behind it looks like a hung page."""
+    service._loops = frozenset({5})
+    result = []
+    with service._job_lock:
+        t = threading.Thread(target=lambda: result.append(service.delete_loop(5)))
+        t.start()
+        t.join(timeout=2.0)
+    assert result == [None], "delete_loop waited for the job lock"
 
 
 def test_the_sweep_takes_what_nothing_references(data_tree):

@@ -11,6 +11,7 @@ class FakeService:
         self._tmp = tmp
         self._loops = set(loops)
         self.mounted = True
+        self.busy = False
 
     @staticmethod
     def check_slot(slot):
@@ -29,6 +30,8 @@ class FakeService:
     def delete_loop(self, slot):
         if slot not in self._loops:
             return False
+        if self.busy:
+            return None
         self._loops.discard(slot)
         return True
 
@@ -84,6 +87,15 @@ def test_delete_ok(env):
     assert rv.status_code == 200
     assert rv.get_json()["ok"] is True
     assert not svc.has_loop(5)
+
+
+def test_delete_while_a_job_holds_the_pedal_409(env):
+    client, svc = env
+    svc.busy = True
+    rv = client.delete("/api/loops/5")
+    assert rv.status_code == 409
+    assert "busy" in rv.get_json()["error"]
+    assert svc.has_loop(5)
 
 
 def test_delete_cross_site_rejected(env):

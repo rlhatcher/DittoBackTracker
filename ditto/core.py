@@ -285,18 +285,24 @@ class Service:
     def loop_path(self, slot: int) -> Path:
         return pedal.loop_path(slot)
 
-    def delete_loop(self, slot: int) -> bool:
+    def delete_loop(self, slot: int) -> Optional[bool]:
         """Remove a LOOP.WAV. One unlink, done here under the job lock so it
-        never lands in the middle of a write. False (404) if there is none."""
+        never lands in the middle of a write. False (404) if there is none,
+        None (409) while a job holds the lock: the worker keeps it for a whole
+        write, and a request thread must not sit behind that."""
         self.check_slot(slot)
         if slot not in self._loops:
             return False
-        with self._job_lock:
+        if not self._job_lock.acquire(blocking=False):
+            return None
+        try:
             if not pedal.mounted():
                 return False
             pedal.remove_loop(slot)
             os.sync()
             self._loops = self._loops - {slot}
+        finally:
+            self._job_lock.release()
         self._emit()
         return True
 
