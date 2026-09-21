@@ -9,7 +9,6 @@ state.db
 state.db-*
 sources/
 staged/
-trash/
 *.wav
 *.mp3
 

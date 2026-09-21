@@ -128,7 +128,7 @@ class Service:
         # Serializes the library mutations against each other: a forced forget
         # reads the slots holding a track, clears them and deletes the row as
         # one step, and an upload or assign must not land between those.
-        # Reentrant because grouped operations (that forget, a folder fill)
+        # Reentrant because grouped operations (that forget, a batch assign)
         # lock once and then call through to per-slot operations that lock
         # again.
         self._lock = threading.RLock()
@@ -335,7 +335,7 @@ class Service:
         # deleted before the assignment lands. forget has already read its slot
         # list by then, so it would never clear the new slot, and the collector
         # would take the source out from under it: a slot reading "(missing)"
-        # with no audio behind it. restore() already checks under the lock.
+        # with no audio behind it.
         with self._lock:
             if not db.hash_in_library(source_hash):
                 return None
@@ -350,30 +350,18 @@ class Service:
     def _assign(self, slot: int, source_hash: str) -> None:
         """Point a slot at a library track and queue the work to realise it.
 
-        Locks here rather than in each caller: this is the single place all
-        three routes into a slot — upload, restore and assign — change the
-        database and queue work. The lock is reentrant, so a caller that has
-        already taken it (to keep a larger step atomic) nests harmlessly.
+        Locks here rather than in each caller: this is the single place both
+        routes into a slot — upload and assign — change the database and queue
+        work. The lock is reentrant, so a caller that has already taken it (to
+        keep a larger step atomic) nests harmlessly.
         """
         with self._lock:
-            if db.get_slot(slot):
-                db.delete_slot(slot, to_trash=True)
             db.put_slot(slot, source_hash, state="converting")
             src = self.source_for(source_hash)
             if src is None:
                 db.set_state(slot, "error", "source file missing")
                 return
             self._work.put(("convert", slot, source_hash, src))
-
-    def plan_folder(self, folder_id: int,
-                    start: Optional[int] = None) -> Optional[Dict]:
-        """Which slots a folder's tracks would fill, in tree order. Writes
-        nothing, queues nothing. None if there is no such folder."""
-        folder = db.folder_get(folder_id)
-        if folder is None:
-            return None
-        plan = self._plan(db.folder_tracks(folder_id), start)
-        return dict(plan, folder_id=folder_id, folder=folder["name"])
 
     def plan_tracks(self, hashes: List[str],
                     start: Optional[int] = None) -> Optional[Dict]:
@@ -446,36 +434,15 @@ class Service:
             "loops_known": self.pedal_state == "mounted",
         }
 
-    def assign_folder(self, folder_id: int,
-                      start: Optional[int] = None) -> Optional[Dict]:
-        """Fill a run of slots with a folder's tracks, as one locked step.
-
-        One lock for the whole fill rather than one per track, so a forced
-        forget cannot interleave with it. One `_emit` at the end — nine would
-        each rebuild a full snapshot and broadcast 99 slots to every subscriber.
-
-        The plan is recomputed inside the lock, so the loop set it skips is
-        the one this device holds now and not the one a preview saw fifteen
-        seconds ago on a keepalive-only stream.
-        """
-        with self._lock:
-            plan = self.plan_folder(folder_id, start)
-            if plan is None:
-                return None
-            for item in plan["assigned"]:
-                self._assign(item["slot"], item["source_hash"])
-        if plan["assigned"]:
-            self._emit()
-        return plan
-
     def assign_tracks(self, hashes: List[str],
                       start: Optional[int] = None) -> Optional[Dict]:
         """Put a run of library tracks on the pedal, as one locked step.
 
-        The same shape as assign_folder, with the tracks named by the caller:
-        one lock for the whole fill, one snapshot at the end, and the plan
-        recomputed inside the lock so the loop set it skips is the one this
-        device holds now.
+        One lock for the whole fill rather than one per track, so a forced
+        forget cannot interleave with it. One `_emit` at the end — nine would
+        each rebuild a full snapshot and broadcast 99 slots to every subscriber.
+        The plan is computed inside the lock, so the loop set it skips is the
+        one this device holds now.
         """
         with self._lock:
             plan = self.plan_tracks(hashes, start)
@@ -487,13 +454,12 @@ class Service:
             self._emit()
         return plan
 
-    def clear(self, slot: int) -> Optional[int]:
+    def clear(self, slot: int) -> None:
         self.check_slot(slot)
         with self._lock:
-            trash_id = db.delete_slot(slot, to_trash=True)
+            db.delete_slot(slot)
             self._work.put(("erase", slot))
         self._emit()
-        return trash_id
 
     @property
     def mounted(self) -> bool:
@@ -546,7 +512,7 @@ class Service:
         """Move to an empty slot, or swap with an occupied one.
 
         Swapping rather than overwriting means reordering a setlist never
-        destroys anything, so no trash entry and no undo needed.
+        destroys anything.
         """
         self.check_slot(src)
         self.check_slot(dst)
@@ -579,19 +545,6 @@ class Service:
             db.set_state(slot, "converting")
             self._work.put(("convert", slot, row["source_hash"], src))
         self._emit()
-
-    def restore(self, trash_id: int) -> Optional[int]:
-        with self._lock:
-            item = db.trash_pop(trash_id)
-            if not item:
-                return None
-            # The track can have been deleted from the library since the slot
-            # was cleared, in which case there is nothing left to put back.
-            if not db.hash_in_library(item["source_hash"]):
-                return None
-            self._assign(item["slot"], item["source_hash"])
-        self._emit()
-        return item["slot"]
 
     # -------------------------------------------------------------- library
 
@@ -811,7 +764,7 @@ class Service:
             # Published last, and this is load-bearing rather than tidy. Two
             # readers take pedal_state as their licence to trust _loops:
             # `mounted`, which upload_auto checks before reserving loop slots,
-            # and plan_folder's loops_known. Setting it first left a window —
+            # and _plan's loops_known. Setting it first left a window —
             # a temp-file sweep and a format probe, both USB I/O on a ~1 MB/s
             # link — in which a pedal was reported mounted while _loops was
             # still the empty set left by the last unmount, so an auto-assigned
@@ -1071,7 +1024,7 @@ class Service:
             time.sleep(_DRAIN_POLL)
 
     def _gc(self) -> None:
-        """Prune expired trash and any file nothing references.
+        """Delete any file nothing references.
 
         sources/ and staged/ are collected under deliberately different rules,
         because they are different kinds of thing. A source *is* the library: it
@@ -1083,7 +1036,7 @@ class Service:
         four-minute track stages to ~32 MB, and a hundred of them would be ~3 GB
         of cache standing behind a few hundred MB of actual music.
 
-        A folder assign makes that bound ordinary rather than pathological: one
+        A batch assign makes that bound ordinary rather than pathological: one
         click can queue forty conversions, so ~1.3 GB of cache can stand behind
         a pedal that holds an hour of audio, until the next pass. It is still
         bounded by slot_count and not by the library, which is the property that
@@ -1095,7 +1048,6 @@ class Service:
         """
         cutoff = time.time() - config.GC_GRACE_SECS
         try:
-            db.prune_trash(config.TRASH_KEEP_DAYS)
             # .part files are transcodes interrupted by a crash or a pulled
             # plug — nothing ever references them, at any age.
             for f in config.STAGED.glob("*.wav.part"):

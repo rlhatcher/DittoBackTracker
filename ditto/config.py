@@ -20,7 +20,6 @@ def _abs_path(var: str, default: str) -> Path:
 DATA = _abs_path("DITTO_DATA", "/var/lib/ditto")
 SOURCES = DATA / "sources"
 STAGED = DATA / "staged"
-TRASH = DATA / "trash"
 # Transient staging for loop downloads: a LOOP.WAV is copied here off the pedal,
 # streamed to the browser, then purged. Nothing durable lives here.
 LOOPS = DATA / "loops"
@@ -65,11 +64,6 @@ SLOTS = 99
 # Measured on a Ditto+. Overridden at runtime by probing a pedal-written file.
 DEFAULT_FORMAT = {"sample_rate": 44100, "channels": 1, "codec": "pcm_s24le"}
 
-# How deep the library tree may nest. The design says folders nest freely, but a
-# row indents 16 + depth*18 px inside a half-width column, so past this the name
-# is behind the meta text. Also bounds every recursive walk in db.py.
-MAX_FOLDER_DEPTH = 8
-
 AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg",
                   ".aif", ".aiff", ".wma", ".opus"}
 
@@ -82,7 +76,6 @@ POLL_SECS = 2.0              # pedal detection interval
 # backlog. Generous because a stalled wait only ties up one waitress thread on a
 # single-user box.
 LOOP_STAGE_TIMEOUT = 600.0
-TRASH_KEEP_DAYS = 30
 # How long a stranded upload temporary in DATA must sit before the sweep takes
 # it. Comfortably longer than any single upload request can run — an in-flight
 # upload owns its temp file, and reaping one underneath the handler would fail
@@ -104,5 +97,5 @@ MAX_UPLOAD_BYTES = _max_upload_mb * 1024 * 1024
 
 
 def ensure_dirs() -> None:
-    for d in (SOURCES, STAGED, TRASH, LOOPS):
+    for d in (SOURCES, STAGED, LOOPS):
         d.mkdir(parents=True, exist_ok=True)

@@ -1,10 +1,10 @@
 """SQLite state.
 
-Three tables. `library` is the durable one: one row per uploaded track, and the
-only thing that keeps its audio alive in sources/. `slots` and `trash` are
-*assignments* — which library track is in which of the pedal's 99 slots, and
-which slot a cleared track came from. Both reference a library row by hash and
-neither carries a copy of its name or duration, so a rename has one home.
+Two tables. `library` is the durable one: one row per uploaded track, and the
+only thing that keeps its audio alive in sources/. `slots` is *assignments*:
+which library track is in which of the pedal's 99 slots. It references a
+library row by hash and carries no copy of its name or duration, so a rename
+has one home.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ _local = threading.local()
 # mode. Held only while opening, which happens once per thread.
 _open_lock = threading.Lock()
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Statements rather than one script: the initialiser runs inside BEGIN
 # IMMEDIATE, and executescript() commits any open transaction before it runs,
@@ -40,19 +40,8 @@ _SCHEMA = [
         source_hash TEXT PRIMARY KEY,
         name        TEXT NOT NULL,
         duration    REAL NOT NULL DEFAULT 0,
-        added       REAL NOT NULL,
-        folder_id   INTEGER,
-        position    INTEGER NOT NULL DEFAULT 0
+        added       REAL NOT NULL
     )""",
-    """CREATE TABLE IF NOT EXISTS folders (
-        id        INTEGER PRIMARY KEY AUTOINCREMENT,
-        name      TEXT NOT NULL,
-        parent_id INTEGER,
-        position  INTEGER NOT NULL DEFAULT 0,
-        created   REAL NOT NULL
-    )""",
-    "CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id)",
-    "CREATE INDEX IF NOT EXISTS library_folder ON library(folder_id)",
     """CREATE TABLE IF NOT EXISTS slots (
         slot        INTEGER PRIMARY KEY,
         source_hash TEXT NOT NULL,
@@ -60,12 +49,6 @@ _SCHEMA = [
         synced_hash TEXT,
         error       TEXT,
         updated     REAL NOT NULL
-    )""",
-    """CREATE TABLE IF NOT EXISTS trash (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        slot        INTEGER NOT NULL,
-        source_hash TEXT NOT NULL,
-        deleted     REAL NOT NULL
     )""",
 ]
 
@@ -124,44 +107,33 @@ _V1_TO_V2 = [
     "ALTER TABLE trash_v2 RENAME TO trash",
 ]
 
-
-# v2 -> v3: the library gains folders.
+# v2 or v3 -> v4: the library loses its folders, and the trash goes.
 #
-# Three DDL statements and two indexes. No INSERT, no SELECT, no table rebuild —
-# which is the property that makes this one safe on a device whose users cannot
-# restore a backup. There is no ordering in which a power cut halfway through
-# loses a row, because no row is ever read or written.
+# v3 added `folder_id` and `position` to library and a `folders` table; v2 never
+# had them. Both shapes land here through the same statements, which is why the
+# drops say IF EXISTS: a device that skipped the folder release migrates 2 -> 4
+# without ever writing the v3 shape, and a chain through v3 would only add the
+# columns this step removes.
 #
-# It needs no backfill either. Existing tracks want folder_id NULL, which is what
-# ADD COLUMN gives them, and position 0, which is the declared default. Ordering
-# inside a folder is (position, added, source_hash), so rows that all sit at 0
-# tie-break on `added` and keep exactly the order they have today.
-#
-# No "Unfiled" folder is invented for them. The footer would then report a folder
-# the user never made, and the screen after an update should look like the screen
-# before it.
-#
-# AUTOINCREMENT on folders.id for the same reason trash carries its ids across
-# rather than renumbering: a browser tab left open for an hour holds folder ids
-# in its DOM, and if deleting folder 7 let the next create reuse the id, that
-# tab's rename would land on somebody else's folder.
-#
-# No REFERENCES clause, matching the rest of this file. sqlite3 leaves foreign
-# keys off, so it would buy nothing enforced while turning every future rebuild
-# into a twelve-step procedure. Readers tolerate a missing parent instead.
-_V2_TO_V3 = [
-    """CREATE TABLE IF NOT EXISTS folders (
-        id        INTEGER PRIMARY KEY AUTOINCREMENT,
-        name      TEXT NOT NULL,
-        parent_id INTEGER,
-        position  INTEGER NOT NULL DEFAULT 0,
-        created   REAL NOT NULL
+# The library is rebuilt rather than ALTERed, the same way v1 -> v2 rebuilt
+# slots: a copy into the target shape, then a drop and a rename, inside the one
+# transaction _init holds. Every row is carried by hash, so no track and no
+# assignment is lost. The trash held nothing a user could see once the undo
+# control stopped reading it: it recorded which slot a cleared track came from,
+# and the track itself was always in the library.
+_TO_V4 = [
+    """CREATE TABLE library_v4 (
+        source_hash TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        duration    REAL NOT NULL DEFAULT 0,
+        added       REAL NOT NULL
     )""",
-    "ALTER TABLE library ADD COLUMN folder_id INTEGER",
-    # Legal despite NOT NULL because the default is a constant.
-    "ALTER TABLE library ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
-    "CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id)",
-    "CREATE INDEX IF NOT EXISTS library_folder ON library(folder_id)",
+    """INSERT INTO library_v4 (source_hash, name, duration, added)
+       SELECT source_hash, name, duration, added FROM library""",
+    "DROP TABLE library",
+    "ALTER TABLE library_v4 RENAME TO library",
+    "DROP TABLE IF EXISTS folders",
+    "DROP TABLE IF EXISTS trash",
 ]
 
 
@@ -179,12 +151,11 @@ def _backup(c: sqlite3.Connection, tag: str) -> None:
 
     Named for the version on disk, not the one being migrated to, so the file
     says what it contains: a device that has been off for two releases migrates
-    1 -> 2 -> 3 in one go and writes `state.db.v1`.
+    1 -> 2 -> 4 in one go and writes `state.db.v1`.
 
     The recovery path if an over-the-air rollback ever strands old code on a new
-    file: `mv state.db.v1 state.db`. That matters more from v3 on than it did
-    before, because _init refuses a file newer than the build outright, so a
-    rolled-back v2 binary will not read a v3 file even though it could.
+    file: `mv state.db.v3 state.db`. _init refuses a file newer than the build
+    outright, so a rolled-back v3 binary will not read a v4 file.
 
     VACUUM INTO gives a consistent copy of a WAL database and cannot run inside a
     transaction, so this happens before the lock is taken — which means two
@@ -255,15 +226,15 @@ def _init(c: sqlite3.Connection) -> None:
             v = 2
         elif v == 0:
             # A brand-new file. Created at the target shape, so it never runs a
-            # migration step. Not `else`: a v2 file must fall through to the
-            # step below, and _SCHEMA's CREATE TABLE IF NOT EXISTS would leave
-            # its `library` without the new columns while looking like it had
+            # migration step. Not `else`: a v2 or v3 file must fall through to
+            # the step below, and _SCHEMA's CREATE TABLE IF NOT EXISTS would
+            # leave its `library` in the old shape while looking like it had
             # worked.
             for stmt in _SCHEMA:
                 c.execute(stmt)
             v = SCHEMA_VERSION
-        if v < 3:
-            for stmt in _V2_TO_V3:
+        if v < 4:
+            for stmt in _TO_V4:
                 c.execute(stmt)
         # An int constant, never user input — PRAGMA takes no placeholder.
         c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -412,331 +383,12 @@ def move_or_swap(src: int, dst: int) -> Optional[str]:
         raise
 
 
-def delete_slot(slot: int, to_trash: bool = True) -> Optional[int]:
-    """Returns the new trash id, so an undo can name the exact entry.
-
-    BEGIN IMMEDIATE keeps the read and the delete atomic, so the trash entry
-    always records the row that was actually removed. The audio is untouched:
-    clearing a slot only ends an assignment, and the track stays in the library.
-    """
-    trash_id = None
+def delete_slot(slot: int) -> None:
+    """Clear a slot. The audio is untouched: clearing a slot only ends an
+    assignment, and the track stays in the library."""
     c = conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
-        row = get_slot(slot)
-        if row and to_trash:
-            cur = c.execute(
-                "INSERT INTO trash (slot, source_hash, deleted) VALUES (?,?,?)",
-                (slot, row["source_hash"], time.time()),
-            )
-            trash_id = cur.lastrowid
+    with c:
         c.execute("DELETE FROM slots WHERE slot=?", (slot,))
-        c.commit()
-    except Exception:
-        c.rollback()
-        raise
-    return trash_id
-
-
-def trash_items() -> List[Dict]:
-    """Inner join, deliberately: an entry whose track has since been deleted
-    from the library can't be restored, so it isn't offered."""
-    return [dict(r) for r in conn().execute(
-        """SELECT t.*, l.name AS display_name, l.duration
-             FROM trash t JOIN library l ON l.source_hash = t.source_hash
-         ORDER BY t.deleted DESC LIMIT 50""")]
-
-
-def trash_pop(trash_id: int) -> Optional[Dict]:
-    # BEGIN IMMEDIATE so the SELECT and DELETE are one atomic step: two
-    # concurrent undos of the same id can't both claim the row and restore
-    # the track twice.
-    c = conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
-        r = c.execute("SELECT * FROM trash WHERE id=?", (trash_id,)).fetchone()
-        if not r:
-            c.commit()
-            return None
-        c.execute("DELETE FROM trash WHERE id=?", (trash_id,))
-        c.commit()
-        return dict(r)
-    except Exception:
-        c.rollback()
-        raise
-
-
-def prune_trash(max_age_days: int) -> int:
-    """Bound the undo log. Frees no audio — that is the library's business
-    now — so this only keeps the table from growing without limit. Returns how
-    many entries went."""
-    cutoff = time.time() - max_age_days * 86400
-    c = conn()
-    with c:
-        cur = c.execute("DELETE FROM trash WHERE deleted < ?", (cutoff,))
-        return cur.rowcount
-
-
-# ---------------------------------------------------------------- folders
-
-# Every walk of the tree is bounded. A LIMIT inside a recursive CTE stops SQLite
-# adding rows once it is reached, so a file that somehow already contains a cycle
-# returns a wrong answer instead of never returning at all. Nothing here can
-# create one — folder_move refuses it — but a walk that hangs takes the worker
-# thread with it, and this costs nothing.
-_WALK_LIMIT = 500
-
-# Depth-first pre-order over a subtree, as one sort key per folder.
-#
-# A folder's key is its parent's key with its own (position, id) appended, so a
-# parent's key is a strict prefix of every descendant's. Shorter strings sort
-# first, which puts a folder's own tracks ahead of all its subfolders' without
-# any extra machinery, and siblings fall into position order because the segment
-# is zero-padded to a fixed width.
-_SUBTREE = f"""
-WITH RECURSIVE tree(id, ord) AS (
-    SELECT id, printf('%08d/%08d', position, id) FROM folders WHERE id = ?
-  UNION ALL
-    SELECT f.id, tree.ord || '/' || printf('%08d/%08d', f.position, f.id)
-      FROM folders f JOIN tree ON f.parent_id = tree.id
-  LIMIT {_WALK_LIMIT}
-)
-"""
-
-
-def _depth(c: sqlite3.Connection, folder_id: Optional[int]) -> int:
-    """How far below the top level a folder sits. A top-level folder is 0."""
-    if folder_id is None:
-        return -1                   # so a child of "nothing" comes out at 0
-    row = c.execute(f"""
-        WITH RECURSIVE up(id, parent_id, lvl) AS (
-            SELECT id, parent_id, 0 FROM folders WHERE id = ?
-          UNION ALL
-            SELECT f.id, f.parent_id, up.lvl + 1
-              FROM folders f JOIN up ON f.id = up.parent_id
-          LIMIT {_WALK_LIMIT}
-        )
-        SELECT max(lvl) FROM up""", (folder_id,)).fetchone()
-    return row[0] if row and row[0] is not None else -1
-
-
-def folders_all() -> List[Dict]:
-    """Every folder, flat. The client builds the tree and folds the counts.
-
-    Same reasoning as library_all: a few hundred rows is a small response, and
-    the browser already holds every track with its duration, so summing a subtree
-    there costs one pass and no round trip. Aggregating here would also be a
-    second source of truth for "16 tracks, 7 folders" that can disagree with the
-    rows actually on screen, since the client filters and sorts locally.
-    """
-    return [dict(r) for r in conn().execute(
-        "SELECT * FROM folders "
-        "ORDER BY parent_id IS NOT NULL, parent_id, position, id")]
-
-
-def folder_get(folder_id: int) -> Optional[Dict]:
-    r = conn().execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
-    return dict(r) if r else None
-
-
-def folder_add(name: str, parent_id: Optional[int] = None) -> Optional[Dict]:
-    """Create a folder at the end of its parent. None if the parent is unknown
-    or the tree is already as deep as it may go."""
-    c = conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
-        if parent_id is not None and not c.execute(
-                "SELECT 1 FROM folders WHERE id=?", (parent_id,)).fetchone():
-            c.rollback()
-            return None
-        if _depth(c, parent_id) + 1 >= config.MAX_FOLDER_DEPTH:
-            c.rollback()
-            return None
-        pos = c.execute(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM folders WHERE parent_id IS ?",
-            (parent_id,)).fetchone()[0]
-        cur = c.execute(
-            "INSERT INTO folders (name, parent_id, position, created) VALUES (?,?,?,?)",
-            (name, parent_id, pos, time.time()))
-        c.commit()
-        return folder_get(cur.lastrowid)
-    except Exception:
-        c.rollback()
-        raise
-
-
-def folder_rename(folder_id: int, name: str) -> bool:
-    c = conn()
-    with c:
-        cur = c.execute("UPDATE folders SET name=? WHERE id=?", (name, folder_id))
-    return cur.rowcount > 0
-
-
-def folder_move(folder_id: int, parent_id: Optional[int]) -> str:
-    """Reparent a folder. See folder_edit."""
-    return folder_edit(folder_id, parent_id=parent_id, move=True)
-
-
-def folder_edit(folder_id: int, name: Optional[str] = None,
-                parent_id: Optional[int] = None, move: bool = False) -> str:
-    """Rename a folder, reparent it, or both. Returns "ok", "unknown", "cycle"
-    or "too deep".
-
-    Both in one transaction, because a caller doing them separately gets a
-    rename that survives a rejected move: PATCH with a new name and a parent
-    that turns out to be a cycle answers 400 with the folder already renamed.
-
-    The cycle check runs inside that same transaction, never before it. Between
-    a check and a write, another thread's reparent can make the answer stale,
-    and the pair of moves that results leaves a subtree pointing into itself and
-    unreachable from the top level for good.
-    """
-    c = conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
-        if not c.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
-            c.rollback()
-            return "unknown"
-        if not move:
-            if name is not None:
-                c.execute("UPDATE folders SET name=? WHERE id=?", (name, folder_id))
-            c.commit()
-            return "ok"
-        if parent_id is not None and not c.execute(
-                "SELECT 1 FROM folders WHERE id=?", (parent_id,)).fetchone():
-            c.rollback()
-            return "unknown"
-        # One walk answers both questions a reparent has: is the destination
-        # inside the subtree being moved, and how tall is that subtree.
-        height, contains = c.execute(f"""
-            WITH RECURSIVE sub(id, lvl) AS (
-                SELECT ?, 0
-              UNION ALL
-                SELECT f.id, sub.lvl + 1
-                  FROM folders f JOIN sub ON f.parent_id = sub.id
-              LIMIT {_WALK_LIMIT}
-            )
-            SELECT max(lvl), max(id = ?) FROM sub""",
-            (folder_id, parent_id if parent_id is not None else -1)).fetchone()
-        if contains:
-            c.rollback()
-            return "cycle"
-        if _depth(c, parent_id) + 1 + (height or 0) >= config.MAX_FOLDER_DEPTH:
-            c.rollback()
-            return "too deep"
-        pos = c.execute(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM folders WHERE parent_id IS ?",
-            (parent_id,)).fetchone()[0]
-        # Every rejection above has rolled back, so the rename lands only once
-        # the move is known to be legal.
-        if name is not None:
-            c.execute("UPDATE folders SET name=? WHERE id=?", (name, folder_id))
-        c.execute("UPDATE folders SET parent_id=?, position=? WHERE id=?",
-                  (parent_id, pos, folder_id))
-        c.commit()
-        return "ok"
-    except Exception:
-        c.rollback()
-        raise
-
-
-def folder_delete(folder_id: int, force: bool = False) -> Optional[Dict]:
-    """Remove a folder. **Never removes a track.**
-
-    A library row is the only thing keeping its audio alive in sources/, so a
-    folder delete that took its contents with it would destroy files. A folder is
-    a grouping, not a container, and this issues no DELETE against library under
-    any flag. The test that pins it runs the collector afterwards.
-
-    None if there is no such folder. Otherwise a dict saying what it found and
-    whether it acted: without `force` a non-empty folder is reported and left
-    alone; with it, children and tracks are promoted to the folder's own parent
-    and appended there.
-    """
-    c = conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
-        row = c.execute("SELECT parent_id FROM folders WHERE id=?",
-                        (folder_id,)).fetchone()
-        if row is None:
-            c.rollback()
-            return None
-        parent = row["parent_id"]
-        kids = [r["id"] for r in c.execute(
-            "SELECT id FROM folders WHERE parent_id=? ORDER BY position, id",
-            (folder_id,))]
-        moving = [r["source_hash"] for r in c.execute(
-            """SELECT source_hash FROM library WHERE folder_id=?
-                ORDER BY position, added, source_hash""", (folder_id,))]
-        tracks = len(moving)
-        if (kids or tracks) and not force:
-            c.rollback()
-            return {"deleted": False, "folders": kids, "tracks": tracks}
-        pos = c.execute(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM folders WHERE parent_id IS ?",
-            (parent,)).fetchone()[0]
-        for i, kid in enumerate(kids):
-            c.execute("UPDATE folders SET parent_id=?, position=? WHERE id=?",
-                      (parent, pos + i, kid))
-        # One statement cannot number these. A correlated subquery counting
-        # siblings sees folder_id already set to the destination, so every
-        # promoted track counts the same pre-existing rows and they all land on
-        # one position. Numbering them here keeps them distinct and contiguous,
-        # the same way the child folders above are handled.
-        tpos = c.execute(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM library WHERE folder_id IS ?",
-            (parent,)).fetchone()[0]
-        for i, h in enumerate(moving):
-            c.execute("UPDATE library SET folder_id=?, position=? WHERE source_hash=?",
-                      (parent, tpos + i, h))
-        c.execute("DELETE FROM folders WHERE id=?", (folder_id,))
-        c.commit()
-        return {"deleted": True, "folders": kids, "tracks": tracks, "to": parent}
-    except Exception:
-        c.rollback()
-        raise
-
-
-def folder_tracks(folder_id: int) -> List[Dict]:
-    """Every track in a folder and its descendants, in tree order."""
-    return [dict(r) for r in conn().execute(
-        _SUBTREE + """
-        SELECT l.*, tree.ord FROM tree JOIN library l ON l.folder_id = tree.id
-         ORDER BY tree.ord, l.position, l.added, l.source_hash""",
-        (folder_id,))]
-
-
-def folder_subtree_ids(folder_id: int) -> List[int]:
-    """A folder and every folder under it, in tree order."""
-    return [r["id"] for r in conn().execute(
-        _SUBTREE + "SELECT id FROM tree ORDER BY ord", (folder_id,))]
-
-
-def library_set_folder(source_hash: str, folder_id: Optional[int]) -> bool:
-    """File a track, at the end of its new folder.
-
-    The end, not wherever `added` puts it: filing an old track into a new set
-    list should append it, and ordering by upload time would drop it into the
-    middle.
-    """
-    c = conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
-        if folder_id is not None and not c.execute(
-                "SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
-            c.rollback()
-            return False
-        pos = c.execute(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM library WHERE folder_id IS ?",
-            (folder_id,)).fetchone()[0]
-        cur = c.execute(
-            "UPDATE library SET folder_id=?, position=? WHERE source_hash=?",
-                        (folder_id, pos, source_hash))
-        c.commit()
-        return cur.rowcount > 0
-    except Exception:
-        c.rollback()
-        raise
 
 
 # ---------------------------------------------------------------- library
@@ -760,28 +412,15 @@ def library_add(source_hash: str, name: str, duration: float) -> bool:
     return cur.rowcount > 0
 
 
-# The LEFT JOIN is what makes a missing folder harmless. This file declares no
-# foreign keys, so nothing stops library.folder_id outliving the folder it names;
-# taking the id from the join rather than the column reports NULL when the folder
-# has gone, and the track shows up at the top level instead of in a folder the
-# tree cannot draw. Same idiom as _SLOT_SELECT, where a slot whose library row
-# vanished still appears.
-_LIBRARY_SELECT = """
-    SELECT l.source_hash, l.name, l.duration, l.added, l.position,
-           f.id AS folder_id
-      FROM library l LEFT JOIN folders f ON f.id = l.folder_id
-"""
-
-
 def library_all() -> List[Dict]:
     """Newest first. Searching, sorting and filtering happen in the browser —
     a few hundred rows is a small response and no round trip."""
     return [dict(r) for r in conn().execute(
-        _LIBRARY_SELECT + "ORDER BY l.added DESC")]
+        "SELECT * FROM library ORDER BY added DESC")]
 
 
 def library_get(source_hash: str) -> Optional[Dict]:
-    r = conn().execute(_LIBRARY_SELECT + "WHERE l.source_hash=?",
+    r = conn().execute("SELECT * FROM library WHERE source_hash=?",
                        (source_hash,)).fetchone()
     return dict(r) if r else None
 
@@ -795,20 +434,12 @@ def library_rename(source_hash: str, name: str) -> bool:
 
 
 def library_delete(source_hash: str) -> bool:
-    """Forget a track entirely. Its trash entries go in the same transaction:
-    they can never be restored once the track is gone, and trash_items' inner
-    join would hide them while they accumulated forever."""
+    """Forget a track entirely. The audio goes on the next collector pass."""
     c = conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
+    with c:
         cur = c.execute("DELETE FROM library WHERE source_hash=?",
                         (source_hash,))
-        c.execute("DELETE FROM trash WHERE source_hash=?", (source_hash,))
-        c.commit()
-        return cur.rowcount > 0
-    except Exception:
-        c.rollback()
-        raise
+    return cur.rowcount > 0
 
 
 def library_hashes() -> set:
@@ -822,8 +453,7 @@ def library_hashes() -> set:
 
 def hash_in_library(source_hash: str) -> bool:
     """Is this audio still wanted? The library row is the only thing that keeps
-    a file in sources/ alive — a slot assignment does not, and neither does a
-    trash entry."""
+    a file in sources/ alive — a slot assignment does not."""
     return conn().execute(
         "SELECT 1 FROM library WHERE source_hash=? LIMIT 1",
         (source_hash,)).fetchone() is not None

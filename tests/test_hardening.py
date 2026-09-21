@@ -368,7 +368,7 @@ def test_the_pedal_is_not_reported_mounted_until_its_loops_are_known(service,
     """pedal_state is what two callers treat as a licence to trust _loops.
 
     upload_auto reserves loop-bearing slots only `if service.mounted`, and
-    plan_folder reports loops_known from the same flag. _tick_pedal used to set
+    _plan reports loops_known from the same flag. _tick_pedal used to set
     the flag first and scan afterwards, with a temp-file sweep and a format
     probe in between — both USB I/O on a ~1 MB/s link. Anything reading it in
     that window saw a mounted pedal and the empty loop set left by the last
@@ -402,6 +402,6 @@ def test_the_pedal_is_not_reported_mounted_until_its_loops_are_known(service,
     assert seen["mounted"] is False, \
         "mounted was already true while the loop cache was still being built"
     assert seen["state"] != "mounted", \
-        "plan_folder would have reported loops_known over a stale cache"
+        "_plan would have reported loops_known over a stale cache"
     # And the state that is finally published is the complete one.
     assert service.mounted and 7 in service._loops
