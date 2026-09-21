@@ -791,6 +791,36 @@ def create_app(service: Service) -> Flask:
         resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return resp
 
+    @app.post("/api/slots/assign")
+    def assign_many():
+        """Put library tracks on the pedal in one call, in the order given.
+
+        One call rather than N calls to /api/slots/<n>/assign: the loop set it
+        skips is the device's own and is only correct under the lock that
+        queues the work, the whole fill is one locked step so a forced delete
+        cannot interleave with it, and it broadcasts one snapshot instead of
+        one per track.
+
+        201 with the plan that was executed. Read the body — like the batch
+        upload, a 201 does not mean every track landed; `unplaced` names the
+        ones that did not fit.
+        """
+        body = request.get_json(silent=True)
+        hashes = body.get("hashes") if isinstance(body, dict) else None
+        if (not isinstance(hashes, list) or not hashes
+                or not all(isinstance(h, str) for h in hashes)):
+            return jsonify(error="hashes must be a list of library hashes"), 400
+        for h in hashes:
+            _require_hash(h)
+        start = _start_slot(body.get("start"))
+        try:
+            plan = service.assign_tracks(hashes, start)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if plan is None:
+            return jsonify(error="not found"), 404
+        return jsonify(plan), 201
+
     @app.post("/api/slots/<int:slot>/assign")
     def assign(slot: int):
         """Put a library track into a slot without uploading it again."""

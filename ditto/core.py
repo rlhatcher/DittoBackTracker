@@ -367,30 +367,46 @@ class Service:
 
     def plan_folder(self, folder_id: int,
                     start: Optional[int] = None) -> Optional[Dict]:
-        """Which slots a folder's tracks would fill. Writes nothing, queues nothing.
-
-        The preview and the assignment run this same function, so the label on
-        the button and the fill it performs are one computation at two moments
-        rather than two that can drift apart.
-
-        Tracks arrive in tree order and go into consecutive slots, skipping any
-        that holds a loop — the automatic-placement rule, the same one an
-        unnumbered upload follows. `start` and `end` are the first and last slot
-        actually written, so they span those skips: a nine-track folder starting
-        at 09 over one loop reads 09-18.
-
-        None if there is no such folder.
-        """
+        """Which slots a folder's tracks would fill, in tree order. Writes
+        nothing, queues nothing. None if there is no such folder."""
         folder = db.folder_get(folder_id)
         if folder is None:
             return None
+        plan = self._plan(db.folder_tracks(folder_id), start)
+        return dict(plan, folder_id=folder_id, folder=folder["name"])
+
+    def plan_tracks(self, hashes: List[str],
+                    start: Optional[int] = None) -> Optional[Dict]:
+        """Which slots these library tracks would fill, in the order given.
+
+        None if any hash is not in the library. A set list with a track missing
+        from it is one problem rather than N, and the caller's list is stale,
+        so nothing is planned around the gap.
+        """
+        tracks = []
+        for h in hashes:
+            row = db.library_get(h)
+            if row is None:
+                return None
+            tracks.append(row)
+        return self._plan(tracks, start)
+
+    def _plan(self, tracks: List[Dict], start: Optional[int]) -> Dict:
+        """Where a run of tracks would land. Writes nothing, queues nothing.
+
+        Tracks go into consecutive slots from `start`, skipping any that holds
+        a loop — the automatic-placement rule, the same one an unnumbered
+        upload follows. `start` and `end` are the first and last slot actually
+        written, so they span those skips: nine tracks from 09 over one loop
+        read 09-18. Without `start`, the fill begins at the first slot with
+        room.
+        """
         if start is not None:
             self.check_slot(start)
 
         # Read once, before placing. Re-reading the loop set part way through
         # would produce a plan that no single moment agrees with.
         loops = self._loops
-        tracks = db.folder_tracks(folder_id)
         if start is None:
             taken = {s["slot"] for s in db.all_slots()} | loops
             start = next((n for n in range(1, config.SLOTS + 1) if n not in taken),
@@ -415,8 +431,6 @@ class Service:
 
         end = assigned[-1]["slot"] if assigned else None
         return {
-            "folder_id": folder_id,
-            "folder": folder["name"],
             "start": assigned[0]["slot"] if assigned else None,
             "end": end,
             "assigned": assigned,
@@ -446,6 +460,25 @@ class Service:
         """
         with self._lock:
             plan = self.plan_folder(folder_id, start)
+            if plan is None:
+                return None
+            for item in plan["assigned"]:
+                self._assign(item["slot"], item["source_hash"])
+        if plan["assigned"]:
+            self._emit()
+        return plan
+
+    def assign_tracks(self, hashes: List[str],
+                      start: Optional[int] = None) -> Optional[Dict]:
+        """Put a run of library tracks on the pedal, as one locked step.
+
+        The same shape as assign_folder, with the tracks named by the caller:
+        one lock for the whole fill, one snapshot at the end, and the plan
+        recomputed inside the lock so the loop set it skips is the one this
+        device holds now.
+        """
+        with self._lock:
+            plan = self.plan_tracks(hashes, start)
             if plan is None:
                 return None
             for item in plan["assigned"]:
@@ -563,8 +596,8 @@ class Service:
     # -------------------------------------------------------------- library
 
     def rename(self, source_hash: str, name: str) -> Optional[Dict]:
-        """Rename a track. One row changes; the slot list, the grid tooltips and
-        the printed set list all read through to it."""
+        """Rename a track. One row changes; the slot list and the printed set
+        list both read through to it."""
         if not db.library_rename(source_hash, name):
             return None
         self.library_changed()

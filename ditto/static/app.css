@@ -26,10 +26,10 @@
 
      tokens      only custom properties. Nothing here paints.
      base        the reset, body, headings, buttons, inputs, focus.
-     components  the parts: cells, rows, the bar, the drop zone.
+     components  the parts: rows, the bar, the drop zone.
      layout      the page skeleton and the breakpoint.
 
-   Components must name a *semantic* token (--state-error), never a step of the
+   Components must name a *semantic* token (--text-danger), never a step of the
    raw ramp. The ramp is the palette; the semantic block is the
    vocabulary. A component reaching past the second into the first is how a
    token layer rots back into a colour dictionary, so it is worth checking:
@@ -70,16 +70,6 @@
 
     /* -- Semantic: what the parts are allowed to say ---------------------- */
 
-    /* Slot states. The fill and the ink that goes on it travel together, so a
-       cell never has to know which ramp step it landed on. */
-    --state-synced: var(--color-text);
-    --state-converting: var(--color-accent-700);
-    --state-queued: var(--color-accent-300);
-    --state-error: var(--color-accent-900);
-    --state-loop: var(--color-accent);
-    --on-state: var(--color-bg);
-    --on-queued: var(--color-accent-900);
-
     /* Text. Two weights of quiet, plus the one that means something is wrong.
        Accent at full strength is ~3:1 on the ground — right for a bar or a
        filled button, not for a sentence, which is why this is the 700.
@@ -97,27 +87,15 @@
     --rule: var(--color-divider);
     --rule-major: 2px;
     --rule-minor: 1px;
-    /* A cell's border is the only thing marking an empty control's edge, and
-       --color-divider at 40% ink is ~2.6:1 — fine for a hairline between rows,
-       thin for a target you drag onto. Its own token so raising it here cannot
-       thicken every rule on the page. */
-    --cell-border: color-mix(in srgb, var(--color-text) 55%, transparent);
 
     --capacity-track: var(--color-neutral-300);
     --capacity-fill: var(--color-text);
     --capacity-caution: var(--color-accent-600);
     --capacity-danger: var(--color-accent);
 
-    /* Grounds a row can take, and the ring that marks its counterpart on the
-       other surface. Named here because a component may not reach into the
-       ramp — and because "the selected row" is the thing that has a colour,
-       not "accent 100". */
+    /* The ground a hovered row takes. Named here because a component may not
+       reach into the ramp. */
     --surface-hover: var(--color-neutral-200);
-    /* The ground a top-level folder sits on. A tint rather than a rule, because
-       the tree already has one rule per row and a second would fight it. */
-    --surface-group: var(--color-neutral-100);
-    --surface-selected: var(--color-accent-100);
-    --link-ring: var(--color-accent-400);
 
     --focus-ring: var(--color-accent);
     /* Accent at a strength that can carry a word — either as the ink or as the
@@ -159,7 +137,7 @@
      sits next to the background and step 900 next to the text, at both ends of
      the scale. Reversing them keeps every one of those roles intact, so nothing
      below this block has to know the page went dark — --text-muted is still the
-     quiet one and --state-error is still a fill you can read --on-state on. */
+     quiet one. */
   @media (prefers-color-scheme: dark) {
     :root {
       --color-bg: #1a1918;
@@ -320,9 +298,9 @@
     color: var(--color-text); border-radius: var(--radius-md);
     font: inherit; font-size: var(--text-small); line-height: 1.5;
     padding: 3px var(--space-2); cursor: pointer; flex: none;
-    text-decoration: none; display: inline-block;
+    text-decoration: none; display: inline-block; white-space: nowrap;
   }
-  button.undo { font-size: var(--text-label); padding: 5px 10px; white-space: nowrap; }
+  button.undo { font-size: var(--text-label); padding: 5px 10px; }
   .loopbtn { padding: var(--space-1) 9px; line-height: 1.4; }
   .libbtn:hover, .loopbtn:hover, button.undo:hover { background: var(--hover-quiet); }
   .libbtn:active, .loopbtn:active, button.undo:active {
@@ -356,6 +334,7 @@
   #libq:focus-visible, #libsort:focus-visible, input.libedit:focus-visible {
     border-color: var(--color-accent); outline-offset: 0;
   }
+  .libcheck { flex: none; margin: 0; width: 16px; height: 16px; accent-color: var(--color-accent); }
 
   /* -- capacity ----------------------------------------------------------- */
 
@@ -367,82 +346,6 @@
   .capfill.warn { background: var(--capacity-caution); }
   .capfill.err { background: var(--capacity-danger); }
 
-  /* -- the slot map ------------------------------------------------------- */
-
-  /* Ten wide at every width. Twenty columns of square cells only worked on a
-     wide screen — at 900px they measured 16.8px, under the 24px WCAG 2.2 target
-     minimum for something you drag onto — and the count had to be repeated in
-     app.js for arrow-key movement, so a responsive column count would have made
-     that constant a lie at some breakpoint. Ten decades of a fixed 34px row is
-     legible on a phone and on a laptop, and Down from slot 7 lands on 17. */
-  #grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: var(--space-1); margin-top: var(--space-1); }
-  .cell {
-    position: relative; height: 34px; background: transparent;
-    display: flex; align-items: flex-end;
-    padding: 3px 5px; font: inherit; -webkit-appearance: none; appearance: none;
-    border: var(--rule-minor) solid var(--cell-border);
-    border-radius: var(--radius-sm); cursor: pointer; transition: transform .1s;
-  }
-  /* Printed in every cell, bottom-left. pointer-events:none is load-bearing,
-     not tidiness: without it the drag events fire on the number as well as the
-     cell and the drop outline flickers on every crossing between the two. */
-  .cell .n {
-    font: 10px var(--font-mono); line-height: 1; color: var(--text-faint);
-    pointer-events: none;
-  }
-  .cell.synced .n, .cell.converting .n, .cell.error .n { color: var(--on-state); }
-  .cell.staged .n { color: var(--on-queued); }
-  .cell.synced { background: var(--state-synced); border-color: var(--state-synced); }
-  .cell.converting { background: var(--state-converting); border-color: var(--state-converting); }
-  .cell.staged { background: var(--state-queued); border-color: var(--state-queued); }
-  .cell.error { background: var(--state-error); border-color: var(--state-error); }
-  /* A loop lives on the slot independently of the backing-track state, so it is
-     an overlay marker, not another background colour. Inset from the corner so
-     it reads as a mark on the cell rather than a nick out of its edge. */
-  .cell.has-loop::after {
-    content: ""; position: absolute; top: 2px; right: 2px;
-    width: 5px; height: 5px; background: var(--state-loop);
-  }
-  .cell.synced.has-loop::after,
-  .cell.converting.has-loop::after,
-  .cell.error.has-loop::after { background: var(--on-state); }
-  .cell.staged.has-loop::after { background: var(--on-queued); }
-  /* Selection is an inset ring and focus is the outer one, so a keyboard user
-     arrowing across a map that already has a selection can still see where they
-     are. Both are 2px accent; sharing the outline would make them the same
-     thing on screen. */
-  .cell.sel { box-shadow: inset 0 0 0 2px var(--color-accent); }
-  .cell.over { outline: 2px solid var(--color-accent); outline-offset: 2px; transform: scale(1.35); }
-  .cell.dragging { opacity: 0.35; }
-  .cell[draggable=true] { cursor: grab; }
-
-  /* Names the hovered slot, or says what the surface is for when nothing is
-     hovered. The quiet state is the resting one, so it is the unmarked class. */
-  #slotread { font-size: var(--text-meta); color: var(--text-faint); }
-  #slotread.on { color: var(--color-text); font-weight: var(--font-heading-weight); }
-
-  .legend {
-    display: flex; flex-wrap: wrap; gap: var(--space-4);
-    margin-top: var(--space-3);
-    font-size: var(--text-meta); color: var(--text-muted);
-  }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .legend i {
-    width: 9px; height: 9px; flex: none; font-style: normal;
-    border: var(--rule-minor) solid var(--cell-border);
-  }
-  .legend .k-synced { background: var(--state-synced); border-color: var(--state-synced); }
-  .legend .k-converting { background: var(--state-converting); border-color: var(--state-converting); }
-  .legend .k-queued { background: var(--state-queued); border-color: var(--state-queued); }
-  /* The loop swatch is the marker itself, not a filled square — it is an
-     overlay on a cell in either state, so showing it as a fill would say
-     something the map does not. */
-  .legend .k-loop { border-color: var(--cell-border); position: relative; }
-  .legend .k-loop::after {
-    content: ""; position: absolute; top: 1px; right: 1px;
-    width: 4px; height: 4px; background: var(--state-loop);
-  }
-
   /* -- on the pedal ------------------------------------------------------- */
 
   .track {
@@ -450,32 +353,27 @@
     border-bottom: var(--rule-minor) solid var(--rule);
   }
   .track:last-child { border-bottom: 0; }
-  /* The row's slot number is a control now — it selects the slot — so it is a
-     filled block rather than grey text, matching the map's own inversion.
-     --accent-legible when selected, not --color-accent: the label is 13px bold,
-     which is not WCAG large text, and full accent behind it is 3.76:1. */
+  .track:hover { background: var(--surface-hover); }
+  /* A slot number that is not a control: a loop-only row's number, and the
+     library's badge for a track that is on the pedal. A filled block, so it
+     reads as a label rather than as text. */
   .num {
     font: var(--text-label) var(--font-mono); font-weight: var(--font-heading-weight);
     background: var(--color-text); color: var(--color-bg);
-    border: 0; border-radius: var(--radius-sm); padding: 3px 6px;
-    flex: none; cursor: pointer; line-height: 1.2;
+    border-radius: var(--radius-sm); padding: 3px 6px;
+    flex: none; line-height: 1.2; white-space: nowrap;
   }
-  .num[aria-pressed="true"] { background: var(--accent-legible); }
-
-  /* Selection and hover, shared by the map and the list. Selection outranks
-     hover, which paintLinks() enforces by never marking both on one node. */
-  .track.linked { background: var(--surface-hover); }
-  .track.sel { background: var(--surface-selected); }
-  .track:hover { background: var(--surface-hover); }
-  .track.sel:hover { background: var(--surface-selected); }
-  .cell.linked { outline: 2px solid var(--link-ring); outline-offset: 1px; }
-  /* Every free cell tints while a track is picked up — one class on the grid,
-     not 99 class writes. Loop-bearing cells tint with the rest: a loop does not
-     make a slot unavailable, and leaving them plain would promise a refusal
-     that never comes. */
-  #grid.picking .cell:not(.synced):not(.converting):not(.staged):not(.error) {
-    background: var(--surface-selected);
+  /* The slot a track sits in, and the way to move it. A bordered field rather
+     than a block, because it is something you type into. */
+  .slotfield {
+    width: 46px; text-align: center; padding: 3px 4px; flex: none;
+    font: var(--text-small) var(--font-mono); font-weight: var(--font-heading-weight);
+    color: var(--color-text); caret-color: var(--color-accent);
+    background: var(--color-surface);
+    border: var(--rule-minor) solid var(--color-text); border-radius: var(--radius-sm);
+    -webkit-appearance: none; appearance: none;
   }
+  .slotfield:focus-visible { border-color: var(--color-accent); outline-offset: 0; }
   .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dur { font-size: var(--text-small); color: var(--text-faint); flex: none; }
   .st {
@@ -488,13 +386,12 @@
   .st.converting, .st.error { color: var(--text-danger); }
   .st.loop { color: var(--text-faint); }
   .nm.loop-only { color: var(--text-faint); font-style: italic; }
-  /* Loop controls sit on their own indented line under the track row, so a
-     narrow phone never has to squeeze them next to the name and state. */
-  /* The continuation line under a slot that holds both a track and a loop.
-     Indented to the track name, so it reads as belonging to the row above. */
+  /* The continuation line under a slot that holds a loop. Indented to the
+     track name, so it reads as belonging to the row above, and on its own line
+     so a narrow phone never has to squeeze it next to the name and state. */
   .looprow {
     display: flex; flex-wrap: wrap; gap: var(--space-2);
-    padding: 0 0 10px 40px; margin-top: -2px;
+    padding: 0 0 10px 56px; margin-top: -2px;
     border-bottom: var(--rule-minor) solid var(--rule);
   }
   .looprow .loopbtn { font-size: var(--text-meta); }
@@ -515,92 +412,12 @@
   }
   .libname:hover { text-decoration: underline dotted var(--text-faint); }
   .libdur { font-size: var(--text-small); color: var(--text-faint); flex: none; }
-  /* The slot this track sits in, and the way to change it. A bordered field
-     rather than a badge, because it is now something you type into. */
-  .slotwrap { display: inline-flex; align-items: center; gap: 3px; flex: none; }
-  .slotfield {
-    width: 46px; text-align: center; padding: 3px 4px;
-    font: var(--text-small) var(--font-mono); font-weight: var(--font-heading-weight);
-    color: var(--color-text); caret-color: var(--color-accent);
-    background: var(--color-surface);
-    border: var(--rule-minor) solid var(--rule); border-radius: var(--radius-sm);
-    -webkit-appearance: none; appearance: none;
-  }
-  /* Assigned reads as a solid edge, unassigned as a hairline: the difference
-     between "this track is on the pedal" and "this is where it would go". */
-  .slotfield.assigned { border-color: var(--color-text); }
-  .slotfield:focus-visible { border-color: var(--color-accent); outline-offset: 0; }
-  /* A track can be in more than one slot and the field can only show one. */
-  .slotmore { font: var(--text-meta) var(--font-mono); color: var(--text-faint); }
 
   /* The buttons are one block that never splits. Every .libbtn is flex:none, so
      a group that shrinks does not narrow its buttons, it spills them out of the
      pane. Sized to its content and pushed right by the auto margin, the group
-     drops to a line of its own once the heading stops leaving room for it.
-
-     Left shrinkable it ran 5px past a 375px phone with two buttons, and 21px
-     past the right pane at 900 once "Out of folder" joins them. The phone case
-     widened the document and took the fixed action bar with it; the 900 case is
-     under overflow:hidden, so "Add files" was simply cut off. */
+     drops to a line of its own once the heading stops leaving room for it. */
   .libhead-acts { display: flex; gap: var(--space-2); flex: none; margin-left: auto; }
-
-  /* -- the folder tree ----------------------------------------------------
-
-     One flat list of rows carrying their own indent, not nested containers.
-     Rows are rebuilt from scratch on every library change, and a tree of divs
-     would have to be diffed to keep that cheap; a flat list is what rebuild()
-     already knows how to restore focus into. */
-  .folderrow {
-    display: flex; align-items: center; gap: var(--space-2); padding: 9px 0;
-    border-bottom: var(--rule-minor) solid var(--rule);
-  }
-  /* Depth 0 only. Nested folders stay transparent, so the tint reads as "this
-     is where a top-level group starts" rather than as decoration. */
-  .folderrow.top { background: var(--surface-group); }
-  .folderrow { cursor: pointer; }
-  /* A real button, so the disclosure is announced and keyboard-reachable. The
-     glyph is 12px wide; the padding is what gets the target to a size a thumb
-     can hit, without moving the column the names line up on. */
-  button.caret {
-    width: 12px; flex: none; padding: 6px 0; margin: -6px 0;
-    border: 0; background: none; text-align: center; cursor: pointer;
-    font: var(--text-label) var(--font-mono); font-weight: var(--font-heading-weight);
-    color: var(--text-faint);
-  }
-  .foldername {
-    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; font-size: var(--text-control);
-    font-weight: var(--font-heading-weight); cursor: text;
-  }
-  .foldername:hover { text-decoration: underline dotted var(--text-faint); }
-  .foldermeta {
-    flex: none; font: var(--text-meta) var(--font-mono); color: var(--text-faint);
-  }
-  /* The column a folder's caret occupies, kept on track rows so names line up
-     under the folder they are in. */
-  .librow .caret { width: 12px; flex: none; }
-  /* The label states the range it will write, so it has to be allowed to be as
-     wide as "Assign 09–17" and must not wrap to a second line. */
-  .libbtn.assign { flex: none; white-space: nowrap; font-size: var(--text-meta); }
-
-  /* One column is where the folder row runs out of width: caret, name, count,
-     first-slot field, "Assign 04–07" and a dissolve, against 335px. The count
-     is the one part that says nothing you cannot get by opening the folder, so
-     it is what goes, and the name gets the space back. */
-  @media (max-width: 899px) {
-    .foldermeta { display: none; }
-  }
-
-  /* Which folder a row came out of, for rows shown outside the tree. */
-  .libpath {
-    flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; font-size: var(--text-meta); color: var(--text-faint);
-  }
-
-  /* A track lifted out of the library, waiting for a slot. */
-  .librow.picked { background: var(--surface-selected); }
-  .librow.picked .libname { font-weight: var(--font-heading-weight); }
-  .librow { cursor: pointer; }
   #libfoot { margin-top: 10px; }
 
   /* -- drop zone ---------------------------------------------------------- */
@@ -618,17 +435,9 @@
   }
   #dropnote { display: block; margin-top: 6px; font-size: var(--text-small); }
   #drop.over { border-color: var(--color-accent); background: var(--hover-loud); }
-  /* Dropping a slot here removes it, so the zone stops being dashed: solid is
-     the difference between "put something here" and "this will delete it". */
-  #drop.bin { border-color: var(--text-danger); color: var(--text-danger); }
-  #drop.bin.over {
-    background: color-mix(in srgb, var(--text-danger) 14%, transparent);
-    border-style: solid;
-  }
   /* The input itself is off screen, so its focus ring has to land on the label.
-     Anchored on body, not .wrap: .wrap is gone, and nothing would have failed
-     loudly if these had been left pointing at it — the two file inputs would
-     simply have had no visible focus at all. */
+     Anchored on body: nothing would fail loudly if these pointed at a wrapper
+     that had gone — the two file inputs would simply have no visible focus. */
   body:has(#file:focus-visible) #drop { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   /* Same for the Library's own file input, or a keyboard user reaching "Add
      files" gets no visible focus at all. */
@@ -658,8 +467,8 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .err { color: var(--text-danger); }
-  /* A refusal the user has to notice: an out-of-range slot, a folder that
-     would not dissolve. Weighted so it stands apart from the plain status. */
+  /* A refusal the user has to notice: an out-of-range slot, a fill that did
+     not all fit. Weighted so it stands apart from the plain status. */
   .msg.warn { color: var(--text-danger); font-weight: var(--font-heading-weight); }
   #undoslot { flex: none; }
 }
@@ -672,25 +481,15 @@
   .pane-l { border-bottom: var(--rule-major) solid var(--rule); }
 
   /* The device is managed from a laptop, so at this width the single column
-     becomes two: the pedal on the left, the library beside it. Assigning a
-     library track means picking a slot and then acting on the row, which in one
-     column is a scroll to the top and back.
+     becomes two: the pedal on the left, the library beside it, so putting a
+     track on the pedal and seeing it land are one glance rather than a scroll.
 
-     900, down from 1280, and the reason the number moved is that the thing it
-     was protecting no longer needs protecting. The old map was 20 columns of
-     square cells, so halving the page halved the cell: at 900px they came out
-     16.8px, under the 24px WCAG 2.2 target minimum for something you drag onto,
-     and 1280 was the lowest width that kept them legal. Ten columns of a fixed
-     34px row do not shrink that way — the cell is 37x34 at 900px and still
-     30x34 at 375px in one column, so the map is no longer the binding
-     constraint at any width this page is used at.
-
-     What binds now is the list row. "On the pedal" spends about 195px on the
-     slot number, duration, status and clear button before the track name gets
-     anything, plus 40px of section padding, so a 450px pane leaves the name
-     around 215px — roughly thirty characters, which is a song title. Below
-     that the names ellipsise while the columns are still half empty, and one
-     column reads better. */
+     What binds the breakpoint is the list row. "On the pedal" spends about
+     195px on the slot field, duration, status and clear button before the
+     track name gets anything, plus 40px of section padding, so a 450px pane
+     leaves the name around 215px — roughly thirty characters, which is a song
+     title. Below that the names ellipsise while the columns are still half
+     empty, and one column reads better. */
   @media (min-width: 900px) {
 
     /* Header and bar are grid rows, not position:fixed. Same picture, minus the
@@ -711,11 +510,8 @@
     }
     .pane-l { border-right: var(--rule-major) solid var(--rule); border-bottom: 0; }
 
-    /* Each pane scrolls on its own. The design scrolls the whole page, but the
-       left column is the taller one — capacity, a 99-cell map, the drop zone
-       and up to 99 rows — so one shared scrollbar means reaching slot 80 takes
-       the library off screen, which is the thing two columns exist to fix. The
-       design's own max-height on the tree concedes the point.
+    /* Each pane scrolls on its own, so reaching slot 80 on the left never takes
+       the library off screen, which is the thing two columns exist to fix.
 
        min-height:0 on every grid ancestor is not optional: without it a grid
        item refuses to shrink below its content, the panes silently never
@@ -725,8 +521,7 @@
 
     /* The right pane is the one that stays put: its own head and search should
        not scroll away with the rows, so the library is a grid and only the rows
-       are the part that moves. This is the design's max-height:520px expressed
-       as a fraction of the pane instead of a guess at the viewport. */
+       are the part that moves. */
     .pane-r { overflow: hidden; display: grid; }
     #libcard {
       min-height: 0; display: grid;

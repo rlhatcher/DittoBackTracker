@@ -162,12 +162,12 @@ hardware before building anything on it.
 
 The headline is not that a folder is named differently. **Neither model has
 slots.** The X2 holds one backing track and plays whichever file was added
-last; the X4 holds two, addressed by which LOOP control plays them. The 99-slot
-map, the library-to-slot assignment, filling a folder into a run of slots and
-dragging to reorder are all modelling something these pedals do not have. That
-is a second product sharing a converter, not a port.
+last; the X4 holds two, addressed by which LOOP control plays them. The
+numbered slot list, the library-to-slot assignment and moving a track between
+slots are all modelling something these pedals do not have. That is a second
+product sharing a converter, not a port.
 
-Built anyway, five things assume the Ditto+ layout:
+Built anyway, four things assume the Ditto+ layout:
 
 - `pedal.detect_format()` finds a file to probe by walking slots 1 to
   `config.SLOTS` and stat-ing `SLOT_DIR.format(n)`. The audio format is read
@@ -178,9 +178,6 @@ Built anyway, five things assume the Ditto+ layout:
   `slot = -1` while it exchanges two others. Both assume one small integer
   keyspace. A model whose tracks aren't identified by a number in that range
   needs a schema change, not just new paths.
-- The slot map is ten columns wide because a row of ten is a decade and 99
-  slots divide into it. A different count wants a different arrangement, and
-  the column count lives in `app.js` and `app.css` with a test tying them.
 - `config.TRACK_FILENAME` and `config.LOOP_FILENAME` are one pair for the
   build. The X4 reportedly accepts AIFF as well as WAV, and no source here says
   what it names a loop it recorded itself. That matters, because not

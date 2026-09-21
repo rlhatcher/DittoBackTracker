@@ -24,14 +24,14 @@ header is out, and it comes down to a cookie or a query parameter.
 **Other Ditto models.** Bigger than it looks. The X2 holds *one* backing track
 in a `TRACK/` folder and plays whichever file was added last; the X4 holds
 *two*, in `TRACK1/` and `TRACK2/`, one per LOOP control. Neither has slots. The
-99-slot map, the library-to-slot assignment, filling a folder into a run of
-slots and dragging to reorder are all modelling something those pedals do not
-have. It is a second product sharing a converter, not a port.
+numbered slot list, the library-to-slot assignment and moving a track between
+slots are all modelling something those pedals do not have. It is a second
+product sharing a converter, not a port.
 
 The slot *count* is already parameterised, for what it is worth: nothing spells
 out 99 and clients read `slot_count` from the snapshot. The layout is not, and
-it reaches past `pedal.py` into `detect_format()`, the grid's column count and
-the `slots` schema. The five places, the layouts and their sources are in
+it reaches past `pedal.py` into `detect_format()` and the `slots` schema. The
+four places, the layouts and their sources are in
 [pedal-format.md](pedal-format.md#other-models), all secondhand and unconfirmed
 on hardware.
 

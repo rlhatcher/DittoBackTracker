@@ -303,8 +303,8 @@ absent and `null` cannot mean the same thing. Returns the updated row.
 The folder is checked before anything is written, so a request naming a missing
 folder does not leave a rename applied.
 
-The new name appears in the slot list, the grid tooltips and the print view
-immediately, because there is only one copy of it.
+The new name appears in the slot list and the print view immediately, because
+there is only one copy of it.
 
 ---
 
@@ -493,6 +493,44 @@ does, so this is how you change what the pedal carries, not another upload.
 
 ---
 
+## POST /api/slots/assign
+
+Put several library tracks on the pedal in one call. Body
+`{"hashes": ["b9ec…", "ff02…"]}`, with an optional `start`; without it the fill
+begins at the first slot with room.
+
+```json
+{ "start": 9, "end": 11,
+  "assigned": [ { "slot": 9, "source_hash": "b9ec...", "name": "Autumn Leaves" } ],
+  "skipped_loops": [ 10 ],
+  "unplaced": [ { "source_hash": "ff02...", "name": "Ceora",
+                  "error": "no room past slot 99" } ],
+  "loops_known": true }
+```
+
+Tracks go in the order given into consecutive slots, skipping any slot that
+holds a loop, the same automatic-placement rule an unnumbered upload follows.
+`start` and `end` are the first and last slot **actually written**, so they
+span those skips. Both are `null` when nothing was placed. Whatever was in a
+slot moves to the trash, as with a single assign.
+
+`201`. `400` if `hashes` is not a non-empty list of strings, or `start` is not
+a slot number. `404` if any hash is not in the library, and then nothing is
+placed: a set list with a track missing from it is one problem, and the
+client's list is stale.
+
+**Read the body.** A `201` does not mean everything landed: `unplaced` names
+the tracks that ran out of pedal. `loops_known: false` means the range is
+provisional: with no pedal connected the device cannot know which slots hold
+loops and cannot skip them.
+
+This is one endpoint rather than N calls to `POST /api/slots/<n>/assign`: the
+loop set is only correct under the lock that queues the work, the whole fill
+is one locked step so a forced delete cannot interleave with it, and it
+broadcasts one snapshot instead of one per track.
+
+---
+
 ## GET /api/library/&lt;hash&gt;/audio
 
 Stream a track's original file, so a browser can audition it before committing
@@ -583,9 +621,9 @@ curl -N http://dittobacktracker.local/api/events
 
 | Status | Where | Meaning |
 |---|---|---|
-| `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `PATCH /api/library/<hash>` | Bad input: slot out of range, non-audio file, a file ffprobe can't read, or an empty/overlong name. Body is `{"error": "..."}` |
+| `400` | `POST /api/slots/<n>`, `/move`, `/retry`, `/assign`, `DELETE /api/slots/<n>`, `POST /api/upload`, `POST /api/slots/assign`, `PATCH /api/library/<hash>` | Bad input: slot out of range, non-audio file, a file ffprobe can't read, a body without a list of hashes, or an empty/overlong name. Body is `{"error": "..."}` |
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
-| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign` | No such trash entry; the slot has no loop; or no such track in the library, which is also what a malformed hash returns, since it cannot name one |
+| `404` | `POST /api/trash/<id>/restore`, `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign`, `POST /api/slots/assign` | No such trash entry; the slot has no loop; or no such track in the library, which is also what a malformed hash returns, since it cannot name one |
 | `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |

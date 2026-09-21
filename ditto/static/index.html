@@ -22,44 +22,26 @@
   <div class="pane pane-l">
 
     <section id="capcard">
-      <div class="row"><h2>Capacity</h2><span id="captxt">—</span></div>
+      <div class="row"><h2>On the pedal</h2><span id="captxt">—</span></div>
       <div class="capbar"><div class="capfill" id="capfill" style="width:0"></div></div>
-      <div class="row"><span id="capnote"></span></div>
-    </section>
-
-    <section id="slotcard">
-      <div class="listhead">
-        <h2>Slots</h2>
-        <!-- aria-hidden: the focused cell's own aria-label already says all of
-             this, and a second copy that lags the pointer is worse than none. -->
-        <span id="slotread" aria-hidden="true">map and list are linked</span>
-      </div>
-      <div id="grid"></div>
-      <div class="legend">
-        <span><i class="k-synced"></i>on pedal</span>
-        <span><i class="k-converting"></i>converting</span>
-        <span><i class="k-queued"></i>queued</span>
-        <span><i></i>empty</span>
-        <span><i class="k-loop"></i>holds a recorded loop</span>
+      <div class="row">
+        <span id="capnote"></span>
+        <button class="link" id="print" type="button" title="Print the backing-track list" hidden>Print list</button>
       </div>
     </section>
 
     <section id="dropsec">
       <label id="drop" for="file">
-        <span id="drophead">Drop audio here, or choose a file</span>
+        <span id="drophead">Drop audio here, or choose files</span>
         <span id="dropnote">
-          Files land in the library; a leading number sends one straight to that
-          slot — “07 Blue Bossa.mp3”
+          Files take the next free slots. A leading number picks the slot:
+          “07 Blue Bossa.mp3”
         </span>
       </label>
       <input type="file" id="file" multiple accept="audio/*" class="vh">
     </section>
 
     <section id="listcard">
-      <div class="listhead">
-        <h2>On the pedal</h2>
-        <button class="link" id="print" type="button" title="Print the backing-track list" hidden>Print list</button>
-      </div>
       <div id="list"></div>
     </section>
 
@@ -69,21 +51,19 @@
 
     <section id="libcard">
       <div class="listhead">
-        <h2>Library — stays on the device</h2>
+        <h2>Library</h2>
         <span class="libhead-acts">
-          <button class="libbtn" id="tolevel" type="button" title="Take the track you picked up out of its folder" hidden>Out of folder</button>
-          <button class="libbtn" id="newfolder" type="button" title="Group tracks into a folder">New folder</button>
+          <button class="libbtn" id="addsel" type="button" title="Put the ticked tracks on the pedal, from the next free slot" hidden>Add to pedal</button>
           <label class="libbtn" for="libfile" id="libadd" title="Add tracks without putting them on the pedal">Add files</label>
         </span>
       </div>
       <input type="file" id="libfile" multiple accept="audio/*" class="vh">
       <div class="libtools" id="libtools" hidden>
-        <input type="search" id="libq" placeholder="Search every folder" aria-label="Search every folder"
+        <input type="search" id="libq" placeholder="Search" aria-label="Search the library"
                autocomplete="off" autocorrect="off" spellcheck="false">
         <select id="libsort" aria-label="Sort the library">
-          <option value="folder">Folder order</option>
-          <option value="added">Newest first</option>
           <option value="name">Name</option>
+          <option value="added">Newest first</option>
           <option value="duration">Length</option>
         </select>
       </div>

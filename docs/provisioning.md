@@ -275,7 +275,7 @@ Expect roughly 1 MB/s. That is where `config.LOOP_STAGE_TIMEOUT` comes from.
 - [ ] `ditto-svc` can mount and unmount the pedal without becoming root
 - [ ] The scoped sudoers rule answers for `ditto-svc` (below)
 - [ ] `systemctl status ditto-web` is active, with no restart loop
-- [ ] The web UI loads and shows the slot grid
+- [ ] The web UI loads and shows the pedal's slot list
 - [ ] A dropped MP3 converts and plays back from the pedal
 - [ ] Boot to SSH in under 15 s
 - [ ] `df -h /var/lib/ditto` shows `/dev/mmcblk0p3`, not an overlay

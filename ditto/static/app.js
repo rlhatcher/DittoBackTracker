@@ -1,33 +1,24 @@
 /* The whole page, in one file and in this order:
 
-     module state          what render() and the library views read
-     the slot map          painting, selection, hover, pick-up, drag and drop
-     drawing the two lists slot buttons, loop controls, the track list
+     module state          what render() and the library view read
+     on the pedal          the slot field, loop controls, the track list
      render                the one function the SSE snapshot drives
      DOM helpers           rebuild-with-focus, setText, printing
      talking to the device api(), failFrom(), jsonBody
      the status line       say/warn/fail, and the six-second hold
-     uploads               where a dropped file goes, and what it reports
-     listeners             keyboard, hover, the drop zone, the bin
+     uploads               one POST, and what it reports
+     listeners             the drop zone, clearing a slot, undo
      the update            check and deploy, and the button's two states
      the event stream      EventSource, and the reconnect grace
-     library and folders   fetching, the derived tree, the views, the rows
-     boot                  the two loads the stream would otherwise wait for
+     library               fetching, the view, the rows, the ticked set
+     boot                  the load the stream would otherwise wait for
 
    One file on purpose. Splitting it into ES modules would cost a round trip
    each on a page served no-cache from a Pi Zero, serialise on the import graph
    the preload scanner cannot see, and add an ASSETS allowlist entry per module
-   where forgetting one is a silent 404. Revisit if this passes ~2500 lines, or
-   the library section passes ~1200. */
+   where forgetting one is a silent 404. Revisit if this passes ~1500 lines. */
 
 const $ = s => document.querySelector(s);
-const SLOT_MIME = "application/x-ditto-slot";
-/* How far one level of folder nesting indents a row. Written twice before this
-   — once for folder rows, once for track rows — and config.py cites it a third
-   time (16 + depth*18) to justify MAX_FOLDER_DEPTH = 8, which is the depth past
-   which a name disappears behind the meta text in a half-width column. Change
-   it here and the depth limit stops meaning what its comment says. */
-const DEPTH_INDENT_PX = 18;
 
 /* ---------------------------------------------------------- module state */
 
@@ -35,19 +26,14 @@ const DEPTH_INDENT_PX = 18;
    than re-derived at each declaration: render() runs on every SSE frame, up to
    5 Hz while a conversion reports progress, and it rebuilds both lists from
    scratch. Anything the user is part-way through — a rename, a half-typed slot
-   number, which folder is open, where the keyboard is — would be destroyed by
-   that unless it lives out here and is read back on the way in.
+   number, which rows are ticked — would be destroyed by that unless it lives
+   out here and is read back on the way in. */
 
-   The declarations below each say which variant they need, because they are
-   genuinely different: some freeze a rebuild (editingHash), some survive one by
-   being read back (slotDraft, folderStart), and one must never reach a rebuild
-   at all (hoveredSlot). Those are not three ways of saying the same thing. */
-
-let state = null, selected = null, dragSrc = null, binMode = false;
+let state = null;
 /* The over-the-air update, as one small state machine.
 
    Idle is every field at its value below, and endUpdating() is the reset.
-   Grouped because the lifecycle is split across two functions 600 lines apart:
+   Grouped because the lifecycle is split across two functions far apart:
    doUpdate() sets `fromRev`, and render() is what clears `ota.updating`, by
    noticing that a snapshot now reports a different revision. Four loose flags
    made that look like four unrelated booleans.
@@ -74,7 +60,6 @@ const ota = {
    not from the library response, so those badges stay live for free. */
 let library = null;
 let editingHash = null;    // a track rename in progress; freezes renderLibrary
-let editingFolder = null;  // a folder rename, for the same reason
 let nowPlaying = null;     // hash being auditioned, for the row's play button
 
 /* Both lists rebuild from scratch, and render() runs on every SSE frame — up to
@@ -93,35 +78,6 @@ let nowPlaying = null;     // hash being auditioned, for the row's play button
 let libRev = 0;
 let lastListKey = null, lastLibKey = null;
 
-/* The folder tree, on its own endpoint for the same reason the library is: it
-   must not ride a snapshot that emits five times a second during a conversion.
-   folderRev plays libRev's part in the dirty key. */
-let folders = null;
-let folderRev = 0;
-
-/* Which folders are expanded, by id. Collapsed is the default, and this is
-   deliberately not persisted — it is where you are looking, not a setting. */
-let openFolders = {};
-
-/* The folder the last thing happened in, or null for the top level. It is where
-   a new upload lands, so it is stated in the drop zone rather than left to be
-   inferred — invisible state that decides where your files go is a trap. */
-let currentFolder = null;
-
-/* What a folder's Assign button would do, straight from the device's own
-   preview, keyed by folder id. The button's label is rendered from this, and
-   the POST that follows runs the same function on the server — so the range on
-   screen and the range written cannot drift apart.
-
-   folderStart holds uncommitted text in a first-slot field, for the same reason
-   slotDraft does: the rows are rebuilt whenever the snapshot moves. planKey is
-   what each stored plan was asked for, so a render that changes nothing does
-   not re-ask, and planRev puts a new answer into the library's dirty key. */
-let folderPlan = {};
-let folderStart = {};
-let planKey = {};
-let planRev = 0;
-
 /* Say that the library's DOM no longer matches its key, so the next render
    redraws even though the data has not moved.
 
@@ -132,36 +88,12 @@ let planRev = 0;
    for good. */
 function libraryDomDirty(){ lastLibKey = null; }
 
-/* Which slot cell currently holds the grid's single tab stop. It has to live
-   here rather than only on the element: render() rewrites every cell's
-   tabIndex, so a position the user arrowed to would be reset to the selected
-   slot by the next SSE frame — which arrives 5 times a second mid-conversion.
-   null means "follow the selection, else the first cell". */
-let rovingSlot = null;
-
-/* Which slot the pointer (or keyboard focus) is over, shared by the map and the
-   list so each can highlight the other's counterpart.
-
-   This must never reach render() or either dirty key, and that is the whole
-   design of what follows. Sweeping the mouse across the map changes it dozens
-   of times a second; if that redrew, a 99-row list would be rebuilt at
-   pointer-move rate and focus would be destroyed on the way — the exact failure
-   lastListKey exists to prevent, arriving through a different door. Hover is
-   therefore painted by hand, by paintLinks(), and never by a redraw. */
-let hoveredSlot = null;
-
-/* A track lifted out of the library, waiting for a slot to be chosen for it —
-   the source_hash, or null. The map tints its empty cells while this is set. */
-let pickedTrack = null;
-
-/* Uncommitted text in the per-track slot fields, keyed by source_hash.
+/* Uncommitted text in a pedal row's slot field, keyed by slot number.
 
    The rows are rebuilt whenever the snapshot moves, which during a conversion
    is five times a second, so a field's value cannot live only in the DOM. It is
    read back when the row is built, which is what makes a rebuild reconstruct
-   what was being typed instead of wiping it. Deliberately not a freeze flag
-   like editingHash: a slot field can sit focused for a while, and freezing the
-   whole library for that long would stop the other rows tracking the pedal. */
+   what was being typed instead of wiping it. */
 let slotDraft = {};
 
 /* How many times each field has been edited, so a late failure can tell whether
@@ -171,218 +103,85 @@ let slotDraft = {};
    since typed. */
 let slotEdit = {};
 
-/* ------------------------------------------------------------ the slot map */
+/* Which library rows are ticked, by source_hash. Read back when a row is
+   built, so a rebuild keeps the ticks. */
+const checked = new Set();
 
-/* The only thing that writes .sel and .linked, on either surface.
-
-   Selection and hover are the two pieces of state both the map and the list
-   show, so they are painted rather than rendered: this touches at most four
-   nodes and is safe to call on every pointer move. render() calls it last,
-   because a rebuild drops the classes with the elements that carried them. */
-function paintLinks(){
-  const g = $("#grid"), list = $("#list");
-  g.querySelectorAll(".sel, .linked").forEach(e => e.classList.remove("sel", "linked"));
-  list.querySelectorAll(".sel, .linked").forEach(e => e.classList.remove("sel", "linked"));
-  // Selection outranks hover, so a slot that is both gets only .sel.
-  if (hoveredSlot !== null && hoveredSlot !== selected) mark(hoveredSlot, "linked");
-  if (selected !== null) mark(selected, "sel");
-
-  function mark(n, cls){
-    g.querySelector(`.cell[data-slot="${n}"]`)?.classList.add(cls);
-    list.querySelector(`.track[data-slot="${n}"]`)?.classList.add(cls);
-  }
-}
-
-/* aria-pressed is owned here too, for the same reason: the list only rebuilds
-   when its own contents change, and selection is deliberately not part of that
-   key — so a row's button would keep announcing a selection it no longer has. */
-function paintPressed(){
-  document.querySelectorAll("#grid .cell, #list .num").forEach(e => {
-    e.setAttribute("aria-pressed", +e.closest("[data-slot]").dataset.slot === selected
-                                   ? "true" : "false");
-  });
-}
-
-/* What the Slots header reads out. Written through setText so it does not churn
-   the DOM when the pointer moves within one cell. */
-function updateSlotRead(){
-  const el = $("#slotread");
-  if (hoveredSlot === null){
-    setText(el, "map and list are linked");
-    el.className = "";
-    return;
-  }
-  const row = state && state.slots.find(x => x.slot === hoveredSlot);
-  const loop = state && (state.loops || []).includes(hoveredSlot);
-  setText(el, `Slot ${pad2(hoveredSlot)} — ` +
-    (row ? row.display_name : loop ? "recorded loop" : "empty"));
-  el.className = "on";
-}
-
-function setHovered(n){
-  if (n === hoveredSlot) return;   // pointer moving within one cell
-  hoveredSlot = n;
-  paintLinks();
-  updateSlotRead();
-}
-
-/* Selecting a slot, from either surface. With an occupied slot already selected,
-   choosing a different one moves or swaps into it — the click equivalent of the
-   drag, and the reason this is not simply a toggle. */
-function selectSlot(n){
-  // Placing a picked-up track comes first. It is the more recent and the more
-  // explicit intent: the user has said which track, and this click says where.
-  // There is deliberately no loop branch in front of it — BT.WAV and LOOP.WAV
-  // are separate files in one slot directory, so assigning to a loop slot
-  // cannot overwrite the loop, and refusing it would remove the feature the
-  // loop exists for. The confirmation names the loop instead.
-  if (pickedTrack !== null){
-    const r = (library || []).find(x => x.source_hash === pickedTrack);
-    pickedTrack = null;
-    if (r) assignToSlot(r, n);
-    else render(state);
-    return;
-  }
-  if (selected !== null && selected !== n &&
-      state.slots.some(x => x.slot === selected)){
-    const src = selected;
-    selected = null;
-    moveTo(src, n);
-    render(state);
-    return;
-  }
-  selected = selected === n ? null : n;
-  render(state);
-}
-
-/* Lift a track out of the library, or put it back down.
-
-   With an empty slot already selected the question "where?" is already
-   answered, so a click on a track fills it rather than starting a pickup —
-   otherwise the user would have to say where twice. */
-/* Redraw after a change to UI-only state, when there may be no snapshot yet.
-
-   /api/library is fetched at load and does not wait for the event stream, and
-   the last line of this file says so: the card fills "even if the event stream
-   is slow or never comes up". So the library can have rows on screen while
-   `state` is still null, and render() dereferences the snapshot from its second
-   line. A row click in that window threw on `s.pedal` and left pickedTrack set
-   with nothing painted.
-
-   The other render(state) callers are reachable only after a cell or a list row
-   exists, and both are built by render(), so they cannot run before the first
-   snapshot. */
-function repaint(){
-  if (state) render(state); else renderLibrary();
-}
-
-function pickUp(r){
-  if (selected !== null && !((state && state.slots) || []).some(x => x.slot === selected)){
-    assignToSlot(r, selected);
-    return;
-  }
-  const same = pickedTrack === r.source_hash;
-  pickedTrack = same ? null : r.source_hash;
-  repaint();
-  // render() has just rewritten #msg from the snapshot, so this goes after it.
-  if (!same) say(`Choose a slot for “${r.name}”`);
-}
-
-function cancelPickup(){
-  if (pickedTrack === null) return;
-  pickedTrack = null;
-  repaint();
-}
-
-/* What the drop zone's note says, which is always about what you can do next.
-   The wording is the design's; assignTarget() supplies "next free is 09" and is
-   already loop-aware, so the number here and the number a click would use are
-   one computation. */
-function hintText(byslot){
-  if (pickedTrack !== null){
-    const r = (library || []).find(x => x.source_hash === pickedTrack);
-    const t = assignTarget();
-    return `Choose a slot for “${r ? r.name : "that track"}”`
-         + (t !== null ? ` — next free is ${pad2(t)}` : " — the pedal is full")
-         + ((folders || []).length ? ", or a folder to file it in" : "");
-  }
-  if (selected !== null){
-    return byslot[selected]
-      ? `Slot ${pad2(selected)} selected — click another slot or row to move or swap`
-      : `Slot ${pad2(selected)} selected — click a track to fill it`;
-  }
-  return "Hover to link map and list · a leading number sends a file "
-       + "straight to that slot · drag slot to slot to swap";
-}
-
-/* Drag behaviour for anything that stands for a slot. A map cell and a list row
-   are the same thing to a drag, so both get this and all four directions —
-   cell to cell, cell to row, row to cell, row to row — fall out of one
-   implementation instead of two that can disagree. */
-function attachSlotDnD(el, n){
-  el.addEventListener("dragstart", e => {
-    dragSrc = n;
-    e.dataTransfer.setData(SLOT_MIME, String(n));
-    e.dataTransfer.effectAllowed = "move";
-    el.classList.add("dragging");
-    setBinMode(true);
-  });
-  el.addEventListener("dragend", () => {
-    dragSrc = null;
-    el.classList.remove("dragging");
-    setBinMode(false);
-  });
-  ["dragenter", "dragover"].forEach(ev => el.addEventListener(ev, e => {
-    e.preventDefault(); e.stopPropagation();
-    if (dragSrc !== n) el.classList.add("over");
-  }));
-  ["dragleave", "drop"].forEach(ev => el.addEventListener(ev, e => {
-    e.preventDefault(); el.classList.remove("over");
-  }));
-  el.addEventListener("drop", e => {
-    e.stopPropagation();
-    const from = e.dataTransfer.getData(SLOT_MIME);
-    if (from){
-      const src = parseInt(from, 10);
-      if (src !== n) moveTo(src, n);
-    } else {
-      send(e.dataTransfer.files, n);
-    }
-  });
-}
-
-/* --------------------------------------------------- drawing the two lists */
+/* ---------------------------------------------------------- on the pedal */
 
 const pad2 = n => String(n).padStart(2, "0");
-// One vocabulary for slot state. The wire words are not the shown words, and
-// the map cell and the list row describe the same slot — a cell announcing
-// "synced" while the row under it reads "on pedal" is one state with two names.
+// One vocabulary for slot state. The wire words are not the shown words:
 // "staged" is the wire word for a slot whose audio is converted and waiting to
-// be written; the design calls that queued, and so does the map's legend. There
-// is no reason the row should be the one place that says staged.
+// be written, and the row calls that queued.
 const STATE_LABEL = {converting: "converting", staged: "queued",
                      synced: "on pedal", error: "error"};
 const stateLabel = st => STATE_LABEL[st] || st;
 
 function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+":"+pad2(s%60); }
 
-/* The row's slot number, which is also how the row is selected.
+/* The row's slot number, as a field you can type another one into. Enter or
+   blur moves the track there, swapping if the slot is taken; Escape reverts.
+   The field is the one way to move a track: one number, typed, is what a
+   musician with a set list already has in front of them. */
+function slotField(r){
+  const f = document.createElement("input");
+  f.type = "text";
+  f.inputMode = "numeric";
+  f.maxLength = 2;
+  f.className = "slotfield";
+  const draft = slotDraft[r.slot];
+  f.value = draft !== undefined ? draft : pad2(r.slot);
+  f.dataset.fk = "slot:" + r.slot + ":field";
+  f.title = `Type another slot number to move “${r.display_name}” there`;
+  f.setAttribute("aria-label", `Slot number for ${r.display_name}`);
+  f.oninput = () => {
+    slotDraft[r.slot] = f.value;
+    slotEdit[r.slot] = (slotEdit[r.slot] || 0) + 1;
+  };
+  f.onkeydown = e => {
+    e.stopPropagation();
+    if (e.key === "Enter"){ e.preventDefault(); f.blur(); }
+    else if (e.key === "Escape"){ revertSlotField(r.slot); }
+  };
+  f.onblur = () => commitSlotField(r);
+  return f;
+}
 
-   A button rather than the whole row: making a div of name, duration and a
-   clear button into one control would swallow all three, and leaving the row
-   clickable with no keyboard path would be a plain WCAG failure. This is small,
-   honest about what it does, and doubles as the drag handle. */
-function slotButton(n){
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = "num";
-  b.textContent = pad2(n);
-  b.title = `Select slot ${pad2(n)}`;
-  b.setAttribute("aria-label", `Select slot ${pad2(n)}`);
-  b.setAttribute("aria-pressed", "false");   // paintPressed owns the real value
-  b.dataset.fk = "slot:" + n + ":select";
-  b.onclick = e => { e.stopPropagation(); selectSlot(n); };
-  return b;
+function revertSlotField(slot){
+  delete slotDraft[slot];
+  lastListKey = null;     // the data has not moved, only the DOM
+  if (state) render(state);
+}
+
+/* Enter or blur commits what was typed.
+
+   Clearing the draft is not enough to put a rejected number back. The field's
+   value is in the DOM, and only a rebuild reconstructs it — which happens when
+   the list key moves, which happens when the snapshot changes. A refused move
+   changes nothing, so without an explicit revert the field would sit there
+   showing a number the pedal never accepted. */
+async function commitSlotField(r){
+  if (slotDraft[r.slot] === undefined) return;    // nothing was typed
+  const raw = slotDraft[r.slot].trim();
+  delete slotDraft[r.slot];
+  // Whose edit this is. Anything awaited below must check it before rolling the
+  // field back, or it will roll back somebody else's typing.
+  const gen = slotEdit[r.slot];
+  const stillMine = () => slotEdit[r.slot] === gen;
+  const max = (state && state.slot_count) || 99;
+
+  const n = /^\d{1,2}$/.test(raw) ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(n) || n < 1 || n > max){
+    // Not a literal "01–99": docs/api.md says clients read slot_count rather
+    // than assuming the pedal has 99 slots.
+    warn(`Slot numbers run 01–${pad2(max)}`);
+    revertSlotField(r.slot);
+    return;
+  }
+  if (n === r.slot){ revertSlotField(r.slot); return; }
+  // One call, not assign-then-delete: two calls can fail between them and
+  // leave the track in both slots. move already does move-or-swap.
+  if (!await moveTo(r.slot, n) && stillMine()) revertSlotField(r.slot);
 }
 
 /* Download and delete for a pedal-recorded loop. One definition, used both on a
@@ -396,7 +195,6 @@ function loopControls(n){
   dl.textContent = "Download loop";
   dl.title = `Download the loop from slot ${pad} (leaves it on the pedal)`;
   dl.dataset.fk = "slot:" + n + ":loopdl";
-  dl.onclick = e => e.stopPropagation();
 
   const rm = document.createElement("button");
   rm.type = "button";
@@ -405,7 +203,7 @@ function loopControls(n){
   rm.title = `Delete the loop in slot ${pad} from the pedal`;
   rm.setAttribute("aria-label", `Delete the recorded loop in slot ${pad}`);
   rm.dataset.fk = "slot:" + n + ":looprm";
-  rm.onclick = e => { e.stopPropagation(); removeLoop(n); };
+  rm.onclick = () => removeLoop(n);
   return [dl, rm];
 }
 
@@ -413,67 +211,60 @@ function loopControls(n){
    Split out of render() so a dirty check can skip it wholesale. */
 function drawTrackList(list, s, byslot, loops){
   list.innerHTML = "";
-    // Union of backing-track slots and loop-bearing slots, in slot order: a slot
-    // that holds only a pedal-recorded loop (no backing track) still gets a row,
-    // so its download/remove controls are reachable.
-    const slotNums = [...new Set([...s.slots.map(x=>x.slot), ...loops])]
-      .sort((a,b)=>a-b);
-    if (!slotNums.length){
-      list.innerHTML = '<div class="empty">Nothing loaded yet.</div>';
+  // Union of backing-track slots and loop-bearing slots, in slot order: a slot
+  // that holds only a pedal-recorded loop (no backing track) still gets a row,
+  // so its download/remove controls are reachable.
+  const slotNums = [...new Set([...s.slots.map(x=>x.slot), ...loops])]
+    .sort((a,b)=>a-b);
+  if (!slotNums.length){
+    list.innerHTML = '<div class="empty">Nothing loaded yet.</div>';
+  }
+  slotNums.forEach(n => {
+    const r = byslot[n];
+    const el = document.createElement("div");
+    el.className = "track";
+    el.dataset.slot = n;
+    if (r){
+      const label = stateLabel(r.state);
+      el.innerHTML = `
+        <span class="nm">${escapeHtml(r.display_name)}</span>
+        <span class="dur">${mmss(r.duration)}</span>
+        <span class="st ${r.state}">${label}</span>`;
+      el.prepend(slotField(r));
+      const x = document.createElement("button");
+      x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
+      x.setAttribute("aria-label", `Clear slot ${pad2(n)}`);
+      x.dataset.fk = "slot:" + r.slot + ":clear";
+      x.onclick = () => removeSlot(r.slot, r.display_name);
+      el.appendChild(x);
+    } else {
+      // Loop-only slot: no backing track, so nothing to clear and no slot to
+      // move. DELETE /api/slots/<n> deliberately leaves LOOP.WAV alone, so a ×
+      // here would look broken. The loop's own controls are the row's actions.
+      el.innerHTML = `
+        <span class="num">${pad2(n)}</span>
+        <span class="nm loop-only">Recorded loop — kept, never overwritten</span>
+        <span class="st loop">loop</span>`;
     }
-    slotNums.forEach(n => {
-      const r = byslot[n], pad = pad2(n);
-      const el = document.createElement("div");
-      el.className = "track";
-      el.dataset.slot = n;
-      // Drop target either way: a loop-only row is still a slot you can put a
-      // backing track into. Only a row with a track can be dragged *from*.
-      attachSlotDnD(el, n);
-      el.draggable = !!r;
-      if (r){
-        const label = stateLabel(r.state);
-        el.innerHTML = `
-          <span class="nm">${escapeHtml(r.display_name)}</span>
-          <span class="dur">${mmss(r.duration)}</span>
-          <span class="st ${r.state}">${label}</span>`;
-        el.prepend(slotButton(n));
-        const x = document.createElement("button");
-        x.className = "x"; x.textContent = "×"; x.title = "Clear slot";
-        x.dataset.fk = "slot:" + r.slot + ":clear";
-        x.onclick = () => removeSlot(r.slot, r.display_name);
-        el.appendChild(x);
-      } else {
-        // Loop-only slot: no backing track, so nothing to clear. The design
-        // puts a bare × here, but DELETE /api/slots/<n> deliberately leaves
-        // LOOP.WAV alone — that button would look broken. The loop's own
-        // controls go here instead, and they are the row's only actions.
-        el.innerHTML = `
-          <span class="nm loop-only">Recorded loop — kept, never overwritten</span>
-          <span class="st loop">loop</span>`;
-        el.prepend(slotButton(n));
-      }
-      list.appendChild(el);
-      // A loop's controls always go on their own indented line, whether or not
-      // the slot also holds a backing track. Two reasons, and the first is the
-      // design's own × on a loop row: DELETE /api/slots/<n> leaves LOOP.WAV
-      // alone, so that button would look broken, and a row carrying two × that
-      // mean different things is worse. The second is width — the design's
-      // "Recorded loop — kept, never overwritten" plus two buttons ellipsises
-      // the sentence away on half a laptop screen. One rule for both cases.
-      // Not behind hover: it is rare, and it deletes a recording.
-      if (loops.has(n)){
-        const lr = document.createElement("div");
-        lr.className = "looprow";
-        loopControls(n).forEach(c => lr.appendChild(c));
-        list.appendChild(lr);
-      }
-      if (r && r.state === "error" && r.error){
-        const e = document.createElement("div");
-        e.className = "err"; e.style.cssText = "font-size:12px;padding:0 0 8px 32px";
-        e.textContent = r.error;
-        list.appendChild(e);
-      }
-    });
+    list.appendChild(el);
+    // A loop's controls always go on their own indented line, whether or not
+    // the slot also holds a backing track: a row carrying two × that mean
+    // different things is worse, and "Recorded loop — kept, never overwritten"
+    // plus two buttons ellipsises the sentence away on half a laptop screen.
+    // Not behind hover: it is rare, and it deletes a recording.
+    if (loops.has(n)){
+      const lr = document.createElement("div");
+      lr.className = "looprow";
+      loopControls(n).forEach(c => lr.appendChild(c));
+      list.appendChild(lr);
+    }
+    if (r && r.state === "error" && r.error){
+      const e = document.createElement("div");
+      e.className = "err"; e.style.cssText = "font-size:12px;padding:0 0 8px 56px";
+      e.textContent = r.error;
+      list.appendChild(e);
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ render */
@@ -507,72 +298,15 @@ function render(s){
   const fill = $("#capfill");
   fill.style.width = Math.min(100, frac*100) + "%";
   fill.className = "capfill" + (frac>0.95?" err":frac>0.8?" warn":"");
+  const total = s.slot_count || 99;
   setText($("#capnote"), cap.total_seconds
-    ? mmss(Math.max(0,cap.total_seconds-cap.used_seconds)) + " remaining"
+    ? `${mmss(Math.max(0,cap.total_seconds-cap.used_seconds))} free · `
+      + `${s.slots.length} of ${total} slots`
     : "connect the pedal to see capacity");
 
   const byslot = {};
   s.slots.forEach(x => byslot[x.slot] = x);
   const loops = new Set(s.loops || []);
-
-  const total = s.slot_count || 99;
-  const g = $("#grid");
-  if (g.children.length !== total){
-    g.innerHTML = "";
-    for (let i=1;i<=total;i++){
-      const d = document.createElement("button");
-      d.type = "button";
-      d.className = "cell"; d.title = "Slot "+pad2(i); d.dataset.slot = i;
-      d.setAttribute("aria-pressed", "false");
-      // The number never changes, so it is built once here and the per-frame
-      // patch loop below never touches it. It is a child node rather than
-      // ::before because a pseudo-element cannot be read as text — and it is
-      // pointer-events:none in the CSS because a real child makes dragenter
-      // and dragleave fire on every crossing between cell and number, which
-      // flickers the drop outline the whole time you hover a cell.
-      const num = document.createElement("span");
-      num.className = "n";
-      num.textContent = pad2(i);
-      d.appendChild(num);
-      // Roving tabindex: the grid is one stop, not 99. Reaching slot 50 used
-      // to cost 50 tabs, and the grid sits above everything else in the order.
-      d.tabIndex = -1;
-      d.onclick = () => {
-        // Before selectSlot, not after: the click has already moved focus here,
-        // and the move path inside returns early, so setting this afterwards
-        // would leave the tab stop on whichever cell held it before — focus and
-        // the tab stop on different slots.
-        rovingSlot = i;
-        selectSlot(i);
-      };
-      attachSlotDnD(d, i);
-      g.appendChild(d);
-    }
-  }
-  [...g.children].forEach((d,i) => {
-    const n = i+1, row = byslot[n], hasLoop = loops.has(n);
-    // .sel and .linked are paintLinks()'s, and aria-pressed is paintPressed()'s;
-    // writing them here would fight the painter every time hover moved.
-    d.className = "cell" + (row?" "+row.state:"") + (hasLoop?" has-loop":"");
-    d.draggable = !!row;
-    const loopNote = hasLoop ? " · holds a recorded loop" : "";
-    // Zero-padded here too: the cell now prints "07", and a name of "Slot 7"
-    // would not contain its own visible label — so speech input asking for
-    // "slot oh seven" would find nothing (WCAG 2.5.3).
-    const p = pad2(n);
-    d.title = row
-      ? `Slot ${p}: ${row.display_name} — drag to another slot to move or swap${loopNote}`
-      : hasLoop ? `Slot ${p}: recorded loop only` : `Slot ${p} (empty)`;
-    // title is a tooltip, not a name — spell the name out for a screen reader.
-    d.setAttribute("aria-label", row
-      ? `Slot ${p}, ${row.display_name}, ${stateLabel(row.state)}${loopNote}`
-      : hasLoop ? `Slot ${p}, recorded loop only` : `Slot ${p}, empty`);
-    // Exactly one cell is tabbable: wherever the user last arrowed to, else
-    // the selected slot, else the first.
-    const roving = rovingSlot !== null ? rovingSlot
-                 : selected !== null ? selected : 1;
-    d.tabIndex = n === roving ? 0 : -1;
-  });
 
   // Print applies to loaded backing tracks; hide it when there's nothing to print.
   $("#print").hidden = !s.slots.length;
@@ -593,27 +327,6 @@ function render(s){
     rebuild(list, () => drawTrackList(list, s, byslot, loops));
   }
 
-  // Every empty cell tints while a track is picked up, as one class on the
-  // grid rather than 99 class writes. Loop-bearing slots tint with the rest:
-  // they are assignable, so leaving them plain would promise a refusal that
-  // does not happen.
-  $("#grid").classList.toggle("picking", pickedTrack !== null);
-
-  if (binMode){
-    /* leave the bin prompt in place while a slot is being dragged */
-  } else {
-    // textContent throughout: these strings now carry a track name, and the
-    // previous version of this block built one of them with innerHTML.
-    // Where a drop lands is not something to leave the user to infer, now that
-    // it depends on which folder is open.
-    setText($("#drophead"), selected != null
-      ? `Drop here to fill slot ${pad2(selected)}`
-      : currentFolder !== null
-        ? `Drop audio here — it lands in “${folderName(currentFolder)}”`
-        : "Drop audio here, or choose a file");
-    setText($("#dropnote"), hintText(byslot));
-  }
-
   const busy = !!s.busy;
   $("#progwrap").classList.toggle("hide", !busy || s.progress==null);
   if (s.progress!=null){
@@ -631,16 +344,9 @@ function render(s){
   else if (s.pedal==="mounted") { setText(m, "Ready"); m.className="msg"; }
   else                     { setText(m, "Plug in the pedal"); m.className="msg"; }
 
-  // The library's own rows come from /api/library, but its slot badges and its
-  // assign targets come from the snapshot — so a new snapshot re-renders it.
+  // The library's own rows come from /api/library, but its slot badges come
+  // from the snapshot — so a new snapshot re-renders it.
   renderLibrary();
-
-  // Last, and after any rebuild above: the classes these paint live on elements
-  // the rebuild may have just replaced, so painting earlier would paint the
-  // nodes that are about to be thrown away.
-  paintLinks();
-  paintPressed();
-  updateSlotRead();
 }
 
 /* ----------------------------------------------- DOM helpers, and printing */
@@ -681,11 +387,6 @@ function rebuild(host, draw){
 function setText(el, text){
   if (el.textContent !== text) el.textContent = text;
 }
-
-/* Every write to #msg goes through setText, including the one-shot ones that
-   could not spam on their own. A reader should not have to work out which
-   messages are safe to write directly, and the next message put on a timer
-   inherits the guard rather than rediscovering the problem. */
 
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 
@@ -751,10 +452,9 @@ function updateBtnState(s){
 
 /* --------------------------------------------------- talking to the device */
 
-/* Send it, parse whatever came back, say whether it worked — the shape seven of
-   the thirteen call sites want. `status` is 0 when the request never reached the
-   device: the device's own error is worth showing, a network failure is not. The
-   six sites with their own control flow stay written out. */
+/* Send it, parse whatever came back, say whether it worked. `status` is 0 when
+   the request never reached the device: the device's own error is worth
+   showing, a network failure is not. */
 async function api(url, opts){
   try {
     const r = await fetch(url, opts);
@@ -777,12 +477,7 @@ const jsonBody = body => ({method: "POST",
 
 /* --------------------------------------------------------- the status line */
 
-/* Two status surfaces, and they must not swap jobs. #msg says what just
-   happened; the drop-zone note says what you can do next. Cross them and the
-   bar reads "Ready" while the note says "Choose a slot for X".
-
-   #msg is also the aria-live region, so anything that only shows in the note is
-   invisible to a screen reader — which is why picking a track writes both.
+/* #msg says what just happened, and is the aria-live region.
 
    The hold is what makes these messages survive being said. render() rewrites
    #msg from the snapshot, and an assign changes the snapshot, so without it a
@@ -801,30 +496,14 @@ function say(text){ setText($("#msg"), text); $("#msg").className = "msg"; holdM
 function warn(text){ setText($("#msg"), text); $("#msg").className = "msg warn"; holdMsg(); }
 function fail(text){ setText($("#msg"), text); $("#msg").className = "msg err"; holdMsg(); }
 
-/* ---------------------------------- uploads, and where a dropped file goes */
+/* ---------------------------------------------------------------- uploads */
 
-// Returns whether it landed. Most callers ignore that; the slot field needs it
-// to know whether the number the user typed is now true.
+// Returns whether it landed, so the slot field knows whether the number the
+// user typed is now true.
 async function moveTo(src, dst){
   const r = await api(`/api/slots/${src}/move`, jsonBody({to: dst}));
   if (!r.ok) failFrom(r, "Move failed");
   return r.ok;
-}
-
-/* Does this filename carry a leading slot number?
-
-   The pattern, the stem and the range check mirror web.py's LEADING_NUM and
-   slot_from_name, and the two have to stay in step: this decides which of the
-   two endpoints a dropped file is sent to, and the server decides which slot it
-   then lands in. Duplicating it is the price of splitting the drop here rather
-   than changing what /api/upload means for everyone else. */
-const LEADING_NUM = /^\D*?0*(\d{1,2})(?:\D|$)/;
-function slotFromName(name){
-  const m = LEADING_NUM.exec(name.replace(/\.[^./\\]*$/, ""));
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  const max = (state && state.slot_count) || 99;
-  return n >= 1 && n <= max ? n : null;
 }
 
 /* One multipart POST, with the two answer shapes flattened into one.
@@ -832,12 +511,9 @@ function slotFromName(name){
    A 413 or a 500 carries no `errors` list, and a dropped connection carries no
    body at all, so both become an error entry here — otherwise a whole batch can
    fail and leave the status line on "Uploading…". */
-async function postFiles(url, files, extra){
+async function postFiles(url, files){
   const fd = new FormData();
   files.forEach(f => fd.append("file", f));
-  Object.entries(extra || {}).forEach(([k, v]) => {
-    if (v !== null && v !== undefined) fd.append(k, v);
-  });
   try {
     const r = await fetch(url, {method: "POST", body: fd});
     const j = await r.json().catch(() => ({}));
@@ -850,175 +526,87 @@ async function postFiles(url, files, extra){
   }
 }
 
-const folderName = id =>
-  ((folders || []).find(f => f.id === id) || {}).name || "the library";
-
-/* Where a dropped file goes.
-
-   Pointing at a slot wins over everything else — that is what the pointing was
-   for. Otherwise a leading number is the only thing that means "put this on the
-   pedal", and every other file goes to the library, into whichever folder is
-   open. The pedal holds about twelve tracks and the card holds as many as you
-   like, so filling slots is a choice rather than what a drop does by default.
-
-   This is a change in what an unnumbered drop does: it used to take the lowest
-   free slot. /api/upload still behaves exactly as documented for anyone calling
-   it directly — the routing moved into the page, not into the contract. */
-async function send(files, start){
+/* A file dropped on the left goes to the pedal. The device decides where: a
+   leading number in the name picks the slot, anything else takes the lowest
+   free one, and slots holding a loop are skipped. That rule lives in one place,
+   /api/upload, so this page does not keep a copy of it. */
+async function send(files){
   if (!files || !files.length) return;
   const list = [...files];
-
-  if (start != null){
-    setText($("#msg"), `Uploading to slot ${pad2(start)}…`);
-    const res = await postFiles("/api/upload", list,
-                                {start, folder_id: currentFolder});
-    selected = null;
-    reportUpload(res, list.length, 0);
-    // A slot upload creates a library row too. Without this the new track is
-    // missing from the Library card until the next reconnect — in the common
-    // case the five-minute stream rotation.
-    loadLibrary();
-    return;
-  }
-
-  const toPedal = list.filter(f => slotFromName(f.name || "") !== null);
-  const toLib = list.filter(f => slotFromName(f.name || "") === null);
   setText($("#msg"), "Uploading…");
-  const res = {added: [], errors: []};
-  for (const [url, batch] of [["/api/upload", toPedal], ["/api/library", toLib]]){
-    if (!batch.length) continue;
-    const one = await postFiles(url, batch, {folder_id: currentFolder});
-    res.added.push(...one.added);
-    res.errors.push(...one.errors);
-  }
-  selected = null;
-  reportUpload(res, toPedal.length, toLib.length);
+  const res = await postFiles("/api/upload", list);
+  reportUpload(res, true);
+  // A slot upload creates a library row too. Without this the new track is
+  // missing from the Library until the next reconnect — in the common case
+  // the five-minute stream rotation.
   loadLibrary();
 }
 
 /* Errors win the line: a batch that half landed is the case a confirmation
-   would paper over. A pedal upload announces itself through busy and the
-   progress bar, but a library one changes nothing visible in the left pane, so
-   it has to say where the tracks went. */
-function reportUpload(res, nped, nlib){
+   would paper over. */
+function reportUpload(res, toPedal){
   if (res.errors.length){
     fail(res.errors.map(e => e.name ? `${e.name}: ${e.error}` : e.error).join("; "));
     return;
   }
-  if (!nlib) return;
-  const where = currentFolder !== null ? `“${folderName(currentFolder)}”`
-                                       : "the library";
-  const n = res.added.length - nped;
-  say(`${n} track${n === 1 ? "" : "s"} added to ${where}`
-      + (nped ? ` · ${nped} to the pedal` : ""));
+  const n = res.added.length;
+  if (!n) return;
+  if (!toPedal) say(`${n} track${n === 1 ? "" : "s"} added to the library`);
+  else if (n === 1 && res.added[0].slot){
+    say(`“${res.added[0].display_name}” → slot ${pad2(res.added[0].slot)}`);
+  } else say(`${n} tracks queued for the pedal`);
 }
 
-/* ------------------------------ keyboard, hover, the drop zone and the bin */
-
-/* Arrow-key movement inside the slot grid.
-
-   With a roving tabindex the grid is a single tab stop, so the arrows have to
-   provide movement within it. GRID_COLS mirrors the CSS
-   `grid-template-columns: repeat(10, 1fr)`; if that changes, change this.
-
-   Ten is now the same number in both places for a reason the old twenty was
-   not: the map is ten wide at every width, so a row is a decade and Down from
-   slot 7 lands on 17. That is the only arrangement of 99 slots where the rows
-   mean something, which is why the column count is no longer allowed to vary.
-
-   Movement is linear over slot order, not bounded by the row. Left and Right
-   step one slot and will cross a row edge, because slot 11 genuinely does
-   follow slot 10. Stopping at column 10 would leave slot 11 unreachable from
-   slot 10 except by Down then nine Lefts. Up and Down step a whole row, so
-   both traversals are available. Only the real ends, slot 1 and slot 99, stop.
-*/
-const GRID_COLS = 10;
-$("#grid").addEventListener("keydown", e => {
-  const step = {ArrowRight: 1, ArrowLeft: -1,
-                ArrowDown: GRID_COLS, ArrowUp: -GRID_COLS}[e.key];
-  const cells = [...$("#grid").children];
-  const here = cells.indexOf(document.activeElement);
-  if (here < 0) return;
-  let to = null;
-  if (step !== undefined) to = here + step;
-  else if (e.key === "Home") to = 0;
-  else if (e.key === "End") to = cells.length - 1;
-  else return;
-  if (to < 0 || to >= cells.length) return;   // slot 1 and slot 99 are the ends
-  e.preventDefault();
-  cells[here].tabIndex = -1;
-  cells[to].tabIndex = 0;
-  rovingSlot = to + 1;              // survive the next render
-  cells[to].focus();
-});
-
-/* Hovering either surface highlights the other's counterpart.
-
-   Delegated, not per-node, for one reason that matters and one that is tidy:
-   the list is rebuilt whenever its contents change, so per-row listeners would
-   have to be re-attached every time and any missed row would silently stop
-   linking. The map is built once, but there is no reason for it to work
-   differently.
-
-   The pointer can land on a child — a track name, a duration — so the slot is
-   read from the nearest ancestor carrying data-slot rather than the target
-   itself. mouseleave rather than mouseout: it fires once when the pointer
-   really leaves the surface, instead of on every internal boundary. */
-const slotUnder = e => {
-  const el = e.target.closest && e.target.closest("[data-slot]");
-  return el ? +el.dataset.slot : null;
-};
-["#grid", "#list"].forEach(sel => {
-  const host = $(sel);
-  host.addEventListener("mouseover", e => setHovered(slotUnder(e)));
-  host.addEventListener("mouseleave", () => setHovered(null));
-  // Keyboard focus links the two surfaces the same way the pointer does.
-  host.addEventListener("focusin", e => setHovered(slotUnder(e)));
-  host.addEventListener("focusout", e => {
-    if (!host.contains(e.relatedTarget)) setHovered(null);
-  });
-});
-
-/* Escape puts a picked-up track back. Not while a field has focus: there the
-   key means "revert what I typed", and the field handles it. */
-document.addEventListener("keydown", e => {
-  if (e.key !== "Escape" || pickedTrack === null) return;
-  const t = e.target;
-  if (t && (t.tagName === "INPUT" || t.tagName === "SELECT")) return;
-  cancelPickup();
-});
+/* ------------------------------------------------------------- listeners */
 
 const drop = $("#drop");
 
-function setBinMode(on){
-  binMode = on;
-  drop.classList.toggle("bin", on);
-  if (on){
-    setText($("#drophead"), "Drop here to remove from the pedal");
-    setText($("#dropnote"), "You can undo straight afterwards.");
-  } else {
-    render(state);
-  }
-}
+/* No click handler here: #drop is the input's <label>, so the browser opens
+   the picker. Calling .click() as well would open it twice. */
+$("#file").onchange = e => { send(e.target.files); e.target.value=""; };
+/* The zone only paints itself while a file is over it. The drop is handled
+   once, by the pane below, which the zone's own drop bubbles up to. */
+["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => {
+  drop.classList.remove("over"); }));
+/* A file dropped anywhere on the left half of the page lands. */
+const paneL = document.querySelector(".pane-l");
+["dragenter", "dragover"].forEach(ev => paneL.addEventListener(ev, e => {
+  e.preventDefault();
+}));
+paneL.addEventListener("drop", e => {
+  if (!e.dataTransfer.files.length) return;
+  e.preventDefault();
+  send(e.dataTransfer.files);
+});
+// Anywhere else, a dropped file would navigate the page away from the app.
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => e.preventDefault());
 
+$("#print").onclick = printList;
+
+/* Clear a slot, and offer to put the track back for twelve seconds.
+
+   The track stays in the library, so undo is an assign back to the slot it came
+   from: no trash on the device, nothing to expire. The hash is read before the
+   delete, because afterwards the slot cannot say what it held. */
 async function removeSlot(slot, name){
+  const row = ((state && state.slots) || []).find(x => x.slot === slot);
   const resp = await api(`/api/slots/${slot}`, {method:"DELETE"});
   if (!resp.ok){ failFrom(resp, "Could not clear the slot"); return; }
-  const j = resp.body;
   const host = $("#undoslot");
   host.innerHTML = "";
-  // The delete names its own trash entry. Reading back the newest item
-  // instead would offer to restore whatever was deleted last, not this.
-  if (j.trash_id == null) return;
+  if (!row) return;
   const label = name || "slot " + pad2(slot);
   const b = document.createElement("button");
   b.className = "undo";
   b.textContent = `Undo “${label.length > 16 ? label.slice(0,15)+"…" : label}”`;
   b.onclick = async () => {
-    // A 404 means the entry has since been pruned. fetch does not reject on
-    // that, so the ok check is what catches it.
-    const r = await api(`/api/trash/${j.trash_id}/restore`, {method:"POST"});
-    if (!r.ok) failFrom(r, "Undo failed — the trash entry has gone");
+    // A 404 means the track has since been deleted from the library.
+    const r = await api(`/api/slots/${slot}/assign`,
+                        jsonBody({hash: row.source_hash}));
+    if (!r.ok) failFrom(r, "Undo failed — the track has gone");
     host.innerHTML = "";
   };
   host.appendChild(b);
@@ -1034,53 +622,13 @@ async function removeLoop(slot){
   if (!r.ok) failFrom(r, "Could not remove the loop");
 }
 
-/* No click handler here: #drop is the input's <label>, so the browser opens
-   the picker. Calling .click() as well would open it twice. */
-$("#file").onchange = e => { send(e.target.files, selected); e.target.value=""; };
-["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
-  e.preventDefault(); drop.classList.add("over"); }));
-["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => {
-  e.preventDefault(); drop.classList.remove("over"); }));
-drop.addEventListener("drop", e => {
-  const from = e.dataTransfer.getData(SLOT_MIME);
-  if (from){
-    const slot = parseInt(from, 10);
-    const row = (state?.slots || []).find(s => s.slot === slot);
-    removeSlot(slot, row && row.display_name);
-  } else {
-    send(e.dataTransfer.files, selected);
-  }
-});
-/* The design wants a file dropped anywhere on this half of the page to land.
-   Cells and list rows already stopPropagation on their own drops, so this only
-   sees the gaps between them, and a slot being dragged is not a file — that
-   keeps its meaning of "put this back", not "upload nothing". */
-const paneL = document.querySelector(".pane-l");
-["dragenter", "dragover"].forEach(ev => paneL.addEventListener(ev, e => {
-  if (dragSrc === null) e.preventDefault();
-}));
-paneL.addEventListener("drop", e => {
-  if (dragSrc !== null) return;               // a slot, handled by its target
-  if (!e.dataTransfer.files.length) return;
-  e.preventDefault();
-  send(e.dataTransfer.files, selected);
-});
-
-/* ------------------------------------ the page's own drag, drop and footer */
-
-// Anywhere else, a dropped file would navigate the page away from the app.
-document.addEventListener("dragover", e => e.preventDefault());
-document.addEventListener("drop", e => e.preventDefault());
-
-$("#print").onclick = printList;
-
 /* ------------------------------------------------- the over-the-air update */
 
 function endUpdating(){
   ota.updating = false; clearTimeout(ota.timer); ota.timer = null;
 }
 
-// The single footer button has two resting states: "Update available" (runs the
+// The single header button has two resting states: "Update available" (runs the
 // OTA update) and "Check for update" (asks the device to re-check the remote).
 // The click dispatches on the current state.
 $("#update").onclick = () => {
@@ -1177,7 +725,6 @@ es.onopen = () => {
   // behind another tab's rename or delete, without the snapshot having to
   // carry a change counter.
   loadLibrary();
-  loadFolders();
 };
 es.onmessage = e => render(JSON.parse(e.data));
 es.onerror = () => {
@@ -1202,9 +749,9 @@ es.onerror = () => {
 
    The pedal holds about twelve five-minute tracks; the card holds as many as
    you like. So "what I own" and "what the pedal is carrying today" are two
-   lists, and this is the first one. Assigning from here costs a transcode at
-   most — usually not even that, since the staged WAV may still be cached —
-   rather than another upload over WiFi. */
+   lists, and this is the first one. Putting a track on the pedal from here
+   costs a transcode at most — usually not even that, since the staged WAV may
+   still be cached — rather than another upload over WiFi. */
 
 // One <audio> for the whole page, retargeted per row. Ninety-nine elements with
 // src set would have the browser fetching metadata for the entire library, and
@@ -1243,207 +790,28 @@ async function loadLibrary(){
     const changed = JSON.stringify(rows) !== JSON.stringify(library);
     library = rows;
     if (changed) libRev++;
+    // A tick on a track that has since been deleted (in another tab, say)
+    // would otherwise count towards "Add 3 to pedal" and then 404 the batch.
+    [...checked].forEach(h => { if (!rows.some(r => r.source_hash === h)) checked.delete(h); });
   } catch {
     return;             // a snapshot or a later refetch will put it right
   }
   renderLibrary();
 }
 
-let folderSeq = 0;
-
-async function loadFolders(){
-  const mine = ++folderSeq;
-  try {
-    const r = await fetch("/api/folders");
-    if (!r.ok) return;
-    const rows = await r.json();
-    if (mine !== folderSeq) return;     // a newer request has already answered
-    const changed = JSON.stringify(rows) !== JSON.stringify(folders);
-    folders = rows;
-    if (changed) folderRev++;
-    // A folder dissolved in another tab would otherwise stay the upload target
-    // here, and _form_folder fails the whole request on a folder that has gone
-    // — so a drop would 404 with nothing landing.
-    if (currentFolder !== null && !rows.some(f => f.id === currentFolder)){
-      currentFolder = null;
-      // The drop zone names it, and the drop zone is written from the snapshot
-      // — which folders do not ride, so it has to be told.
-      if (state) render(state);
-    }
-  } catch {
-    return;                             // a later refetch will put it right
-  }
-  renderLibrary();
-}
-
-/* ------------------------------------------------ the folder tree, derived */
-
-/* The tree, from the two flat lists the server sends.
-
-   Children by parent, tracks by folder, both keyed with 0 standing for the top
-   level so one walk covers everything. A track whose folder_id names a folder
-   this client has not heard of goes to the top level rather than nowhere —
-   the two lists are fetched separately and can be one request out of step. */
-function folderIndex(){
-  const kids = {0: []}, tracks = {0: []};
-  (folders || []).forEach(f => {
-    const p = f.parent_id === null ? 0 : f.parent_id;
-    (kids[p] = kids[p] || []).push(f);
-    kids[f.id] = kids[f.id] || [];
-    tracks[f.id] = tracks[f.id] || [];
-  });
-  (library || []).forEach(r => {
-    const k = r.folder_id !== null && tracks[r.folder_id] ? r.folder_id : 0;
-    tracks[k].push(r);
-  });
-  // /api/library answers newest-first; inside a folder the order is
-  // (position, added, source_hash), which is docs/api.md's tree order and what
-  // a folder assign writes in. Sorting here is what keeps the rows on screen in
-  // the same order as the fill the Assign button describes.
-  Object.values(tracks).forEach(list => list.sort(
-    (a, b) => a.position - b.position || a.added - b.added
-              || (a.source_hash < b.source_hash ? -1 : 1)));
-  return {kids, tracks};
-}
-
-/* A folder's recursive track count and total duration.
-
-   Folded here rather than asked of the server: the browser already holds every
-   track with its duration, so this is one pass over a few hundred objects with
-   no round trip. Asking the server would also be a recursive query per render
-   on a Pi Zero, and a second source of truth for "9 · 34:12" that can disagree
-   with the rows underneath it. */
-function fold(idx, id){
-  let n = (idx.tracks[id] || []).length;
-  let secs = (idx.tracks[id] || []).reduce((t, r) => t + (r.duration || 0), 0);
-  (idx.kids[id] || []).forEach(f => {
-    const s = fold(idx, f.id);
-    n += s.n; secs += s.secs;
-  });
-  return {n, secs};
-}
-
-/* Ask the device what each visible folder's Assign would write.
-
-   The range is not computed here. Which slots hold a loop is knowable only on
-   the device — the set is scanned at mount and emptied on unplug — so a client
-   working it out from a snapshot that can be fifteen seconds old on a
-   keepalive-only stream would put a label on the button that the POST then
-   contradicts. GET and POST run the same function on the server.
-
-   Cheap enough to do per folder on screen: a seven-folder tree is seven tiny
-   GETs next to a stream that emits five times a second during a conversion.
-   planKey is what stops it being per render — nothing is asked again unless the
-   slots, the loops or the typed start actually moved. */
-function refreshPlans(ids){
-  // libRev and folderRev are in here because a plan is a function of what the
-  // folder holds as much as of where there is room: filing a track into a
-  // folder changes the range its button promises, and without these the label
-  // would keep the count it had before.
-  const sig = JSON.stringify([
-    libRev, folderRev,
-    ((state && state.slots) || []).map(s => s.slot),
-    (state && state.loops) || [],
-    state && state.slot_count,
-  ]);
-  ids.forEach(async id => {
-    const start = (folderStart[id] ?? "").trim();
-    const key = sig + "|" + start;
-    if (planKey[id] === key) return;
-    planKey[id] = key;
-    const r = await api(`/api/folders/${id}/assign?start=${encodeURIComponent(start)}`);
-    if (planKey[id] !== key) return;      // a newer ask has already overtaken
-    // A refused start (junk, or out of range) leaves no plan, which is what
-    // disables the button — better than a stale range under a number the
-    // device has already rejected.
-    const next = r.ok ? r.body : null;
-    if (JSON.stringify(next) === JSON.stringify(folderPlan[id] ?? null)) return;
-    if (next) folderPlan[id] = next; else delete folderPlan[id];
-    planRev++;
-    renderLibrary();
-  });
-}
-
-/* "Standards / Ballads", for a track shown outside its place in the tree. */
-function folderPath(id){
-  const by = {};
-  (folders || []).forEach(f => { by[f.id] = f; });
-  const parts = [];
-  for (let f = by[id]; f; f = f.parent_id === null ? null : by[f.parent_id]){
-    parts.unshift(f.name);
-    if (parts.length > 16) break;       // a cycle cannot be created, but a walk
-  }                                     // that hangs takes the page with it
-  return parts.join(" / ");
-}
-
-// Where an "add to the pedal" click would land: the selected slot if there is
-// one, else the lowest free slot. Loop-bearing slots are left alone — we don't
-// put a backing track under someone's recording by accident.
-function assignTarget(){
-  if (selected != null) return selected;
-  if (!state) return null;
-  const taken = new Set([...(state.slots || []).map(x => x.slot),
-                         ...(state.loops || [])]);
-  for (let i = 1; i <= (state.slot_count || 99); i++){
-    if (!taken.has(i)) return i;
-  }
-  return null;
-}
-
-/* -------------------------------------------------------- the library view */
-
-/* What the library pane draws, as one flat list of row descriptors.
-
-   Two shapes come out of here. In folder order with no search it is the tree:
-   folder rows carrying their depth and their fold, with a folder's contents
-   following it only while it is open. Anything else — a search, or a sort by
-   name, length or date — flattens it to tracks alone, each labelled with the
-   folder it came from. Neither "every match, wherever it is" nor "longest
-   first" can be said with folders still on screen, and a collapsed folder
-   hiding a match is worse than no tree at all. */
+/* What the library pane draws: every track, filtered by the search box and
+   sorted by the select. "Newest first" is the order the server already
+   returned. */
 function libraryView(){
   const q = ($("#libq").value || "").trim().toLowerCase();
   const sort = $("#libsort").value;
-  const idx = folderIndex();
-
-  if (q || sort !== "folder"){
-    const rows = (library || []).filter(
-      r => !q || r.name.toLowerCase().includes(q));
-    if (sort === "name"){
-      rows.sort((a,b) => a.name.localeCompare(b.name, undefined,
-                                              {sensitivity:"base"}));
-    } else if (sort === "duration"){
-      rows.sort((a,b) => b.duration - a.duration);
-    } else if (sort === "folder"){
-      // Searching without leaving folder order: the tree, flattened.
-      const ord = {};
-      flatten(idx, 0, 0, [], true).forEach((row, i) => {
-        if (row.track) ord[row.track.source_hash] = i;
-      });
-      rows.sort((a,b) => ord[a.source_hash] - ord[b.source_hash]);
-    }                   // "added" is the order the server already returned
-    return rows.map(r => ({track: r, depth: 0, path: folderPath(r.folder_id)}));
+  const rows = (library || []).filter(r => !q || r.name.toLowerCase().includes(q));
+  if (sort === "name"){
+    rows.sort((a,b) => a.name.localeCompare(b.name, undefined, {sensitivity:"base"}));
+  } else if (sort === "duration"){
+    rows.sort((a,b) => b.duration - a.duration);
   }
-  return flatten(idx, 0, 0, [], false);
-}
-
-/* One folder's worth of rows, then its children's, depth first.
-
-   Inside a folder, tracks come before subfolders — the server's tree order, so
-   the rows read in the order a fill of that folder writes them. The top level
-   is the one exception: folders come first there, because nothing fills the top
-   level, and a device upgraded with forty unfiled tracks would otherwise put
-   every folder below all of them. */
-function flatten(idx, id, depth, out, all){
-  const folderRows = () => (idx.kids[id] || []).forEach(f => {
-    out.push({folder: f, depth, fold: fold(idx, f.id)});
-    if (all || openFolders[f.id]) flatten(idx, f.id, depth + 1, out, all);
-  });
-  const trackRows = () => (idx.tracks[id] || []).forEach(
-    t => out.push({track: t, depth, tree: true}));
-  if (id === 0){ folderRows(); trackRows(); }
-  else { trackRows(); folderRows(); }
-  return out;
+  return rows;
 }
 
 function renderLibrary(){
@@ -1454,20 +822,15 @@ function _renderLibrary(){
   // An inline rename owns the row it's in. Freezing at most a screenful of
   // static rows for the few seconds an edit takes is free, and far more robust
   // than trying to preserve the editing node across a rebuild.
-  if (editingHash !== null || editingFolder !== null) return;
+  if (editingHash !== null) return;
 
   const host = $("#librows");
   if (!host) return;
   if (library === null){ host.innerHTML = ""; return; }
 
   const all = library.length;
-  const nfolders = (folders || []).length;
-  const held = pickedTrack !== null
-    && (library || []).find(x => x.source_hash === pickedTrack);
-  $("#tolevel").hidden = !(held && held.folder_id !== null);
-  // Nothing to search or sort through yet. One folder counts: it is the thing
-  // "Folder order" and a search across folders are for.
-  const hideTools = all < 2 && !nfolders;
+  // Nothing to search or sort through yet.
+  const hideTools = all < 2;
   // The one place this function writes the search box. The standing rule is
   // that it never does — that is what stops a snapshot arriving mid-keystroke
   // from wiping what is being typed — but the field is about to be hidden, so
@@ -1476,6 +839,7 @@ function _renderLibrary(){
   // control to clear it.
   if (hideTools) $("#libq").value = "";
   $("#libtools").hidden = hideTools;
+  updateAddSel();
 
   // Which slots hold each track, from the snapshot — so these badges follow an
   // upload or a clear without refetching the library.
@@ -1486,15 +850,13 @@ function _renderLibrary(){
 
   // Everything the rows depend on. libRev stands in for the library's contents
   // so this stays cheap with a large library; the rest is what the snapshot
-  // contributes (which slots hold what, and what the assign target would be)
-  // plus the two uncontrolled inputs. Progress is deliberately absent.
-  // `selected` used to be here for the "→ 09" button's label, which has gone.
-  // pickedTrack takes its place: it changes which row is highlighted.
+  // contributes (which slots hold what) plus the two uncontrolled inputs.
+  // Progress is deliberately absent. The ticked set is not here either: a tick
+  // changes one checkbox the user just clicked, and the toolbar button reads
+  // the set directly.
   const libKey = JSON.stringify([
-    libRev, folderRev, openFolders, planRev, pickedTrack, nowPlaying,
+    libRev, nowPlaying,
     ((state && state.slots) || []).map(s => [s.slot, s.source_hash]),
-    (state && state.loops) || [],
-    state && state.slot_count,
     $("#libq").value, $("#libsort").value,
   ]);
   if (libKey === lastLibKey) return;
@@ -1502,7 +864,7 @@ function _renderLibrary(){
 
   const rows = libraryView();
   host.innerHTML = "";
-  if (!all && !nfolders){
+  if (!all){
     host.innerHTML = '<div class="empty">Nothing in the library yet. '
       + 'Anything you upload stays here until you delete it.</div>';
     $("#libfoot").textContent = "";
@@ -1511,268 +873,104 @@ function _renderLibrary(){
   if (!rows.length){
     host.innerHTML = '<div class="empty">Nothing matches that search.</div>';
   }
+  rows.forEach(r => host.appendChild(libraryRow(r, bySlot[r.source_hash] || [])));
 
-  rows.forEach(r => host.appendChild(
-    r.folder ? folderRow(r)
-             : libraryRow(r.track, bySlot[r.track.source_hash] || [], r)));
-
-  // Only the folders actually on screen, and only after the rows exist — this
-  // is where "the tree loaded" and "the snapshot's slots or loops changed" both
-  // arrive, since both move libKey and neither reaches here otherwise.
-  refreshPlans(rows.filter(r => r.folder).map(r => r.folder.id));
-
-  // Only while searching. Tracks tucked inside a collapsed folder are not
-  // hidden in the sense this count means, and "1 shown" under a tree that is
-  // simply folded up reads as though the other five had gone somewhere.
   const q = ($("#libq").value || "").trim();
-  const shown = rows.filter(r => r.track).length;
   const mins = library.reduce((t, r) => t + (r.duration || 0), 0);
   $("#libfoot").innerHTML =
-    `<span>${all} track${all === 1 ? "" : "s"}`
-    + (nfolders ? ` · ${nfolders} folder${nfolders === 1 ? "" : "s"}` : "")
-    + ` · ${mmss(mins)}</span>`
-    + (q ? `<span>${shown} match${shown === 1 ? "" : "es"}</span>` : "");
+    `<span>${all} track${all === 1 ? "" : "s"} · ${mmss(mins)}</span>`
+    + (q ? `<span>${rows.length} match${rows.length === 1 ? "" : "es"}</span>` : "");
 }
 
-/* ------------------------------------------- the slot field on a track row */
-
-/* The slot a track occupies, as an editable field.
-
-   A track can occupy several slots — db.slots_for_hash returns a list and the
-   API is happy to put one track in two places — and a two-character field
-   cannot say that. So the field shows the lowest, a "+n" marker says there are
-   more, and editing acts on the lowest. Clearing removes every one of them, and
-   asks first when that is more than one, because the field showing "02" is a
-   poor warning that confirming will also empty slot 47. */
-function slotField(r, slots){
-  const wrap = document.createElement("span");
-  wrap.className = "slotwrap";
-  wrap.onclick = e => e.stopPropagation();
-  const lowest = slots.length ? Math.min(...slots) : null;
-
-  const f = document.createElement("input");
-  f.type = "text";
-  f.inputMode = "numeric";
-  f.maxLength = 2;
-  f.className = "slotfield" + (lowest !== null ? " assigned" : "");
-  f.placeholder = "––";
-  const draft = slotDraft[r.source_hash];
-  f.value = draft !== undefined ? draft : lowest !== null ? pad2(lowest) : "";
-  f.dataset.fk = "lib:" + r.source_hash + ":slot";
-  f.title = lowest === null
-    ? `Type a slot number to put “${r.name}” on the pedal`
-    : `“${r.name}” is in slot ${pad2(lowest)} — type another to move it, or clear it to take it off`;
-  f.setAttribute("aria-label", `Slot for ${r.name}`);
-  f.oninput = () => {
-    slotDraft[r.source_hash] = f.value;
-    slotEdit[r.source_hash] = (slotEdit[r.source_hash] || 0) + 1;
-  };
-  f.onkeydown = e => {
-    e.stopPropagation();
-    if (e.key === "Enter"){ e.preventDefault(); f.blur(); }
-    else if (e.key === "Escape"){ revertSlotField(r); }
-  };
-  f.onblur = () => commitSlotField(r, slots);
-  wrap.appendChild(f);
-
-  if (slots.length > 1){
-    const more = document.createElement("span");
-    more.className = "slotmore";
-    more.textContent = "+" + (slots.length - 1);
-    more.title = `Also in ${slots.slice(1).map(pad2).join(", ")}`;
-    wrap.appendChild(more);
-  }
-  return wrap;
+/* The toolbar button that acts on the ticked rows. Hidden when none are: a
+   button with nothing to act on is worse than no button. */
+function updateAddSel(){
+  const b = $("#addsel");
+  const n = checked.size;
+  b.hidden = !n;
+  b.textContent = `Add ${n} to pedal`;
 }
 
-function revertSlotField(r){
-  delete slotDraft[r.source_hash];
-  libraryDomDirty();     // the data has not moved, only the DOM
-  renderLibrary();
-}
-
-/* Enter or blur commits what was typed.
-
-   Clearing the draft is not enough to put a rejected number back. The field's
-   value is in the DOM, and only a rebuild reconstructs it — which happens when
-   libKey moves, which happens when the snapshot changes. A refused move or
-   assign changes nothing, so without an explicit revert the field would sit
-   there showing a number the pedal never accepted. */
-async function commitSlotField(r, slots){
-  const raw = (slotDraft[r.source_hash] ?? "").trim();
-  if (slotDraft[r.source_hash] === undefined) return;    // nothing was typed
-  delete slotDraft[r.source_hash];
-  // Whose edit this is. Anything awaited below must check it before rolling the
-  // field back, or it will roll back somebody else's typing.
-  const gen = slotEdit[r.source_hash];
-  const stillMine = () => slotEdit[r.source_hash] === gen;
-  const lowest = slots.length ? Math.min(...slots) : null;
-  const max = (state && state.slot_count) || 99;
-
-  if (raw === ""){
-    if (lowest === null){ revertSlotField(r); return; }
-    if (slots.length > 1 && !confirm(
-        `Take “${r.name}” off the pedal? It is in slots `
-        + `${slots.map(pad2).join(", ")}, and all of them will be cleared.`)){
-      revertSlotField(r); return;
-    }
-    if (slots.length === 1){
-      removeSlot(lowest, r.name);          // one slot, so the undo can name it
-    } else {
-      for (const n of slots) await api(`/api/slots/${n}`, {method: "DELETE"});
-      say(`“${r.name}” taken off the pedal`);
-    }
-    return;
-  }
-
-  const n = /^\d{1,2}$/.test(raw) ? parseInt(raw, 10) : NaN;
-  if (!Number.isFinite(n) || n < 1 || n > max){
-    // Not the design's literal "01–99": docs/api.md says clients read
-    // slot_count rather than assuming the pedal has 99 slots.
-    warn(`Slot numbers run 01–${pad2(max)}`);
-    revertSlotField(r);
-    return;
-  }
-  if (n === lowest){ revertSlotField(r); return; }
-
-  if (lowest !== null){
-    // One call, not assign-then-delete: two calls can fail between them and
-    // leave the track in both slots. move already does move-or-swap, which is
-    // also the better reading of "vacating whatever slot it held".
-    if (!await moveTo(lowest, n) && stillMine()) revertSlotField(r);
-  } else {
-    if (!await assignToSlot(r, n) && stillMine()) revertSlotField(r);
-  }
-}
-
-/* --------------------------------------- folder rows, and filing into them */
-
-/* A folder: a disclosure that carries the name, then what it holds.
-
-   The caret and the name are one <button> rather than a clickable div. It is a
-   real disclosure — aria-expanded and Enter/Space come with the element, and
-   the alternative is a div with role, tabindex and two key handlers that will
-   drift. The controls to its right sit outside the button, because a button
-   inside a button is not a thing. */
-function folderRow(row){
-  const f = row.folder;
+function libraryRow(r, slots){
   const el = document.createElement("div");
-  el.className = "folderrow" + (row.depth ? "" : " top");
-  el.dataset.folder = f.id;
-  el.style.paddingLeft = (row.depth * DEPTH_INDENT_PX) + "px";
+  el.className = "librow";
 
-  // Built like a track row, and for the same reasons: the body of the row is
-  // the big target, the name is the way to rename, controls at the right stop
-  // propagation so a new one cannot silently start toggling things.
-  el.onclick = () => toggleFolder(f.id);
-
-  const open = !!openFolders[f.id];
-  const caret = document.createElement("button");
-  caret.type = "button";
-  caret.className = "caret";
-  caret.textContent = open ? "−" : "+";
-  caret.dataset.fk = "folder:" + f.id + ":toggle";
-  caret.setAttribute("aria-expanded", open ? "true" : "false");
-  caret.setAttribute("aria-label", (open ? "Collapse " : "Expand ") + f.name);
-  caret.onclick = e => { e.stopPropagation(); toggleFolder(f.id); };
-  el.appendChild(caret);
+  const tick = document.createElement("input");
+  tick.type = "checkbox";
+  tick.className = "libcheck";
+  tick.checked = checked.has(r.source_hash);
+  tick.setAttribute("aria-label", "Select " + r.name);
+  tick.dataset.fk = "lib:" + r.source_hash + ":tick";
+  tick.onchange = () => {
+    if (tick.checked) checked.add(r.source_hash); else checked.delete(r.source_hash);
+    updateAddSel();
+  };
+  el.appendChild(tick);
 
   const nm = document.createElement("span");
-  nm.className = "foldername";
-  nm.textContent = f.name;
+  nm.className = "libname";
+  nm.textContent = r.name;
   nm.title = "Click to rename";
   nm.tabIndex = 0;
   nm.setAttribute("role", "button");
-  nm.dataset.fk = "folder:" + f.id + ":name";
-  const edit = () => startFolderRename(el, nm, f);
-  nm.onclick = e => { e.stopPropagation(); edit(); };
-  nm.onkeydown = e => {
-    if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); }
-  };
+  nm.dataset.fk = "lib:" + r.source_hash + ":name";
+  const edit = () => startRename(el, nm, r);
+  nm.onclick = edit;
+  nm.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); } };
   el.appendChild(nm);
 
-  const meta = document.createElement("span");
-  meta.className = "foldermeta";
-  // Folded over the subtree, so a collapsed folder still says what is in it.
-  meta.textContent = `${row.fold.n} · ${mmss(row.fold.secs)}`;
-  el.appendChild(meta);
+  const dur = document.createElement("span");
+  dur.className = "libdur";
+  dur.textContent = mmss(r.duration);
+  el.appendChild(dur);
 
-  // A pickup is modal: while one is in flight this row's job is to be a
-  // destination, and offering to fill the pedal at the same time invites the
-  // wrong click. The controls come back when the pickup ends.
-  if (pickedTrack !== null) el.appendChild(fileHere(f));
-  else if (row.fold.n) el.appendChild(assignControls(f));
+  if (slots.length){
+    // Where it is on the pedal. A track can be in more than one slot — the
+    // API is happy to put one track in two places — so the lowest is shown
+    // and the rest are counted.
+    const badge = document.createElement("span");
+    badge.className = "num";
+    const lowest = Math.min(...slots);
+    badge.textContent = pad2(lowest) + (slots.length > 1 ? ` +${slots.length - 1}` : "");
+    badge.title = `On the pedal in slot ${slots.map(pad2).join(", ")}`;
+    el.appendChild(badge);
+  } else {
+    const add = document.createElement("button");
+    add.className = "libbtn";
+    add.type = "button";
+    add.textContent = "Add to pedal";
+    add.title = `Put “${r.name}” in the next free slot`;
+    add.dataset.fk = "lib:" + r.source_hash + ":add";
+    add.onclick = () => addToPedal([r]);
+    el.appendChild(add);
+  }
+
+  const play = document.createElement("button");
+  play.className = "libbtn" + (nowPlaying === r.source_hash ? " playing" : "");
+  play.type = "button";
+  play.textContent = nowPlaying === r.source_hash ? "■" : "▶";
+  play.title = nowPlaying === r.source_hash ? "Stop" : "Listen";
+  play.setAttribute("aria-label",
+    (nowPlaying === r.source_hash ? "Stop " : "Listen to ") + r.name);
+  play.dataset.fk = "lib:" + r.source_hash + ":play";
+  play.onclick = () => audition(r);
+  el.appendChild(play);
 
   const del = document.createElement("button");
   del.className = "libbtn danger";
   del.type = "button";
   del.textContent = "×";
-  // Never the same act as a track's ×, so it must never read like one.
-  del.title = `Dissolve “${f.name}” — the tracks in it stay in the library`;
-  del.setAttribute("aria-label", "Dissolve folder " + f.name);
-  del.dataset.fk = "folder:" + f.id + ":del";
-  del.onclick = e => { e.stopPropagation(); dissolve(f); };
+  del.title = `Delete “${r.name}” from the device`;
+  del.setAttribute("aria-label", "Delete " + r.name);
+  del.dataset.fk = "lib:" + r.source_hash + ":del";
+  del.onclick = () => forget(r);
   el.appendChild(del);
+
   return el;
 }
 
-/* Put the track that is currently picked up into this folder.
-
-   Filing reuses the pickup rather than introducing a drag from the library:
-   pick a track up and the map offers its slots while the tree offers its
-   folders, which is one gesture with two kinds of destination instead of two
-   gestures that have to be discovered separately. */
-function fileHere(f){
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = "libbtn assign";
-  b.textContent = "File here";
-  b.dataset.fk = "folder:" + f.id + ":file";
-  b.title = `Move the track you picked up into “${f.name}”`;
-  b.onclick = e => { e.stopPropagation(); fileInto(f.id, f.name); };
-  return b;
-}
-
-async function fileInto(id, label){
-  const h = pickedTrack;
-  if (h === null) return;
-  const r = (library || []).find(x => x.source_hash === h);
-  const resp = await api(`/api/library/${h}`,
-                         {...jsonBody({folder_id: id}), method: "PATCH"});
-  if (!resp.ok){ failFrom(resp, "Could not file the track"); return; }
-  cancelPickup();
-  if (id !== null) openFolders[id] = true;   // or it files into somewhere unseen
-  currentFolder = id;
-  say(`“${r ? r.name : "Track"}” filed in ${label}`);
-  loadLibrary();
-}
-
-async function dissolve(f){
-  // Never a delete, under any flag — the server refuses to remove a library row
-  // here — so the question is only ever about the grouping.
-  let r = await api(`/api/folders/${f.id}`, {method: "DELETE"});
-  if (r.status === 409){
-    const kids = r.body.folders ? r.body.folders.length : 0;
-    const what = [r.body.tracks ? `${r.body.tracks} track${r.body.tracks === 1 ? "" : "s"}` : "",
-                  kids ? `${kids} folder${kids === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
-    if (!confirm(`“${f.name}” holds ${what}. Dissolve it anyway? `
-                 + `Nothing is deleted — they move up a level.`)) return;
-    r = await api(`/api/folders/${f.id}?force`, {method: "DELETE"});
-  }
-  if (!r.ok){ failFrom(r, "Could not dissolve the folder"); return; }
-  delete openFolders[f.id];
-  if (currentFolder === f.id) currentFolder = r.body.to ?? null;
-  say(`Folder “${f.name}” dissolved`);
-  loadFolders();
-  loadLibrary();       // its tracks now report a different folder_id
-}
-
-/* Swap a name for an input, commit on Enter or blur, revert on Escape.
-
-   One implementation for tracks and folders. They differ in what they freeze,
-   what they PATCH and what they refetch, and in nothing else — and the
-   focus-key discipline in here is the part that is easy to get subtly wrong
-   twice. */
+/* Swap a name for an input, commit on Enter or blur, revert on Escape. The
+   focus-key discipline in here is the part that is easy to get subtly wrong. */
 function inlineRename(row, nm, opts){
   const input = document.createElement("input");
   input.className = "libedit";
@@ -1810,220 +1008,8 @@ function inlineRename(row, nm, opts){
   };
 }
 
-function startFolderRename(row, nm, f){
-  if (editingHash !== null || editingFolder !== null) return;
-  editingFolder = f.id;
-  inlineRename(row, nm, {
-    name: f.name,
-    release: () => { editingFolder = null; },
-    commit: async (name) => {
-      // Not optimistic, unlike a track rename: the tree is refetched whole
-      // rather than edited in place, so there is no captured row object to keep
-      // in step and the round trip is one small GET.
-      const resp = await api(`/api/folders/${f.id}`,
-                             {...jsonBody({name}), method: "PATCH"});
-      if (!resp.ok) failFrom(resp, "Rename failed");
-      loadFolders();
-    },
-  });
-}
-
-/* Where a folder's fill would start, and what it would write.
-
-   The field is uncontrolled in the same way the track slot fields are: typing
-   records the draft and asks for a fresh plan, and the answer coming back is
-   what redraws. Rendering on every keystroke instead would rebuild the tree
-   under the typist several times a word. */
-function assignControls(f){
-  const wrap = document.createElement("span");
-  wrap.className = "slotwrap";
-  wrap.onclick = e => e.stopPropagation();
-  const plan = folderPlan[f.id];
-
-  const start = document.createElement("input");
-  start.type = "text";
-  start.inputMode = "numeric";
-  start.maxLength = 2;
-  start.className = "slotfield";
-  start.placeholder = "––";
-  start.value = folderStart[f.id] !== undefined ? folderStart[f.id]
-              : (plan && plan.start !== null ? pad2(plan.start) : "");
-  start.dataset.fk = "folder:" + f.id + ":start";
-  start.title = `First slot to fill from — leave it empty for the next free slot`;
-  start.setAttribute("aria-label", `First slot for ${f.name}`);
-  start.oninput = () => { folderStart[f.id] = start.value; refreshPlans([f.id]); };
-  start.onkeydown = e => {
-    e.stopPropagation();
-    if (e.key === "Enter"){ e.preventDefault(); start.blur(); }
-    else if (e.key === "Escape"){
-      delete folderStart[f.id];
-      libraryDomDirty();
-      renderLibrary();
-      refreshPlans([f.id]);
-    }
-  };
-  wrap.appendChild(start);
-
-  const go = document.createElement("button");
-  go.type = "button";
-  go.className = "libbtn assign";
-  go.dataset.fk = "folder:" + f.id + ":assign";
-  const room = plan && plan.assigned.length;
-  // The label is the plan. Reading it off the same response the POST executes
-  // is what makes "Assign 09–17" a promise rather than a guess.
-  go.textContent = room ? `Assign ${pad2(plan.start)}–${pad2(plan.end)}` :
-                   plan ? "No room" : "Assign";
-  go.disabled = !room;
-  const short = room && plan.unplaced.length
-    ? ` — ${plan.unplaced.length} won't fit past slot ${pad2(plan.end)}` : "";
-  go.title = !plan ? "Type a slot number the pedal has"
-           : !room ? "Every slot from here on is taken"
-           : plan.loops_known
-             ? `Put ${f.name} on the pedal, from slot ${pad2(plan.start)}` + short
-             : "No pedal connected, so this range cannot yet skip slots that "
-               + "hold a loop" + short;
-  go.onclick = () => fillFolder(f);
-  wrap.appendChild(go);
-  return wrap;
-}
-
-/* Fill the slots. The response is the plan that ran, so everything said
-   afterwards is read from it rather than from what the label said before. */
-async function fillFolder(f){
-  const raw = (folderStart[f.id] ?? "").trim();
-  // What was typed, not Number(it). JSON.stringify writes NaN as null, and null
-  // is how this API says "wherever there is room" — so a junk start would have
-  // filled from the next free slot instead of being refused. The button is
-  // normally disabled by then, but refreshPlans is a round trip and a click
-  // inside that window still carries the old plan's enabled state.
-  const r = await api(`/api/folders/${f.id}/assign`,
-                      jsonBody(raw === "" ? {} : {start: raw}));
-  if (!r.ok){ failFrom(r, "Could not fill the slots"); return; }
-  const p = r.body;
-  // The pending undo restores one slot. A fill has just overwritten several,
-  // and offering to put one of them back is a worse answer than offering none.
-  $("#undoslot").innerHTML = "";
-  delete folderStart[f.id];
-  if (!p.assigned.length){
-    warn(`No room on the pedal for ${f.name}`);
-    return;
-  }
-  let line = `${f.name} → slots ${pad2(p.start)}–${pad2(p.end)}`;
-  if (p.unplaced.length) line += ` · ${p.unplaced.length} didn't fit`;
-  if (!p.loops_known) line += " · plug the pedal in to skip its loops";
-  // The capacity bar reads from bytes on the card and will not know about this
-  // until the writes land, so the warning has to come from the plan itself.
-  const secs = p.assigned.reduce((t, a) => {
-    const row = (library || []).find(x => x.source_hash === a.source_hash);
-    return t + ((row && row.duration) || 0);
-  }, 0);
-  const total = (state && state.capacity && state.capacity.total_seconds) || 0;
-  if (total && secs > total){
-    warn(`${line} · that is ${mmss(secs)} on a ${mmss(total)} pedal, so some won't fit`);
-  } else if (p.unplaced.length){
-    warn(line);
-  } else {
-    say(line);
-  }
-}
-
-function toggleFolder(id){
-  if (openFolders[id]){
-    delete openFolders[id];
-    if (currentFolder === id) currentFolder = null;
-  } else {
-    openFolders[id] = true;
-    currentFolder = id;
-  }
-  renderLibrary();
-  if (state) render(state);      // the drop zone names the open folder
-}
-
-async function newFolder(){
-  const name = (prompt("Name the folder") || "").trim();
-  if (!name) return;
-  const r = await api("/api/folders", jsonBody({name}));
-  if (!r.ok){ failFrom(r, "Could not create the folder"); return; }
-  openFolders[r.body.id] = true;
-  currentFolder = r.body.id;
-  say(`Folder “${r.body.name}” created`);
-  loadFolders();
-}
-
-/* -------------------------------------------------------------- track rows */
-
-function libraryRow(r, slots, row){
-  const el = document.createElement("div");
-  el.className = "librow" + (pickedTrack === r.source_hash ? " picked" : "");
-  if (row && row.depth)
-    el.style.paddingLeft = (row.depth * DEPTH_INDENT_PX) + "px";
-  // The column a folder's caret occupies, so names line up under the folder
-  // they are in. Only in the tree — a flattened list has no carets to align to.
-  if (row && row.tree){
-    const gap = document.createElement("span");
-    gap.className = "caret";
-    gap.setAttribute("aria-hidden", "true");
-    el.appendChild(gap);
-  }
-  // Clicking the row lifts the track; clicking a control in it does not. Every
-  // control stops propagation rather than this checking what was hit, so a new
-  // control cannot forget to opt out and silently start picking things up.
-  el.onclick = () => pickUp(r);
-
-  const nm = document.createElement("span");
-  nm.className = "libname";
-  nm.textContent = r.name;
-  nm.title = "Click to rename";
-  nm.tabIndex = 0;
-  nm.setAttribute("role", "button");
-  nm.dataset.fk = "lib:" + r.source_hash + ":name";
-  const edit = () => startRename(el, nm, r);
-  nm.onclick = e => { e.stopPropagation(); edit(); };
-  nm.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); edit(); } };
-  el.appendChild(nm);
-
-  // Where it lives, for a row shown outside the tree. Without it a search
-  // result is a name with no way to tell which folder it came out of.
-  if (row && row.path){
-    const path = document.createElement("span");
-    path.className = "libpath";
-    path.textContent = row.path;
-    el.appendChild(path);
-  }
-
-  const dur = document.createElement("span");
-  dur.className = "libdur";
-  dur.textContent = mmss(r.duration);
-  el.appendChild(dur);
-
-  el.appendChild(slotField(r, slots));
-
-  const play = document.createElement("button");
-  play.className = "libbtn" + (nowPlaying === r.source_hash ? " playing" : "");
-  play.type = "button";
-  play.textContent = nowPlaying === r.source_hash ? "■" : "▶";
-  play.title = nowPlaying === r.source_hash ? "Stop" : "Listen";
-  play.setAttribute("aria-label",
-    (nowPlaying === r.source_hash ? "Stop " : "Listen to ") + r.name);
-  play.dataset.fk = "lib:" + r.source_hash + ":play";
-  play.onclick = e => { e.stopPropagation(); audition(r); };
-  el.appendChild(play);
-
-  const del = document.createElement("button");
-  del.className = "libbtn danger";
-  del.type = "button";
-  del.textContent = "×";
-  del.title = `Delete “${r.name}” from the device`;
-  del.setAttribute("aria-label", "Delete " + r.name);
-  del.dataset.fk = "lib:" + r.source_hash + ":del";
-  del.onclick = e => { e.stopPropagation(); forget(r); };
-  el.appendChild(del);
-
-  return el;
-}
-
 function startRename(row, nm, r){
-  if (editingHash !== null || editingFolder !== null) return;
+  if (editingHash !== null) return;
   editingHash = r.source_hash;
   inlineRename(row, nm, {
     name: r.name,
@@ -2068,33 +1054,48 @@ function audition(r){
   });
 }
 
-async function assignToSlot(r, slot){
-  if (slot == null) return;
-  const pad = pad2(slot);
-  // Read before the write: afterwards the slot holds the new track and cannot
-  // say what it replaced.
-  const had = ((state && state.slots) || []).find(x => x.slot === slot);
-  const hasLoop = ((state && state.loops) || []).includes(slot);
-
-  const resp = await api(`/api/slots/${slot}/assign`,
-                         jsonBody({hash: r.source_hash}));
-  if (!resp.ok){ failFrom(resp, `Couldn't put that in slot ${pad}`); return false; }
-  pickedTrack = null;
-  selected = null;      // consumed; the next click picks its own target
-
-  // A loop in the target slot is the one case worth saying out loud. It is not
-  // a warning: BT.WAV and LOOP.WAV live side by side and the pedal plays the
-  // track with the loop over it, which is the point of the feature. Saying so
-  // is what stops the user wondering whether they just destroyed a take.
-  say(hasLoop
-      ? `“${r.name}” assigned to slot ${pad} — the loop recorded there still plays over it`
-      : had
-        ? `Replaced slot ${pad} with “${r.name}”`
-        : `“${r.name}” assigned to slot ${pad}`);
-
-  loadLibrary();        // the slot badges come from the snapshot, but `added`
-                        // ordering and any server-side change do not
-  return true;
+/* Put tracks on the pedal from the next free slot, in the order given. One
+   call for the lot: the device knows which slots hold a loop and this page
+   does not, and one snapshot comes back rather than one per track. */
+async function addToPedal(rows){
+  if (!rows.length) return;
+  const r = await api("/api/slots/assign",
+                      jsonBody({hashes: rows.map(x => x.source_hash)}));
+  if (!r.ok){ failFrom(r, "Could not put that on the pedal"); return; }
+  const p = r.body;
+  // The pending undo restores one slot, and this may have just refilled it.
+  $("#undoslot").innerHTML = "";
+  rows.forEach(x => checked.delete(x.source_hash));
+  updateAddSel();
+  // The snapshot the fill caused usually lands before this response does, so
+  // the rows have already been rebuilt with their ticks still on. The set is
+  // not in the library key, so say the DOM is stale and redraw.
+  libraryDomDirty();
+  renderLibrary();
+  if (!p.assigned.length){
+    warn("No room on the pedal");
+    return;
+  }
+  let line = p.assigned.length === 1
+    ? `“${p.assigned[0].name}” → slot ${pad2(p.start)}`
+    : `${p.assigned.length} tracks → slots ${pad2(p.start)}–${pad2(p.end)}`;
+  if (p.unplaced.length) line += ` · ${p.unplaced.length} didn't fit`;
+  if (!p.loops_known) line += " · plug the pedal in to skip its loops";
+  // The capacity bar reads from bytes on the card and will not know about this
+  // until the writes land, so the warning has to come from the plan itself.
+  const secs = p.assigned.reduce((t, a) => {
+    const row = (library || []).find(x => x.source_hash === a.source_hash);
+    return t + ((row && row.duration) || 0);
+  }, 0);
+  const total = (state && state.capacity && state.capacity.total_seconds) || 0;
+  if (total && secs > total){
+    warn(`${line} · that is ${mmss(secs)} on a ${mmss(total)} pedal, so some won't fit`);
+  } else if (p.unplaced.length){
+    warn(line);
+  } else {
+    say(line);
+  }
+  loadLibrary();
 }
 
 async function forget(r, force){
@@ -2134,14 +1135,12 @@ async function forget(r, force){
   loadLibrary();
 }
 
-/* -------------------------------------------------- sending to the library */
-
 async function sendToLibrary(files){
   if (!files || !files.length) return;
   const list = [...files];
   setText($("#msg"), "Adding to the library…");
-  const res = await postFiles("/api/library", list, {folder_id: currentFolder});
-  reportUpload(res, 0, list.length);
+  const res = await postFiles("/api/library", list);
+  reportUpload(res, false);
   loadLibrary();
 }
 
@@ -2150,15 +1149,10 @@ $("#libfile").onchange = e => { sendToLibrary(e.target.files); e.target.value=""
 // arriving mid-keystroke can't wipe what's being typed.
 $("#libq").oninput = renderLibrary;
 $("#libsort").onchange = renderLibrary;
+// In view order, so a sorted library goes onto the pedal in the order shown.
+$("#addsel").onclick = () =>
+  addToPedal(libraryView().filter(r => checked.has(r.source_hash)));
 
-$("#newfolder").onclick = newFolder;
-
-/* The one destination with no row of its own. It appears only while a track
-   that is in a folder is picked up, so it is never a button with nothing to
-   act on. */
-$("#tolevel").onclick = () => fileInto(null, "the top level");
-
-// es.onopen also loads these, but only once the stream handshake completes. Ask
-// now so the card fills even if the event stream is slow or never comes up.
+// es.onopen also loads this, but only once the stream handshake completes. Ask
+// now so the library fills even if the event stream is slow or never comes up.
 loadLibrary();
-loadFolders();

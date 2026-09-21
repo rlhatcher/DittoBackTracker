@@ -1271,3 +1271,153 @@ def test_folder_assign_is_covered_by_the_cross_site_guard(client):
     rv = client.post("/api/folders/1/assign",
                      headers={"Sec-Fetch-Site": "cross-site"})
     assert rv.status_code == 403
+
+
+# --- batch assign -----------------------------------------------------------
+
+def seeds(*names):
+    """Seed tracks and return their hashes, in the order given.
+
+    The hash is derived from the name so a test reads the same twice; str.hash
+    is salted per process and would make the fixture different every run.
+    """
+    hashes = []
+    for name in names:
+        h = hashlib.sha1(name.encode()).hexdigest()[:20]
+        seed(h, name)
+        hashes.append(h)
+    return hashes
+
+
+def test_a_batch_fills_consecutive_slots_in_the_order_given(client):
+    hashes = seeds("Autumn Leaves", "Blue Bossa", "Ceora")
+
+    rv = client.post("/api/slots/assign", json={"hashes": hashes, "start": 9})
+
+    assert rv.status_code == 201
+    body = rv.get_json()
+    assert (body["start"], body["end"]) == (9, 11)
+    assert [a["name"] for a in body["assigned"]] == \
+        ["Autumn Leaves", "Blue Bossa", "Ceora"]
+    assert [db.get_slot(n)["display_name"] for n in (9, 10, 11)] == \
+        ["Autumn Leaves", "Blue Bossa", "Ceora"]
+
+
+def test_a_batch_with_no_start_takes_the_first_slot_with_room(client):
+    hashes = seeds("Autumn Leaves", "Blue Bossa")
+    seed(H1)
+    client.post("/api/slots/1/assign", json={"hash": H1})
+
+    body = client.post("/api/slots/assign", json={"hashes": hashes}).get_json()
+
+    assert (body["start"], body["end"]) == (2, 3)
+
+
+def test_a_batch_skips_the_devices_own_loop_slots(client, service):
+    """The loop set is scanned at mount and lives only on the device. A client
+    working from a snapshot that can be fifteen seconds old would lose a replug
+    race, so the skip happens here, under the lock that queues the work."""
+    service.pedal_state = "mounted"
+    service._loops = frozenset({10})
+    hashes = seeds("Autumn Leaves", "Blue Bossa")
+
+    body = client.post("/api/slots/assign",
+                       json={"hashes": hashes, "start": 9}).get_json()
+
+    assert [a["slot"] for a in body["assigned"]] == [9, 11]
+    assert body["skipped_loops"] == [10]
+    assert (body["start"], body["end"]) == (9, 11), "the range spans the skip"
+    assert body["loops_known"] is True
+    assert db.get_slot(10) is None, "wrote over a loop slot"
+
+
+def test_a_batch_cannot_skip_loops_while_the_pedal_is_absent(client, service):
+    """Loop presence is only knowable mounted, so an unmounted fill says its
+    range is provisional rather than letting a client believe it skipped."""
+    assert service.pedal_state == "absent"
+    hashes = seeds("Autumn Leaves")
+
+    body = client.post("/api/slots/assign",
+                       json={"hashes": hashes, "start": 9}).get_json()
+
+    assert body["loops_known"] is False
+    assert body["skipped_loops"] == []
+
+
+def test_a_batch_reports_the_tracks_that_did_not_fit(client):
+    """Silent truncation would put two tracks on the pedal and lose one."""
+    hashes = seeds("Autumn Leaves", "Blue Bossa", "Ceora")
+
+    body = client.post("/api/slots/assign",
+                       json={"hashes": hashes,
+                             "start": config.SLOTS - 1}).get_json()
+
+    assert [a["slot"] for a in body["assigned"]] == \
+        [config.SLOTS - 1, config.SLOTS]
+    assert [u["name"] for u in body["unplaced"]] == ["Ceora"]
+    assert body["unplaced"][0]["error"] == f"no room past slot {config.SLOTS}"
+
+
+def test_a_batch_with_an_unknown_hash_places_nothing(client):
+    """One problem, not N: the client's list is stale, so nothing is planned
+    around the gap and the slots are left as they were."""
+    hashes = seeds("Autumn Leaves", "Blue Bossa")
+
+    rv = client.post("/api/slots/assign",
+                     json={"hashes": [hashes[0], "f" * 20, hashes[1]]})
+
+    assert rv.status_code == 404
+    assert db.all_slots() == []
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"hashes": []}, {"hashes": "abc"}, {"hashes": [1, 2]}, [H1],
+])
+def test_a_batch_needs_a_list_of_hashes(client, body):
+    rv = client.post("/api/slots/assign", json=body)
+    assert rv.status_code == 400, f"{body!r} was accepted"
+
+
+def test_a_malformed_hash_in_a_batch_is_404_not_a_glob(client):
+    """Anything that is not a library hash is refused before it reaches a
+    path, the same rule as every other route that takes one."""
+    rv = client.post("/api/slots/assign", json={"hashes": ["../etc/passwd"]})
+    assert rv.status_code == 404
+
+
+@pytest.mark.parametrize("start", ["abc", "", True, 0, 200, -1])
+def test_a_batch_start_that_is_not_a_slot_number_is_400(client, start):
+    hashes = seeds("Autumn Leaves")
+
+    rv = client.post("/api/slots/assign",
+                     json={"hashes": hashes, "start": start})
+
+    assert rv.status_code == 400, f"{start!r} was accepted"
+    assert db.all_slots() == []
+
+
+def test_a_batch_emits_one_snapshot_for_the_whole_fill(client, service,
+                                                       monkeypatch):
+    """Three emits would each rebuild a full snapshot and broadcast 99 slots to
+    every subscriber. Counted on the request's own thread — the worker emits on
+    its own as the conversions it queued run."""
+    hashes = seeds("Autumn Leaves", "Blue Bossa", "Ceora")
+    caller = threading.current_thread()
+    emits = []
+    real = service._emit
+
+    def counting():
+        if threading.current_thread() is caller:
+            emits.append(1)
+        real()
+
+    monkeypatch.setattr(service, "_emit", counting)
+    client.post("/api/slots/assign", json={"hashes": hashes, "start": 9})
+
+    assert len(emits) == 1, f"{len(emits)} snapshots for one fill"
+
+
+def test_batch_assign_is_covered_by_the_cross_site_guard(client):
+    rv = client.post("/api/slots/assign",
+                     headers={"Sec-Fetch-Site": "cross-site"})
+    assert rv.status_code == 403

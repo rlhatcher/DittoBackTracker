@@ -127,39 +127,22 @@ TEXT = [
     ("--text-danger",    "--color-surface",     13, 800, "the same, in the bar"),
     ("--accent-legible", "--color-bg",          12, 400, "a ghost button"),
     ("--color-bg",       "--accent-legible",    14, 800, "the update-available button"),
-    # The list row has two more grounds: hovered and selected. Nothing here
-    # inherits from the --color-bg rows above; a tinted row is its own surface.
+    # A hovered pedal row is its own ground. Nothing here inherits from the
+    # --color-bg rows above.
     ("--color-text",     "--surface-hover", 15, 400, "a name on a hovered row"),
     ("--text-faint",     "--surface-hover", 12, 400, "a duration on a hovered row"),
     ("--text-muted",     "--surface-hover", 12, 400, "a status on a hovered row"),
     ("--text-danger",    "--surface-hover", 12, 400, "a warning status, hovered"),
-    ("--color-text",     "--surface-selected",  15, 400, "a name on a selected row"),
-    ("--text-faint",     "--surface-selected",  12, 400, "a duration, selected"),
-    ("--text-muted",     "--surface-selected",  12, 400, "a status on a selected row"),
-    ("--text-danger",    "--surface-selected",  12, 400, "a warning status, selected"),
-    # the row's slot-number block, unselected and selected
+    # a loop-only row's number, and the library's on-the-pedal badge
     ("--color-bg",       "--color-text",        13, 800, "a slot number block"),
-    ("--color-bg",       "--accent-legible",    13, 800, "a selected slot block"),
-    ("--text-faint",     "--color-bg",          11, 400, "the resting slot readout"),
-    ("--color-text",     "--color-bg",          11, 800, "the active slot readout"),
-    # the per-track slot field, and the marker for a track in several slots
+    # the slot field on a pedal row
     ("--color-text",     "--color-surface",     12, 800, "a slot field"),
-    ("--text-faint",     "--color-surface",     11, 400, "the extra-slots marker"),
-    # A top-level folder row is tinted, so it is a third ground, same as the
-    # hovered and selected rows above.
-    ("--color-text",     "--surface-group",     14, 800, "a folder name"),
-    ("--text-faint",     "--surface-group",     11, 400, "a folder's count"),
-    # the slot numbers printed in the map, one per cell state
-    ("--text-faint",     "--color-bg",          10, 400, "an empty slot number"),
-    ("--on-state",       "--state-synced",      10, 400, "an on-pedal slot number"),
-    ("--on-state",       "--state-converting",  10, 400, "a converting slot number"),
-    ("--on-queued",      "--state-queued",      10, 400, "a queued slot number"),
-    ("--on-state",       "--state-error",       10, 400, "an errored slot number"),
+    ("--color-text",     "--surface-hover",     12, 800, "a slot field, row hovered"),
 ]
 
 # Boundaries of things you can operate, which WCAG 1.4.11 puts at 3:1.
 NON_TEXT = [
-    ("--cell-border", "--color-bg", "the border of an empty slot"),
+    ("--color-text", "--color-surface", "the border of a slot field"),
 ]
 
 SCHEMES = ("light", "dark")
@@ -184,7 +167,8 @@ def test_every_piece_of_text_meets_wcag_aa(scheme, fg, bg, px, weight, what):
                          ids=[t[2].replace(" ", "-") for t in NON_TEXT])
 def test_control_boundaries_meet_wcag_non_text_contrast(scheme, fg, bg, what):
     """The design's own divider token measures 2.41:1 here, which is why the
-    cell border is a separate token — this is what stops it drifting back."""
+    slot field's border is ink rather than a rule — this is what stops it
+    drifting back."""
     tokens = _tokens(scheme)
     ratio = contrast(_resolve(f"var({fg})", tokens), _resolve(f"var({bg})", tokens))
     assert ratio >= 3.0, f"{what} in {scheme}: {ratio:.2f}:1, needs 3:1"
@@ -234,25 +218,6 @@ def test_only_the_token_layer_names_a_raw_ramp_step():
               for m in re.finditer(r"color-(?:accent|neutral)-[0-9]00", body)
               if not start <= m.start() < end]
     assert not strays, f"raw ramp steps used outside @layer tokens, near lines {strays}"
-
-
-def test_the_page_reads_a_leading_slot_number_the_way_the_server_does():
-    """app.js keeps its own copy of LEADING_NUM, because it decides which of the
-    two endpoints a dropped file is sent to while the server decides which slot
-    it lands in. Let them drift and an unnumbered file quietly takes a slot, or
-    a numbered one quietly does not — no error either way."""
-    js = re.search(r"const LEADING_NUM\s*=\s*/(.+?)/;", _strip_comments(JS)).group(1)
-    assert js == web.LEADING_NUM.pattern, (
-        f"app.js matches {js!r}, web.py matches {web.LEADING_NUM.pattern!r}")
-
-
-def test_the_arrow_keys_step_the_same_grid_the_css_draws():
-    """app.js repeats the column count so Up and Down can move a whole row. The
-    two have to agree or Down lands on the wrong slot, and nothing errors."""
-    css = int(re.search(r"#grid\s*\{[^}]*repeat\((\d+),",
-                        _strip_comments(CSS)).group(1))
-    js = int(re.search(r"const GRID_COLS\s*=\s*(\d+)", _strip_comments(JS)).group(1))
-    assert js == css, f"GRID_COLS is {js} but the CSS draws {css} columns"
 
 
 def test_the_page_script_parses():

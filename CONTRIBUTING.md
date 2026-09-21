@@ -46,8 +46,8 @@ model.
 **Pins**, for facts that are objectively decidable from the files and already
 one edit from going wrong silently. `tests/test_frontend.py` and
 `tests/test_docs.py` are entirely this. A pin earns its place when the failure
-it prevents is invisible: a stale API doc, a contrast ratio, a regex the client
-and server both keep a copy of, an asset that 404s into a fallback font. If
+it prevents is invisible: a stale API doc, a contrast ratio, an asset that
+404s into a fallback font. If
 breaking the thing would produce a loud error anyway, it doesn't need a pin.
 
 **Mutation-check every new test.** Break the thing it pins, watch it fail, read
