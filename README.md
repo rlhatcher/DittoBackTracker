@@ -80,8 +80,7 @@ It must run before the read-only overlay is enabled, because it writes to
 Open `http://dittobacktracker.local/` and connect the pedal.
 
 Work through the [checklist](docs/provisioning.md#checklist) before calling it
-done. It covers the one privileged operation that fails silently: a refused
-restart leaves the device serving old code after reporting an update.
+done.
 
 ---
 

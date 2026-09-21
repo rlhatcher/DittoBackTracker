@@ -274,6 +274,8 @@ Expect roughly 1 MB/s, so a five-minute track takes about 40 seconds to write.
 - [ ] `id ditto-svc` shows it is **not** in the `sudo` group
 - [ ] `ditto-svc` can mount and unmount the pedal without becoming root
 - [ ] `systemctl status ditto-web` is active, with no restart loop
+- [ ] **Update** in the web UI, when one is offered, comes back on the new
+      revision
 - [ ] The web UI loads and shows the pedal's slot list
 - [ ] A dropped MP3 converts and plays back from the pedal
 - [ ] Boot to SSH in under 15 s

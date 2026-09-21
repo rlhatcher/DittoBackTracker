@@ -118,7 +118,12 @@ class Updater:
         """Exit once the response is out, and let systemd start us again on
         the new code (Restart=always in the unit). SIGTERM to ourselves, so it
         is the path a systemctl stop takes: drain, unmount, exit. Nothing here
-        needs root, which is why the service account has none."""
+        needs root, which is why the service account has none.
+
+        A timer, not the response's close hook: waitress hands the body to its
+        main thread to send, and that is the thread the signal stops, so the
+        hook can fire before the bytes leave. A second covers a JSON line on
+        a LAN."""
         threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGTERM)).start()
 
     def _reset_checkout(self, sha: Optional[str]) -> None:
