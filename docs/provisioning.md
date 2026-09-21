@@ -273,8 +273,7 @@ Expect roughly 1 MB/s. That is where `config.LOOP_STAGE_TIMEOUT` comes from.
 - [ ] `systemctl show ditto-web -p User` reports `ditto-svc`
 - [ ] `id ditto-svc` shows it is **not** in the `sudo` group
 - [ ] `ditto-svc` can mount and unmount the pedal without becoming root
-- [ ] Both scoped rules answer for `ditto-svc` (below)
-- [ ] **Done** in the web UI powers the device off
+- [ ] The scoped sudoers rule answers for `ditto-svc` (below)
 - [ ] `systemctl status ditto-web` is active, with no restart loop
 - [ ] The web UI loads and shows the slot grid
 - [ ] A dropped MP3 converts and plays back from the pedal
@@ -282,20 +281,16 @@ Expect roughly 1 MB/s. That is where `config.LOOP_STAGE_TIMEOUT` comes from.
 - [ ] `df -h /var/lib/ditto` shows `/dev/mmcblk0p3`, not an overlay
 - [ ] Ten hard power cuts leave no fsck and nothing corrupt on the pedal
 
-Check the two sudoers rules without firing either, by asking sudo whether it
-would allow them. Each prints the command back if the rule matches and fails if
+Check the sudoers rule without firing it, by asking sudo whether it would
+allow the command. It prints the command back if the rule matches and fails if
 it does not:
 
 ```bash
-sudo -u ditto-svc sudo -n -l /sbin/poweroff
 sudo -u ditto-svc sudo -n -l /usr/bin/systemctl start --no-block ditto-restart.service
 ```
 
-Worth doing explicitly, because both fail quietly in use. A refused poweroff
-arrives after the page has already said it is safe to unplug, and a refused
-restart leaves the device serving the old code after reporting an update.
-Pressing **Done** tests the poweroff rule for real, so it makes a good last
-step.
+Worth doing explicitly, because it fails quietly in use: a refused restart
+leaves the device serving the old code after reporting an update.
 
 The `df` check is the one people miss. If the data partition is overlaid,
 everything works until the first reboot, then every upload is gone and nothing

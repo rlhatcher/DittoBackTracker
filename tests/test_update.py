@@ -4,10 +4,12 @@ core guard/redeploy/update-check branches, using local git repos (no network).""
 import shutil
 import subprocess
 import threading
+import time
 
+import conftest
 import pytest
 
-from ditto import config, update, web
+from ditto import config, core, update, web
 
 # --- endpoint status mapping ----------------------------------------------
 
@@ -47,11 +49,6 @@ def test_update_failed_502():
     rv = _client((False, "git update failed: could not resolve host")) \
         .post("/api/update")
     assert rv.status_code == 502
-
-
-def test_update_shutting_down_503():
-    rv = _client((False, "the device is shutting down")).post("/api/update")
-    assert rv.status_code == 503
 
 
 def test_update_cross_site_403():
@@ -106,6 +103,79 @@ def test_update_refused_while_job_in_flight(service):
         service._in_flight.clear()
     assert ok is False and "busy" in msg
     assert not service.updater.admitted.is_set()
+
+
+def test_the_update_gate_holds_a_job_that_arrives_after_it_closes(service):
+    """update() sets _updating and only then checks for idleness, so the gate
+    has to stop work that arrives during the deploy.
+
+    The worker checks the gate before dequeuing, but an idle worker spends
+    nearly all its time parked in that blocking get() — so a job queued just
+    after the gate closed satisfies the get, and without a second check it runs
+    straight past the gate and alongside the redeploy.
+    """
+    ran = []
+    service._do_erase = lambda slot: ran.append(slot)
+    # Let the boot sweep finish and the worker settle into its blocking get(),
+    # which is the state that exposes the hole rather than hiding it.
+    conftest.drain(service)
+    time.sleep(0.6)
+
+    service.updater.admitted.set()
+    service._work.put(("erase", 42))
+    time.sleep(1.0)
+    assert ran == [], "a job started while an update was admitted"
+
+    service.updater.admitted.clear()           # the update bailed; work resumes
+    deadline = time.monotonic() + 5
+    while not ran and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ran == [42], "the held job was dropped instead of resumed"
+
+
+def test_the_worker_claims_in_flight_before_its_final_gate_check(service,
+                                                                monkeypatch):
+    """update() and the worker must not both admit.
+
+    update() sets _updating and then reads _in_flight; the worker reads
+    _updating and then sets _in_flight. Ordered that way the two can pass each
+    other: the job is dequeued and held, so the queue reads empty, busy is
+    still None and _in_flight is not yet set — and a redeploy is admitted
+    alongside a write that is about to start.
+
+    The window is a couple of bytecodes wide, so racing it would be flaky in
+    both directions. Assert the ordering instead: the claim has to land before
+    the last gate check, which is what makes whichever side runs second see
+    what the first did.
+    """
+    conftest.drain(service)
+    events = []
+
+    real_gate_is_set = service.updater.admitted.is_set
+    real_claim = service._in_flight.set
+
+    monkeypatch.setattr(service.updater.admitted, "is_set",
+                        lambda: (events.append("gate"), real_gate_is_set())[1])
+    monkeypatch.setattr(service._in_flight, "set",
+                        lambda: (events.append("claim"), real_claim())[1])
+
+    ran = threading.Event()
+    captured = []
+
+    def record_then_signal(self, slot):
+        # Snapshot inside the job, not after the wait: once the worker is
+        # released it loops round and checks the gate again, which would
+        # rewrite the tail to ["gate", "gate"] before the assertion reads it.
+        captured.append(events[-2:])
+        ran.set()
+
+    monkeypatch.setattr(core.Service, "_do_erase", record_then_signal)
+    service._work.put(("erase", 5))
+    assert ran.wait(timeout=5), "the worker never ran the job"
+
+    # The claim must be the second-to-last step, with a gate check after it.
+    assert captured[0] == ["claim", "gate"], (
+        f"the gate was checked before the claim: {captured[0]}")
 
 
 def test_update_no_git_checkout(service, tmp_path, monkeypatch):

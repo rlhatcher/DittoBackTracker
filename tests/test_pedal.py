@@ -314,7 +314,7 @@ def test_a_write_is_flushed_before_the_database_records_it(tmp_path,
 
     svc = core.Service.__new__(core.Service)
     svc.fmt = dict(config.DEFAULT_FORMAT)
-    svc.busy = svc.busy_kind = svc.progress = None
+    svc.busy = svc.progress = None
     svc._subs, svc._subs_lock = [], threading.Lock()
     svc._work = queue.Queue()
     # _emit builds a snapshot; give it only what that needs.

@@ -1,31 +1,25 @@
-"""Hold the service account's four files to each other.
+"""Hold the service account's three files to each other.
 
-The account the service runs as is named in four places that have never checked
-one another: `User=`/`Group=` in the unit, the principal in each of the two
-sudoers rules, and the `chown` target plus the fstab `uid=`/`gid=` in
-install.sh. They agree today by hand.
+The account the service runs as is named in three places that have never checked
+one another: `User=`/`Group=` in the unit, the principal in the sudoers rule,
+and the `chown` target plus the fstab `uid=`/`gid=` in install.sh. They agree
+today by hand.
 
 Every way they can disagree is silent here and quiet on the device:
 
-  * Change `User=` and forget a sudoers file, and the rule stops matching. The
-    Done button unmounts the pedal, answers 200, and leaves the Pi running —
-    the response is already sent by the time sudo is refused. Update reports
-    "the restart was refused" and keeps serving the old code.
+  * Change `User=` and forget the sudoers file, and the rule stops matching.
+    Update reports "the restart was refused" and keeps serving the old code.
   * Change the `chown` target and not the fstab options, and the service owns
     its data partition but cannot read the pedal it just mounted.
 
-The argv checks are the same idea one step further in. test_web_session.py
-already pins `sudo -n /sbin/poweroff` against a literal, which catches core.py
-drifting — but not the rule drifting away from core.py, because nothing in the
-suite reads etc/99-ditto-poweroff. Nothing reads etc/99-ditto-restart at all;
-test_update.py stubs anything containing "systemctl" and asserts the refusal
-message, so the path and arguments in that rule are unchecked in both
-directions.
+The argv check is the same idea one step further in. test_update.py stubs
+anything containing "systemctl" and asserts the refusal message, so the path
+and arguments in the rule would otherwise be unchecked in both directions.
 
 Read out of the source with ast rather than run, for the reason
-conftest._block_sudo exists: the commands under test power off or restart the
-machine running the suite. Same approach as test_frontend.py, which parses
-app.js to pin what it reaches for.
+conftest._block_sudo exists: the command under test restarts the machine
+running the suite. Same approach as test_frontend.py, which parses app.js to
+pin what it reaches for.
 """
 
 import ast
@@ -36,7 +30,6 @@ from ditto import config
 
 ROOT = Path(__file__).resolve().parent.parent
 UNIT = ROOT / "systemd" / "ditto-web.service"
-POWEROFF_RULE = ROOT / "etc" / "99-ditto-poweroff"
 RESTART_RULE = ROOT / "etc" / "99-ditto-restart"
 INSTALL_SH = ROOT / "install.sh"
 
@@ -119,12 +112,11 @@ def _sudo_argvs(module: str) -> list:
     return out
 
 
-def test_the_unit_and_both_sudoers_rules_name_one_account():
+def test_the_unit_and_the_sudoers_rule_name_one_account():
     user, group = _unit_value("User"), _unit_value("Group")
     assert user == group, f"unit runs as {user} but group {group}"
-    for path in (POWEROFF_RULE, RESTART_RULE):
-        assert _rule(path)[0] == user, \
-            f"{path.name} grants {_rule(path)[0]}, unit runs as {user}"
+    assert _rule(RESTART_RULE)[0] == user, \
+        f"{RESTART_RULE.name} grants {_rule(RESTART_RULE)[0]}, unit runs as {user}"
 
 
 def test_the_installer_gives_the_data_partition_to_that_account():
@@ -149,11 +141,11 @@ def _check_rule_is_exactly(path: Path, argv: list) -> None:
     """The rule must permit this call, and permit nothing wider.
 
     Both halves are load-bearing, and the second is the security one. A rule
-    that names no arguments permits *any* arguments — so dropping `""` from the
-    poweroff rule, or the arguments from the restart rule, still permits the
-    call and passes a "does it permit" check while widening what the service
-    may do as root. `NOPASSWD: /usr/bin/systemctl` on its own would let it
-    start or stop any unit on the box, which is root by a longer route.
+    that names no arguments permits *any* arguments — so dropping the arguments
+    from the restart rule still permits the call and passes a "does it permit"
+    check while widening what the service may do as root. `NOPASSWD:
+    /usr/bin/systemctl` on its own would let it start or stop any unit on the
+    box, which is root by a longer route.
 
     Compared against the argv read out of the source rather than a literal, so
     there is still only one copy of the command in the repo.
@@ -164,13 +156,6 @@ def _check_rule_is_exactly(path: Path, argv: list) -> None:
     assert rule[2] == _call(argv)[1:], \
         (f"{path.name} is not scoped to that call: it permits "
          f"{'any arguments' if rule[2] is None else rule[2]}")
-
-
-def test_the_poweroff_rule_is_exactly_the_command_core_runs():
-    argvs = [a for a in _sudo_argvs("core.py")
-             if any("poweroff" in str(x) for x in a)]
-    assert len(argvs) == 1, f"expected one poweroff in core.py, found {argvs}"
-    _check_rule_is_exactly(POWEROFF_RULE, argvs[0])
 
 
 def test_the_restart_rule_is_exactly_the_command_the_updater_runs():

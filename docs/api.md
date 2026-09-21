@@ -22,9 +22,7 @@ Full snapshot. The same object is pushed over `/api/events`.
   "seq": 4128,
   "pedal": "mounted",
   "busy": null,
-  "busy_kind": null,
   "progress": null,
-  "ending": false,
   "error": null,
   "ip": "192.168.1.42",
   "version": "0.4.0",
@@ -63,8 +61,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 |---|---|
 | `seq` | Monotonically increasing snapshot counter. `/api/events` sends strictly increasing frames and drops the rest, so a consumer never sees state roll backwards; a hand-rolled consumer reading the queue itself should do the same |
 | `pedal` | `absent`, `mounted`, `error` |
-| `busy` | Description of current work, or `null` when idle |
-| `busy_kind` | `write` while the pedal is being written to, `read` while it is being read, else `null`. `write` is the device's only "don't unplug" signal |
+| `busy` | Description of current work, or `null` when idle. Unplug only when it is `null` |
 | `progress` | 0.0–1.0 during conversion, else `null` |
 | `format_source` | Which pedal file the target format was read from |
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
@@ -511,14 +508,6 @@ limitation; the file still converts and writes normally.
 
 ---
 
-## POST /api/session/end
-
-Finish queued writes, flush, unmount the pedal, then power off. The only way
-to shut the device down. Returns immediately; watch `/api/events` for
-progress.
-
----
-
 ## POST /api/update
 
 Over-the-air self-update. Pulls the tracked branch, redeploys the app, and
@@ -539,7 +528,6 @@ restart sudoers rule). See the README.
 | `200` | Update deployed; the service is restarting |
 | `409` | Busy (work is in flight or queued, or an update is already running). Retry when idle |
 | `502` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
-| `503` | The device is shutting down. Try again after it comes back up |
 
 ---
 
@@ -605,8 +593,6 @@ curl -N http://dittobacktracker.local/api/events
 | `500` | `GET /api/loops/<n>`, `POST /api/slots/<n>` | Staging the loop failed unexpectedly (e.g. a local I/O error); or the upload could not be stored: a full card, or bytes the device could not confirm. Body is `{"error": "..."}`. In a batch this is reported per file instead, and the request still returns `201` |
 | `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
 | `503` | `GET /api/loops/<n>` | No pedal mounted, or loop staging exceeded its time limit. Body is `{"error": "..."}` |
-| `503` | `POST /api/update`, `POST /api/slots/<n>` | The device is shutting down and is no longer accepting work. Body is `{"error": "..."}` |
-| `503` | `POST /api/upload`, `POST /api/library` | The device began shutting down part-way through the batch. Body is the usual `{"added": [...], "errors": [...]}` carrying whatever landed before that, **not** an `error` string. The files in `added` are committed and queued |
 
 `POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both
 are batches, so they return `201` even when some or all files were rejected,
@@ -617,8 +603,6 @@ landed".
 
 A batch also reports per file when the device could not *store* a file, a full
 card or bytes it could not confirm, rather than failing the whole request, so
-the files that did land are never silently lost. The one case that stops a batch
-early is the device beginning to shut down: that returns `503`, and the body
-still carries the `added` and `errors` accumulated so far.
+the files that did land are never silently lost.
 
 Anything else is a bug.

@@ -15,8 +15,8 @@ SRC=/var/lib/ditto/src        # must match config.SRC — the checkout OTA pulls
 # The account the service runs as, and deliberately not the login account. The
 # Raspberry Pi Imager user is in the sudo group, and POST /api/update executes
 # code from the tracked branch, so a service running as it hands root to anyone
-# on the LAN. This account gets no shell and no sudo group: the two rules in
-# etc/ are the whole of what it may do as root.
+# on the LAN. This account gets no shell and no sudo group: the one rule in
+# etc/ is the whole of what it may do as root.
 SVC=ditto-svc
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -153,13 +153,9 @@ if sudo -u "$SVC" git -C "$HERE" rev-parse HEAD >/dev/null 2>&1; then
     | sudo -u "$SVC" tee "$APP/REVISION" >/dev/null
 fi
 
-# Check both rules parse before installing either. A malformed file in
+# Check the rule parses before installing it. A malformed file in
 # /etc/sudoers.d breaks sudo for every user on a device whose root filesystem
-# is about to go read-only, and the app's only privileged calls go through it.
-echo "==> allow unprivileged poweroff (for the Done button)"
-sudo visudo -c -f "$HERE/etc/99-ditto-poweroff"
-sudo install -m 0440 "$HERE/etc/99-ditto-poweroff" /etc/sudoers.d/99-ditto-poweroff
-
+# is about to go read-only, and the app's only privileged call goes through it.
 echo "==> allow unprivileged restart (for over-the-air self-update)"
 sudo visudo -c -f "$HERE/etc/99-ditto-restart"
 sudo install -m 0440 "$HERE/etc/99-ditto-restart" /etc/sudoers.d/99-ditto-restart

@@ -22,34 +22,15 @@ The web UI is the only interface.
 
 ## Power
 
-The device runs from mains through the Pi's PWR port. There is no battery and no
-UPS, so **pulling the power is an abrupt power cut**. Treat it as one.
+The device runs from mains through the Pi's PWR port. There is no battery, no
+UPS and no off switch. Pull the plug when the status line at the bottom of the
+page reads "Ready", and not while it names a write in progress.
 
-### Ending a session
-
-Use **Done** in the web UI. It finishes any queued writes, flushes, unmounts the
-pedal and halts the Pi. The page tells you when it is safe to pull the plug; it
-will disconnect as the Pi goes down.
-
-### What an abrupt cut can and can't hurt
-
-| | Protection |
-|---|---|
-| The Pi's root filesystem | Read-only, so nothing to corrupt. See [provisioning.md](provisioning.md) |
-| The data partition (`/var/lib/ditto`) | SQLite in WAL mode with `synchronous=FULL`; every file that matters is written to a temp name, fsynced, then renamed |
-| Uploaded audio in `sources/` | fsynced on ingest before the upload is acknowledged. If that fsync fails the upload fails too, rather than reporting success for bytes that were never confirmed on the card |
-| **The pedal's FAT volume** | **The exposed one.** `BT.WAV` is written temp-then-rename with an fsync and the volume is mounted `flush`, so a cut leaves either the old file or the new one. A cut *during* a write can still leave a `~bt*.tmp` behind, cleaned automatically on the next mount, and FAT has no journal |
-
-The failure mode to avoid is unplugging while the UI says it is writing. The
-status line at the bottom of the page turns amber and reads "— don't unplug"
-whenever the pedal is being written to. That message is the only warning.
-
-Anything left behind by a cut is swept on the next start: interrupted
-transcodes (`staged/*.wav.part`), stranded upload temporaries (`tmp*` in the
-data directory, once they're an hour old so an upload in flight is never
-reaped), and orphaned staged and source files. Interrupted pedal writes
-(`~bt*.tmp`) are cleaned on the next mount instead, since they live on the
-pedal.
+That is safe because the root filesystem is read-only, the database and every
+file on the data partition are written to a temp name, fsynced and renamed,
+and `BT.WAV` is written the same way with the pedal mounted `flush`. A cut
+mid-write leaves a `~bt*.tmp` on the pedal, cleaned on the next mount, and
+anything half-done on the data partition is swept at the next start.
 
 ---
 

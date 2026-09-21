@@ -26,9 +26,9 @@ resource: SQL in `db.py` and nowhere else, subprocess calls to ffmpeg in
 
 `web.py` reads from `db` directly for a handful of routes. That is allowed and
 the reason is written at the call site. The test for which side a route belongs
-on: **if losing power mid-request could leave the device inconsistent, it goes
-through the service**, because the admission lock is the only thing that orders
-work against a shutdown. Everything else can read straight through.
+on: **if it touches the pedal or queues work, it goes through the service**,
+whose lock is what keeps a slot and its library row consistent. Everything
+else can read straight through.
 
 Don't reach past a layer. `web.py` used to call `pedal.mounted()`; it asks
 `service.mounted` now. Don't call another module's `_private` either. If you
@@ -60,7 +60,7 @@ Some things are stubbed on purpose and enforced rather than trusted:
 - ffmpeg and ffprobe never run in the suite. `conftest._block_ffmpeg` raises if
   one is reached.
 - `sudo` never runs. `conftest._block_sudo` records the argv instead, so a test
-  cannot power off the machine it is running on.
+  cannot restart the machine it is running on.
 
 ## Comments
 
@@ -165,5 +165,5 @@ foreground/background pairing.
 
 Anything touching `install.sh`, the systemd units or the read-only overlay can't
 be tested here and shouldn't pretend otherwise. Say in the commit what you ran
-on a device: pedal mounts, pedal unmounts cleanly on stop, a track writes, Done
-powers off, Update restarts.
+on a device: pedal mounts, pedal unmounts cleanly on stop, a track writes,
+unplugging while Ready leaves a clean volume, Update restarts.

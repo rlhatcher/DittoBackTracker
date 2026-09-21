@@ -22,8 +22,7 @@ def svc(data_tree, monkeypatch):
     s.fmt = dict(config.DEFAULT_FORMAT)
     s.fmt_source = "default"
     s.pedal_state = "absent"
-    s.busy = s.busy_kind = s.progress = s.last_error = None
-    s.ending = False
+    s.busy = s.progress = s.last_error = None
     s._loops = frozenset()
     # snapshot() reads these three off the updater now.
     s.updater = types.SimpleNamespace(revision="abc1234", available=False,

@@ -623,20 +623,13 @@ function render(s){
     $("#progwrap").setAttribute("aria-valuenow", pct);
   }
   const m = $("#msg");
-  // This page is the only status surface — there is no panel light or display —
-  // so the mid-write warning has to be unmissable here or nowhere. Those two
-  // branches run whatever else is on the line; everything below them yields to
-  // a confirmation the user has not had time to read yet.
-  if (s.ending)            { setText(m, "Shutting down — leave everything plugged in until this page disconnects"); m.className="msg warn"; }
-  else if (s.busy && s.busy_kind === "write")
-                           { setText(m, s.busy + " — don't unplug"); m.className="msg warn"; }
-  else if (Date.now() < msgHold) { /* a confirmation owns the line */ }
+  // Everything below yields to a confirmation the user has not had time to
+  // read yet.
+  if (Date.now() < msgHold) { /* a confirmation owns the line */ }
   else if (s.busy)         { setText(m, s.busy); m.className="msg"; }
   else if (s.error)        { setText(m, s.error); m.className="msg err"; }
   else if (s.pedal==="mounted") { setText(m, "Ready"); m.className="msg"; }
   else                     { setText(m, "Plug in the pedal"); m.className="msg"; }
-
-  $("#done").disabled = s.ending;
 
   // The library's own rows come from /api/library, but its slot badges and its
   // assign targets come from the snapshot — so a new snapshot re-renders it.
@@ -795,11 +788,7 @@ const jsonBody = body => ({method: "POST",
    #msg from the snapshot, and an assign changes the snapshot, so without it a
    confirmation is overwritten by "Ready" in the same tick it was written — the
    user is told nothing and a screen reader announces nothing. For six seconds
-   after one of these, the snapshot does not get the line back.
-
-   Except when the device needs it: `ending`, and a write in flight, are the
-   only things this page has to say "don't unplug" with, and they outrank any
-   confirmation. render() checks that before it checks the hold. */
+   after one of these, the snapshot does not get the line back. */
 let msgHold = 0, msgTimer = null;
 function holdMsg(){
   msgHold = Date.now() + 6000;
@@ -1082,20 +1071,6 @@ paneL.addEventListener("drop", e => {
 // Anywhere else, a dropped file would navigate the page away from the app.
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("drop", e => e.preventDefault());
-
-/* The one button on this page whose failure the user must not have to guess at.
-   Ending the session is what unmounts the pedal and flushes the data
-   partition; the README tells people to press this rather than pull the power
-   for exactly that reason. A bare fetch here swallowed both failures it can
-   have — an unreachable device threw an unhandled rejection, and a 503 from an
-   already-ending device returned quietly — so the page looked the same whether
-   the shutdown had started or never been asked for, and the next thing the user
-   does is unplug it. */
-$("#done").onclick = async () => {
-  if (!confirm("End the session? The pedal will be unmounted and the device will shut down.")) return;
-  const r = await api("/api/session/end", {method:"POST"});
-  if (!r.ok) failFrom(r, "could not end the session — do not unplug yet");
-};
 
 $("#print").onclick = printList;
 

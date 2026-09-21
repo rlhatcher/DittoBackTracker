@@ -300,17 +300,6 @@
 
   /* -- buttons ------------------------------------------------------------ */
 
-  /* The filled primary. Accent, not ink: this is the one control on the page
-     that ends the session. */
-  button.act {
-    background: var(--accent-legible); color: var(--color-bg);
-    border: 0; border-radius: var(--radius-md);
-    padding: 10px var(--space-4);
-    font-family: var(--font-heading); font-weight: var(--font-heading-weight);
-    font-size: var(--text-control); cursor: pointer;
-  }
-  button.act:disabled { opacity: 0.45; cursor: default; }
-
   /* Ghost. */
   .link {
     background: none; border: 0; color: var(--accent-legible); cursor: pointer;
@@ -668,15 +657,9 @@
     font-size: var(--text-label); color: var(--text-muted); flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  /* The design's full button label is 28 characters and only fits a laptop. On a
-     phone it squeezed #msg down to "Plug in ..." — and #msg is the only thing on
-     this device that ever says "don't unplug", so it is not the part that gives
-     way. The button says "Done" there, which is what it said before. */
-  .wide-only { display: none; }
   .err { color: var(--text-danger); }
-  /* Mid-write and shutdown warnings. With no panel LED or display, this line is
-     the only thing telling the user not to pull the plug, so it carries weight
-     the plain status text doesn't. */
+  /* A refusal the user has to notice: an out-of-range slot, a folder that
+     would not dissolve. Weighted so it stands apart from the plain status. */
   .msg.warn { color: var(--text-danger); font-weight: var(--font-heading-weight); }
   #undoslot { flex: none; }
 }
@@ -720,7 +703,6 @@
     /* Relative, not static: the progress rule is absolutely positioned against
        the bar, and a static bar would hand it the viewport instead. */
     .bar { position: relative; }
-    .wide-only { display: inline; }
     header h1 { flex: 0 0 auto; }
 
     .cols {

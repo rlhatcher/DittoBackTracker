@@ -25,7 +25,7 @@ from flask import (
 )
 
 from . import config, db
-from .core import Service, ShuttingDown
+from .core import Service
 
 log = logging.getLogger(__name__)
 
@@ -245,9 +245,7 @@ def _ingest(f, name: str, store):
     ownership rule lives once: on success `store` owns the temp path — it moves
     it into sources/ or unlinks it there — and we must not touch it again.
 
-    Returns (row, IngestError|None). ShuttingDown is deliberately *not* caught:
-    the device is halting, no further file can land, and a batch has to stop and
-    report what already did rather than mark every remaining file failed.
+    Returns (row, IngestError|None).
     """
     fd, tmp = tempfile.mkstemp(dir=str(config.DATA),
                                suffix=Path(name).suffix.lower())
@@ -306,13 +304,6 @@ def create_app(service: Service) -> Flask:
     def _api_error(e):
         """Every refusal a request helper raises, in one place."""
         return jsonify(error=e.message), e.status
-
-    @app.errorhandler(ShuttingDown)
-    def _shutting_down(e):
-        """503, not 400: the request was fine, the device just isn't taking
-        work any more. A client that retries next session is doing the right
-        thing."""
-        return jsonify(error=str(e)), 503
 
     @app.before_request
     def block_cross_site():
@@ -461,14 +452,8 @@ def create_app(service: Service) -> Flask:
             if n is None:
                 errors.append({"name": name, "error": "no free slots"})
                 continue
-            try:
-                row, err = _ingest(f, name,
-                                   lambda p, stem, n=n: service.upload(n, p, stem))
-            except ShuttingDown as e:
-                # Nothing further can land. Report what did rather than losing
-                # the whole batch — those files are already committed and queued.
-                errors.append({"name": name, "error": str(e)})
-                return jsonify(added=results, errors=errors), 503
+            row, err = _ingest(f, name,
+                               lambda p, stem, n=n: service.upload(n, p, stem))
             if err:
                 errors.append({"name": name, "error": err.message})
             else:
@@ -594,11 +579,7 @@ def create_app(service: Service) -> Flask:
             if not _is_audio(name):
                 errors.append({"name": name, "error": "not an audio file"})
                 continue
-            try:
-                row, err = _ingest(f, name, service.add_to_library)
-            except ShuttingDown as e:
-                errors.append({"name": name, "error": str(e)})
-                return jsonify(added=added, errors=errors), 503
+            row, err = _ingest(f, name, service.add_to_library)
             if err:
                 errors.append({"name": name, "error": err.message})
             else:
@@ -656,20 +637,15 @@ def create_app(service: Service) -> Flask:
     # -- folders ---------------------------------------------------------
     #
     # These talk to db directly rather than through the service. There is no
-    # device I/O to admit and nothing to queue, and folders do not ride the
-    # state snapshot, so calling library_changed() would rebuild and broadcast a
-    # full snapshot that says nothing new. They also keep working while the
-    # device is shutting down, for the same reason a rename does: one row
-    # changes and the pedal is never touched.
+    # device I/O and nothing to queue, and folders do not ride the state
+    # snapshot, so calling library_changed() would rebuild and broadcast a full
+    # snapshot that says nothing new.
     #
     # The same licence covers the other reads that go straight to db from this
     # file — trash_items, library_all, library_get, hash_in_library, all_slots —
-    # and nothing beyond that. A route that touches the pedal, queues work, or
-    # has to be refused once the session is ending goes through the service,
-    # because the admission lock is the only thing that orders those against a
-    # shutdown. The test for which kind you are writing is whether losing power
-    # mid-request could leave the device inconsistent; if it could, it is the
-    # service's.
+    # and nothing beyond that. A route that touches the pedal or queues work
+    # goes through the service, whose lock is what keeps a slot and its library
+    # row consistent.
 
     @app.get("/api/folders")
     def folders():
@@ -854,25 +830,18 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="not found"), 404
         return jsonify(slot=slot)
 
-    @app.post("/api/session/end")
-    def end():
-        service.end_session()
-        return jsonify(ok=True)
-
     @app.post("/api/update")
     def update():
         """Pull the latest code and restart. State-changing, so the
         block_cross_site guard covers it. Returns 200 with the deployed revision
-        on success; 409 if the device is busy; 503 if it's shutting down; 502 if
-        the update itself failed (no network, no git checkout, bad code that was
-        rolled back, restart not permitted)."""
+        on success; 409 if the device is busy; 502 if the update itself failed
+        (no network, no git checkout, bad code that was rolled back, restart not
+        permitted)."""
         ok, message = service.update()
         if ok:
             return jsonify(ok=True, revision=message)
         if "busy" in message or "already running" in message:
             code = 409
-        elif "shutting down" in message:
-            code = 503
         else:
             code = 502
         return jsonify(error=message), code

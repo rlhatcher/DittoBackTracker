@@ -123,10 +123,10 @@ TEXT = [
     ("--text-muted",     "--color-surface",     12, 400, "the drop zone note"),
     ("--text-faint",     "--color-bg",          11, 400, "the version string"),
     ("--text-faint",     "--color-bg",          12, 400, "durations"),
-    ("--text-danger",    "--color-bg",          13, 800, "the mid-write warning"),
+    ("--text-danger",    "--color-bg",          13, 800, "a status-line warning"),
     ("--text-danger",    "--color-surface",     13, 800, "the same, in the bar"),
     ("--accent-legible", "--color-bg",          12, 400, "a ghost button"),
-    ("--color-bg",       "--accent-legible",    14, 800, "the primary button"),
+    ("--color-bg",       "--accent-legible",    14, 800, "the update-available button"),
     # The list row has two more grounds: hovered and selected. Nothing here
     # inherits from the --color-bg rows above; a tinted row is its own surface.
     ("--color-text",     "--surface-hover", 15, 400, "a name on a hovered row"),

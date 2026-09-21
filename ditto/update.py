@@ -2,9 +2,9 @@
 
 Kept apart from core.py because it shares nothing with the rest of the service.
 It talks to git and systemd — a third external system alongside the pedal and
-ffmpeg — and it owns its own state entirely. Its only contact with the session
-is three questions it has to ask before it may run, which arrive as callables:
-is the device shutting down, is it busy, and has it been told to stop.
+ffmpeg — and it owns its own state entirely. Its only contact with the service
+is two questions it has to ask before it may run, which arrive as callables:
+is it busy, and has it been told to stop.
 
 The one piece of shared machinery is `admitted`. The worker checks it before
 starting any job, so a redeploy never overlaps pedal work; see Service._worker
@@ -28,11 +28,9 @@ log = logging.getLogger(__name__)
 
 
 class Updater:
-    def __init__(self, is_ending: Callable[[], bool],
-                 is_busy: Callable[[], bool],
+    def __init__(self, is_busy: Callable[[], bool],
                  stopped: Callable[[], bool],
                  on_change: Callable[[], None]) -> None:
-        self._is_ending = is_ending
         self._is_busy = is_busy
         self._stopped = stopped
         self._changed = on_change
@@ -67,8 +65,6 @@ class Updater:
         that does not initiate one. The restart itself is done by a separate
         oneshot unit (RESTART_SERVICE), so it isn't killing this process.
         """
-        if self._is_ending():
-            return (False, "the device is shutting down")
         if not self._lock.acquire(blocking=False):
             return (False, "an update is already running")
         # Gate the worker before inspecting idleness, so a job can't slip from

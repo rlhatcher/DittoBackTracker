@@ -28,29 +28,28 @@ sudo_attempts: list[list[str]] = []
 
 
 def _block_sudo() -> None:
-    """Stop the suite from powering off the machine it is running on.
+    """Stop the suite from restarting the machine it is running on.
 
-    _halt ends with `sudo -n /sbin/poweroff`, and install.sh grants the ditto
-    user a NOPASSWD rule for exactly that command. So a test that reaches _halt
-    — by leaving an end marker queued, say — powers off a provisioned device
-    part-way through the run. On a laptop the sudo call simply fails, which is
-    why this stayed invisible.
+    A successful update ends with `sudo -n systemctl start ditto-restart`, and
+    install.sh grants the ditto user a NOPASSWD rule for exactly that command.
+    So a test that reaches it restarts a provisioned device part-way through the
+    run. On a laptop the sudo call simply fails, which is why this would stay
+    invisible.
 
     Replaced at import rather than per-test, because the reach can happen during
     fixture teardown, after a test's own monkeypatches have been undone. A test
     that wants the real call recorded can still stub subprocess.run itself.
     """
-    for mod in (core, update):
-        real = mod.subprocess.run
+    real = update.subprocess.run
 
-        def guard(*args, _real=real, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
-            if isinstance(cmd, (list, tuple)) and cmd and str(cmd[0]) == "sudo":
-                sudo_attempts.append([str(c) for c in cmd])
-                return subprocess.CompletedProcess(list(cmd), 0, "", "")
-            return _real(*args, **kwargs)
+    def guard(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, (list, tuple)) and cmd and str(cmd[0]) == "sudo":
+            sudo_attempts.append([str(c) for c in cmd])
+            return subprocess.CompletedProcess(list(cmd), 0, "", "")
+        return real(*args, **kwargs)
 
-        mod.subprocess.run = guard
+    update.subprocess.run = guard
 
 
 def _block_ffmpeg() -> None:
@@ -129,15 +128,9 @@ def data_tree(tmp_path, monkeypatch):
 
 # Service._drain returns silently when it gives up, so a timeout that is too
 # short does not fail as a timeout. It fails later, on whatever the test was
-# about to assert, with a message that blames the wrong thing: CircleCI build
-# 140 reported "ending the session never reached poweroff" when the poweroff
-# was merely still coming.
-#
-# The end job is the slowest thing a test waits for. It sleeps 1.5 s on purpose
-# (core._halt, so the last snapshot reaches the browser before the power goes)
-# and calls os.sync(), which flushes every filesystem on the host and is
-# unbounded on a shared runner. 5 s left about 3.5 s for that. Local runs use
-# 1.6 s of it, which looked like room and was not.
+# about to assert, with a message that blames the wrong thing. A job that calls
+# os.sync() flushes every filesystem on the host, which is unbounded on a shared
+# CI runner, and 5 s was not enough there.
 #
 # This is not a deadline anything is measured against. _drain polls at 50 ms and
 # returns the moment the worker is idle, so a generous timeout costs a healthy

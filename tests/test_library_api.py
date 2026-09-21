@@ -351,34 +351,6 @@ def test_audition_is_a_safe_method_and_needs_no_guard(client):
     assert rv.status_code == 200
 
 
-# --- shutdown ---------------------------------------------------------------
-
-def test_library_operations_that_touch_the_pedal_stop_once_ending(client, service):
-    """assign and forget queue pedal work, so they refuse during shutdown like
-    every other pedal operation — otherwise the API answers 201 for a track
-    that poweroff will discard."""
-    seed(H1)
-    db.put_slot(3, H1, state="synced")
-    service.ending = True
-
-    assert client.post("/api/slots/7/assign", json={"hash": H1}).status_code == 503
-    assert client.delete(f"/api/library/{H1}?force").status_code == 503
-    assert db.get_slot(3) is not None, "a refused delete must not clear slots"
-    assert db.hash_in_library(H1)
-
-
-def test_renaming_still_works_while_ending(client, service):
-    """A rename touches one database row and never the pedal, so there is no
-    reason to refuse it."""
-    seed(H1, "Before")
-    service.ending = True
-
-    rv = client.patch(f"/api/library/{H1}", json={"name": "After"})
-
-    assert rv.status_code == 200
-    assert db.library_get(H1)["name"] == "After"
-
-
 # --- malformed JSON bodies --------------------------------------------------
 
 @pytest.mark.parametrize("body", [
@@ -481,30 +453,8 @@ def test_a_failed_store_leaves_an_established_row_alone(app, monkeypatch, tmp_pa
     assert db.library_get(H1)["name"] == "Already here"
 
 
-def test_library_ingest_is_refused_once_the_session_is_ending(app, monkeypatch,
-                                                              tmp_path):
-    """Ingest has to be admitted like every other mutation. Without it,
-    end_session could begin the halt while the source file was still being
-    written, and this would still report success."""
-    svc = _service_of(app)
-    src = tmp_path / "upload.mp3"
-    src.write_bytes(b"pretend audio")
-    monkeypatch.setattr(core.media, "probe",
-                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
-    monkeypatch.setattr(core.media, "file_hash", lambda p: H1)
-
-    svc.ending = True
-    try:
-        with pytest.raises(core.ShuttingDown):
-            svc.add_to_library(src, "Too late")
-    finally:
-        svc.ending = False
-
-    assert db.library_get(H1) is None
-
-
-def test_upload_holds_one_admission_over_the_whole_mutation(app, monkeypatch,
-                                                            tmp_path):
+def test_upload_holds_the_lock_over_the_whole_mutation(app, monkeypatch,
+                                                       tmp_path):
     """The row, the bytes and the slot assignment have to land as one step, or
     a concurrent forced forget can delete the row in between and leave a slot
     pointing at a hash with no library entry."""
@@ -519,20 +469,20 @@ def test_upload_holds_one_admission_over_the_whole_mutation(app, monkeypatch,
     real_place = core.Service._place_source
 
     def watch(self, h, tmp, stored, inserted):
-        # The admission is an RLock; if it is held, this thread already owns it.
-        held.append(svc._admit._is_owned())
+        # An RLock; if it is held, this thread already owns it.
+        held.append(svc._lock._is_owned())
         return real_place(self, h, tmp, stored, inserted)
 
     monkeypatch.setattr(core.Service, "_place_source", watch)
     svc.upload(5, src, "Track")
 
-    assert held == [True], "the source was stored outside the admission"
+    assert held == [True], "the source was stored outside the lock"
     row = db.get_slot(5)
     assert row["source_hash"] == H1
     assert db.hash_in_library(H1), "the slot must never outlive its library row"
 
 
-def test_assign_reads_the_row_back_under_the_admission(app, monkeypatch):
+def test_assign_reads_the_row_back_under_the_lock(app, monkeypatch):
     """A concurrent forced forget can clear the slot the instant the lock is
     released. Reading outside the block would return None for an assignment
     that did happen, which the route maps to a 404."""
@@ -545,10 +495,10 @@ def test_assign_reads_the_row_back_under_the_admission(app, monkeypatch):
 
     def watch(slot):
         # This thread only. The worker picks up the convert job and calls
-        # get_slot too, and it never holds the admission — counting that would
+        # get_slot too, and it never holds the lock — counting that would
         # make the assertion fail regardless of what assign() does.
         if threading.current_thread() is caller:
-            observed.append(svc._admit._is_owned())
+            observed.append(svc._lock._is_owned())
         return real_get(slot)
 
     monkeypatch.setattr(db, "get_slot", watch)
@@ -556,7 +506,7 @@ def test_assign_reads_the_row_back_under_the_admission(app, monkeypatch):
 
     assert row is not None and row["source_hash"] == H1
     assert observed and observed[-1] is True, \
-        "the slot row was read after the admission was released"
+        "the slot row was read after the lock was released"
 
 
 # --- a batch must not lose what already landed -------------------------------
@@ -599,36 +549,6 @@ def test_a_batch_reports_the_files_that_landed_when_one_cannot_be_stored(
     assert len(body["errors"]) == 1
     assert body["errors"][0]["name"] == "c.mp3"
     assert "could not be saved" in body["errors"][0]["error"]
-
-
-def test_a_batch_stops_and_reports_partials_when_the_device_starts_halting(
-        app, client, monkeypatch):
-    """ShuttingDown is different from a per-file failure: nothing further can
-    land, so the batch stops — but what already landed is still reported."""
-    svc = _service_of(app)
-    monkeypatch.setattr(core.media, "probe",
-                        lambda p: core.media.AudioInfo("mp3", 44100, 2, 90.0))
-    hashes = iter([f"{i:020d}" for i in range(10)])
-    monkeypatch.setattr(core.media, "file_hash", lambda p: next(hashes))
-
-    seen = {"n": 0}
-    real_add = core.Service.add_to_library
-
-    def halt_after_two(self, tmp_path, display_name):
-        seen["n"] += 1
-        if seen["n"] > 2:
-            self.ending = True
-        return real_add(self, tmp_path, display_name)
-
-    monkeypatch.setattr(core.Service, "add_to_library", halt_after_two)
-    try:
-        rv = client.post("/api/library", content_type="multipart/form-data",
-                         data={"file": [_audio("a.mp3"), _audio("b.mp3"),
-                                        _audio("c.mp3"), _audio("d.mp3")]})
-        assert rv.status_code == 503
-        assert len(rv.get_json()["added"]) == 2, "partials were discarded"
-    finally:
-        svc.ending = False
 
 
 def test_a_single_upload_that_cannot_be_stored_is_a_500_not_a_400(
@@ -926,18 +846,6 @@ def test_a_patch_with_neither_a_name_nor_a_folder_is_400(client):
     assert client.patch(f"/api/library/{H1}", json={}).status_code == 400
 
 
-def test_filing_still_works_while_the_device_is_ending(client, service):
-    """One row changes and the pedal is never touched, so this is not work the
-    shutdown has to refuse — the same reasoning as a rename."""
-    f = mkfolder(client, "Standards")
-    seed(H1)
-    service.ending = True
-
-    rv = client.patch(f"/api/library/{H1}", json={"folder_id": f["id"]})
-
-    assert rv.status_code == 200
-
-
 def upload(client, path, name="t.mp3", **form):
     return client.post(path, data={"file": (io.BytesIO(b"ID3 pretend"), name), **form},
                        content_type="multipart/form-data")
@@ -1222,26 +1130,12 @@ def test_an_empty_folder_assigns_nothing(client):
     assert (body["start"], body["end"]) == (None, None)
 
 
-def test_a_fill_is_refused_once_the_device_is_ending(client, service):
-    """It queues pedal work, so it stops when every other pedal operation
-    does — otherwise the API reports slots that poweroff will discard."""
-    f = mkfolder(client, "Standards")
-    fill(client, f["id"], "Autumn Leaves", "Blue Bossa")
-    service.ending = True
-
-    rv = client.post(f"/api/folders/{f['id']}/assign", json={"start": 9})
-
-    assert rv.status_code == 503
-    assert db.all_slots() == []
-
-
 def test_folder_assign_writes_the_whole_plan_or_none_of_it(client, service,
                                                            monkeypatch):
-    """end_session sets `ending` under the admission lock, so holding that lock
-    across the whole fill is what stops a shutdown landing between the fourth
-    track and the fifth and leaving half a set list on the pedal. Probed with a
-    non-blocking acquire from another thread, which is the mechanism itself —
-    asserting on the outcome of a race would only sometimes run the race."""
+    """Holding the lock across the whole fill is what stops a forced forget
+    landing between the fourth track and the fifth. Probed with a non-blocking
+    acquire from another thread, which is the mechanism itself — asserting on
+    the outcome of a race would only sometimes run the race."""
     f = mkfolder(client, "Standards")
     fill(client, f["id"], "Autumn Leaves", "Blue Bossa", "Ceora")
     real = service._assign
@@ -1253,9 +1147,9 @@ def test_folder_assign_writes_the_whole_plan_or_none_of_it(client, service,
         def probe():
             # An RLock is reentrant for its owner, so this has to be asked from
             # a thread that is not the one running the fill.
-            ok = service._admit.acquire(blocking=False)
+            ok = service._lock.acquire(blocking=False)
             if ok:
-                service._admit.release()
+                service._lock.release()
             got.append(ok)
 
         t = threading.Thread(target=probe)
@@ -1267,7 +1161,7 @@ def test_folder_assign_writes_the_whole_plan_or_none_of_it(client, service,
     monkeypatch.setattr(service, "_assign", watched)
     client.post(f"/api/folders/{f['id']}/assign", json={"start": 9})
 
-    assert held == [True, True, True], "the fill let go of the admission"
+    assert held == [True, True, True], "the fill let go of the lock"
 
 
 def test_folder_assign_emits_one_snapshot_for_the_whole_fill(client, service,

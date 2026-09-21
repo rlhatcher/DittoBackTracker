@@ -80,8 +80,7 @@ It must run before the read-only overlay is enabled, because it writes to
 Open `http://dittobacktracker.local/` and connect the pedal.
 
 Work through the [checklist](docs/provisioning.md#checklist) before calling it
-done. It covers the two privileged operations that fail silently: a refused
-poweroff arrives after the page has said it is safe to unplug, and a refused
+done. It covers the one privileged operation that fails silently: a refused
 restart leaves the device serving old code after reporting an update.
 
 ---
@@ -131,9 +130,9 @@ network; the default is `0.0.0.0`.
 
 ## How it works
 
-The pedal is mounted for the length of a session and released on **Done**.
-Uploads are stored by content hash, converted in the background and written as
-they become ready.
+The pedal is mounted while it is plugged in. Uploads are stored by content
+hash, converted in the background and written as they become ready. Unplug
+when the status line says Ready.
 
 ```text
   POST /api/upload
@@ -155,18 +154,17 @@ change plus one file copy rather than another conversion. Module layering is in
 ## Security
 
 There is no authentication. The service binds `0.0.0.0:80`, so anyone on the
-network can upload, clear slots, download a recorded loop, trigger a
-self-update or shut the device down. The update only pulls the branch the
+network can upload, clear slots, download a recorded loop or trigger a
+self-update. The update only pulls the branch the
 device already tracks from its own remote, so it fetches your code rather than
 an attacker's, but a LAN user can still force a restart. Built for a home LAN.
 Do not put it on a network you do not control.
 
 The service runs as `ditto-svc`, a system account with no shell that is not in
-the `sudo` group. `etc/99-ditto-poweroff` and `etc/99-ditto-restart` are scoped
-to one command each and are the whole of what the service may do as root: power
-the device off, and start the restart helper. A LAN user reaching
-`POST /api/update` can restart the device onto code from the tracked branch and
-can shut it down. They cannot get root.
+the `sudo` group. `etc/99-ditto-restart` is scoped to one command and is the
+whole of what the service may do as root: start the restart helper. A LAN user
+reaching `POST /api/update` can restart the device onto code from the tracked
+branch. They cannot get root.
 
 That holds only because the account is not the login account. The Raspberry Pi
 Imager user is in the `sudo` group, so a service running as it would put root

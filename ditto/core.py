@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import contextlib
 import itertools
 import logging
 import os
 import queue
 import socket
-import subprocess
 import threading
 import time
 import uuid
@@ -27,10 +25,6 @@ _STOP = ("stop",)
 
 # How often a drain re-checks whether the queue has emptied.
 _DRAIN_POLL = 0.05
-
-
-class ShuttingDown(Exception):
-    """A pedal operation was asked for after the session began ending."""
 
 
 def mmss(seconds: float) -> str:
@@ -104,13 +98,8 @@ class Service:
         self.fmt_source = "default"
         self.pedal_state = "absent"          # absent | mounted | error
         self.busy: Optional[str] = None      # human-readable current activity
-        # What kind of pedal work `busy` is: "write" | "read" | None. Unplugging
-        # mid-read is low-risk, so only a write earns the UI's "don't unplug"
-        # warning — the job that used to belong to the OLED.
-        self.busy_kind: Optional[str] = None
         self.progress: Optional[float] = None
         self.last_error: Optional[str] = None
-        self.ending = False
 
         # Slots that hold a LOOP.WAV, scanned once on mount (never per _emit —
         # 99 stats over 1 MB/s USB per SSE frame would be visibly slow). A
@@ -127,17 +116,17 @@ class Service:
         self._stop = threading.Event()
         # git and systemd live in update.py; it owns all of its own state and
         # asks the session only what it must know before it may run.
-        self.updater = Updater(is_ending=lambda: self.ending,
-                               is_busy=self._busy_for_update,
+        self.updater = Updater(is_busy=self._busy_for_update,
                                stopped=self._stop.is_set,
                                on_change=self._emit)
 
-        # Serializes "is this device still accepting work?" with the enqueue
-        # that follows it, and with end_session's own set-and-enqueue. Reentrant
-        # because grouped operations (a forced library delete clearing several
-        # slots) admit once and then call through to per-slot operations that
-        # admit again.
-        self._admit = threading.RLock()
+        # Serializes the library mutations against each other: a forced forget
+        # reads the slots holding a track, clears them and deletes the row as
+        # one step, and an upload or assign must not land between those.
+        # Reentrant because grouped operations (that forget, a folder fill)
+        # lock once and then call through to per-slot operations that lock
+        # again.
+        self._lock = threading.RLock()
 
         # Set while the worker holds a job whose busy flag isn't up yet, so a
         # drain can't mistake the gap between dequeue and write for "idle".
@@ -153,11 +142,11 @@ class Service:
         # app coming up (and no-ops without a checkout or network). After that,
         # checks happen only when the user asks. Tracked in _threads so shutdown()
         # joins it rather than leaving it to emit during teardown.
-        # Sweep whatever the last run left behind. _gc otherwise runs only from
-        # _halt(), which a pulled plug never reaches — so without this, every
-        # ungraceful stop leaks interrupted transcodes and upload temporaries
-        # onto a small data partition until the next clean shutdown. Queued
-        # rather than run inline so it stays off the boot path.
+        # Sweep whatever the last run left behind. The device is unplugged
+        # rather than shut down, so the start of the next session is the one
+        # reliable moment to reclaim interrupted transcodes, upload temporaries
+        # and the audio of forgotten tracks. Queued rather than run inline so it
+        # stays off the boot path.
         self._work.put(("gc",))
 
         self._threads = [
@@ -251,9 +240,7 @@ class Service:
             "seq": next(self._snap_seq),
             "pedal": self.pedal_state,
             "busy": self.busy,
-            "busy_kind": self.busy_kind,
             "progress": self.progress,
-            "ending": self.ending,
             "error": self.last_error,
             "format": self.fmt,
             "format_source": self.fmt_source,
@@ -275,39 +262,7 @@ class Service:
         if not (1 <= slot <= config.SLOTS):
             raise ValueError(f"slot must be 1-{config.SLOTS}")
 
-    def _check_accepting(self) -> None:
-        """Cheap early refusal, so a doomed upload isn't probed and hashed first.
-
-        Advisory only — `_admitting` is what actually decides.
-        """
-        if self.ending:
-            raise ShuttingDown("the device is shutting down")
-
-    @contextlib.contextmanager
-    def _admitting(self):
-        """Decide and enqueue as one step.
-
-        Testing `ending` and then queueing work is not enough on its own: an
-        upload spends seconds probing and hashing between the two, and
-        end_session can land in that gap — so the work goes in behind an end
-        marker that has already passed, and poweroff discards it after the API
-        said 201.
-
-        Callers do their slow part — probing, hashing — outside this block.
-        Ingest is the deliberate exception: it holds the admission across
-        writing the source file too, because the library row, the bytes and the
-        slot assignment have to land as one step or a concurrent forced forget
-        can delete the row in between and leave a slot pointing at nothing. That
-        does mean end_session waits on an fsync, which is the behaviour we want:
-        poweroff should not begin midway through storing a track.
-        """
-        with self._admit:
-            if self.ending:
-                raise ShuttingDown("the device is shutting down")
-            yield
-
     def upload(self, slot: int, tmp_path: Path, display_name: str) -> Dict:
-        self._check_accepting()
         self.check_slot(slot)
 
         info = media.probe(tmp_path)
@@ -323,13 +278,14 @@ class Service:
         # one of them fails safely: a row with no file surfaces as "source file
         # missing" on convert, which is visible and fixable, whereas a file with
         # no row is invisible and the collector eventually takes it.
-        # One admission over the whole mutation. Splitting it would leave a
-        # window in which a forced forget deletes the row between library_add
-        # and _assign — the slot would then reference a hash with no library
-        # row, reading as "(missing)", and the next collector pass would take
-        # its source file. Reading the row back inside the block keeps the
-        # returned object consistent with what was just committed.
-        with self._admitting():
+        # One lock over the whole mutation, held across the fsync too.
+        # Splitting it would leave a window in which a forced forget deletes the
+        # row between library_add and _assign — the slot would then reference a
+        # hash with no library row, reading as "(missing)", and the next
+        # collector pass would take its source file. Reading the row back inside
+        # the block keeps the returned object consistent with what was just
+        # committed.
+        with self._lock:
             inserted = db.library_add(h, display_name, info.duration)
             self._place_source(h, tmp_path, stored, inserted)
             self._assign(slot, h)
@@ -351,10 +307,9 @@ class Service:
 
         h = media.file_hash(tmp_path)
         stored = config.SOURCES / f"{h}{tmp_path.suffix.lower() or '.bin'}"
-        # Admitted like every other mutation. Without this, end_session could
-        # begin the halt while the source file was still being written and this
-        # would still report success.
-        with self._admitting():
+        # Under the lock like upload, so a forced forget cannot take the row
+        # while the source file is still being written.
+        with self._lock:
             inserted = db.library_add(h, display_name, info.duration)
             self._place_source(h, tmp_path, stored, inserted)
             row = db.library_get(h)
@@ -368,16 +323,15 @@ class Service:
         transcode at most, and usually not even that — the staged WAV may still
         be cached — instead of another upload over WiFi.
         """
-        self._check_accepting()
         self.check_slot(slot)
-        # Inside the admission, not before it. forget() holds the same lock
+        # Inside the lock, not before it. forget() holds the same lock
         # across reading the slot list, clearing those slots and deleting the
         # row — so a membership test outside it can pass, then have the track
         # deleted before the assignment lands. forget has already read its slot
         # list by then, so it would never clear the new slot, and the collector
         # would take the source out from under it: a slot reading "(missing)"
         # with no audio behind it. restore() already checks under the lock.
-        with self._admitting():
+        with self._lock:
             if not db.hash_in_library(source_hash):
                 return None
             self._assign(slot, source_hash)
@@ -391,12 +345,12 @@ class Service:
     def _assign(self, slot: int, source_hash: str) -> None:
         """Point a slot at a library track and queue the work to realise it.
 
-        Admits here rather than in each caller: this is the single place all
+        Locks here rather than in each caller: this is the single place all
         three routes into a slot — upload, restore and assign — change the
         database and queue work. The lock is reentrant, so a caller that has
-        already admitted (to keep a larger step atomic) nests harmlessly.
+        already taken it (to keep a larger step atomic) nests harmlessly.
         """
-        with self._admitting():
+        with self._lock:
             if db.get_slot(slot):
                 db.delete_slot(slot, to_trash=True)
             db.put_slot(slot, source_hash, state="converting")
@@ -475,21 +429,17 @@ class Service:
 
     def assign_folder(self, folder_id: int,
                       start: Optional[int] = None) -> Optional[Dict]:
-        """Fill a run of slots with a folder's tracks, as one admitted step.
+        """Fill a run of slots with a folder's tracks, as one locked step.
 
-        One admission for the whole fill rather than one per track. `_admitting`
-        is what makes shutdown safe, and nine admissions let end_session land
-        between the fourth and the fifth: half a set list on the pedal, with a
-        success reported for each half. One `_emit` at the end for the same
-        reason in reverse — nine would each rebuild a full snapshot and
-        broadcast 99 slots to every subscriber.
+        One lock for the whole fill rather than one per track, so a forced
+        forget cannot interleave with it. One `_emit` at the end — nine would
+        each rebuild a full snapshot and broadcast 99 slots to every subscriber.
 
-        The plan is recomputed inside the admission, so the loop set it skips is
+        The plan is recomputed inside the lock, so the loop set it skips is
         the one this device holds now and not the one a preview saw fifteen
         seconds ago on a keepalive-only stream.
         """
-        self._check_accepting()
-        with self._admitting():
+        with self._lock:
             plan = self.plan_folder(folder_id, start)
             if plan is None:
                 return None
@@ -501,7 +451,7 @@ class Service:
 
     def clear(self, slot: int) -> Optional[int]:
         self.check_slot(slot)
-        with self._admitting():
+        with self._lock:
             trash_id = db.delete_slot(slot, to_trash=True)
             self._work.put(("erase", slot))
         self._emit()
@@ -539,21 +489,17 @@ class Service:
         """
         self.check_slot(slot)
         stage = LoopStage()
-        with self._admitting():
+        with self._lock:
             self._work.put(("stage_loop", slot, self._mount_gen, stage))
         self._emit()
         return stage
 
     def delete_loop(self, slot: int) -> bool:
         """Enqueue removal of the slot's loop. False (→404) if none is known."""
-        # Ahead of the no-op return, so the answer doesn't depend on whether
-        # the slot happened to hold a loop: during shutdown this is refused
-        # either way.
-        self._check_accepting()
         self.check_slot(slot)
         if slot not in self._loops:
             return False
-        with self._admitting():
+        with self._lock:
             self._work.put(("delete_loop", slot, self._mount_gen))
         self._emit()
         return True
@@ -569,7 +515,7 @@ class Service:
         # The move-or-swap decision is made atomically in db, so we queue pedal
         # work from what actually happened rather than a pre-read that a
         # concurrent upload could have invalidated.
-        with self._admitting():
+        with self._lock:
             op = db.move_or_swap(src, dst)
             if op == "swap":
                 self._work.put(("write", src))
@@ -582,7 +528,6 @@ class Service:
         self._emit()
 
     def retry(self, slot: int) -> None:
-        self._check_accepting()     # ahead of the empty-slot return, as above
         self.check_slot(slot)
         row = db.get_slot(slot)
         if not row:
@@ -592,13 +537,13 @@ class Service:
             db.set_state(slot, "error", "source file missing")
             self._emit()
             return
-        with self._admitting():
+        with self._lock:
             db.set_state(slot, "converting")
             self._work.put(("convert", slot, row["source_hash"], src))
         self._emit()
 
     def restore(self, trash_id: int) -> Optional[int]:
-        with self._admitting():
+        with self._lock:
             item = db.trash_pop(trash_id)
             if not item:
                 return None
@@ -638,12 +583,12 @@ class Service:
         confirmed. The audio itself goes on the next collector pass, once the
         row that was keeping it alive is gone.
         """
-        with self._admitting():
+        with self._lock:
             slots = db.slots_for_hash(source_hash)
             if slots and not force:
                 return ("in_use", slots)
-            # One admission covering the whole group, so a shutdown can't land
-            # between clearing some slots and deleting the row.
+            # One lock over the whole group, so an assign can't land between
+            # clearing the slots and deleting the row.
             for n in slots:
                 self.clear(n)
             deleted = db.library_delete(source_hash)
@@ -659,23 +604,6 @@ class Service:
         library, so the next snapshot already carries it. This is what tells
         clients the *library list* itself moved.
         """
-        self._emit()
-
-    def end_session(self) -> None:
-        """Flush, unmount, halt. The only way to power the device off.
-
-        The check, the flag and the marker go under one lock. Two of these
-        racing would each queue a marker, and _run_job requeues a marker
-        whenever the queue is non-empty — so the pair would step over each
-        other indefinitely and the device would never power off. Emitting
-        happens after the lock; it reads the database and has no business
-        holding up a shutdown.
-        """
-        with self._admit:
-            if self.ending:
-                return
-            self.ending = True
-            self._work.put(("end",))
         self._emit()
 
     def _busy_for_update(self) -> bool:
@@ -696,11 +624,11 @@ class Service:
         self.updater.startup_check()
 
     def shutdown(self, timeout: float = 30.0) -> None:
-        """SIGTERM path — a service stop or restart, not a session ending.
+        """SIGTERM path: a service stop or restart.
 
-        Unlike _halt this never powers off, but it must still leave the pedal
-        unmounted: systemd will SIGKILL us if we dawdle, so the drain is
-        bounded and anything still queued is abandoned rather than waited on.
+        Leaves the pedal unmounted. systemd will SIGKILL us if we dawdle, so
+        the drain is bounded and anything still queued is abandoned rather than
+        waited on; the next mount requeues whatever is unsynced.
         """
         if self._stop.is_set():
             return
@@ -813,7 +741,7 @@ class Service:
             self._stop.wait(config.POLL_SECS)
 
     def _tick_pedal(self) -> None:
-        if self.ending or self._stop.is_set():
+        if self._stop.is_set():
             return
 
         if not pedal.present():
@@ -939,7 +867,6 @@ class Service:
                 job = None
                 self._in_flight.clear()
                 self.busy = None
-                self.busy_kind = None
                 self.progress = None
                 self._emit()
 
@@ -960,29 +887,6 @@ class Service:
             self._do_delete_loop(slot, gen)
         elif kind == "gc":
             self._gc()
-        elif kind == "end":
-            # A convert queues its write *after* the end marker, so the marker
-            # can surface with real work still behind it. This worker is the
-            # only thing draining the queue, so halting here would leave those
-            # writes unwritten — go behind the remaining work instead.
-            #
-            # Collapse duplicate markers on the way past. end_session admits
-            # under a lock so it can only ever queue one, but two would requeue
-            # past each other forever and the device would never power off —
-            # too sharp an edge to leave depending on a lock held elsewhere.
-            pending = []
-            while True:
-                try:
-                    pending.append(self._work.get_nowait())
-                except queue.Empty:
-                    break
-            work = [j for j in pending if j[0] != "end"]
-            for j in work:
-                self._work.put(j)
-            if work:
-                self._work.put(("end",))
-                return
-            self._halt()
 
     def _do_convert(self, slot: int, h: str, src: Path) -> None:
         row = db.get_slot(slot)
@@ -1048,7 +952,6 @@ class Service:
             return
 
         self.busy = f"Writing {row['display_name']}"
-        self.busy_kind = "write"
         self.progress = 0.0
         self._emit()
         try:
@@ -1066,11 +969,7 @@ class Service:
             return
         if db.get_slot(slot):
             return          # slot was refilled before we got here
-        # An unlink plus an os.sync is a write to the pedal like any other, and
-        # the browser is now the only place a "don't unplug" warning can appear
-        # — so this has to raise the flag even though it finishes quickly.
         self.busy = f"Clearing slot {slot:02d}"
-        self.busy_kind = "write"
         self._emit()
         try:
             pedal.remove_track(slot)
@@ -1103,7 +1002,6 @@ class Service:
                 return
             dest = config.LOOPS / f"slot-{slot:02d}-{uuid.uuid4().hex}.wav"
             self.busy = "Reading loop"
-            self.busy_kind = "read"
             self.progress = None
             self._emit()
             pedal.copy_loop(slot, dest)
@@ -1131,7 +1029,6 @@ class Service:
             self._emit()
             return
         self.busy = "Removing loop"
-        self.busy_kind = "write"
         self._emit()
         try:
             pedal.remove_loop(slot)
@@ -1157,33 +1054,6 @@ class Service:
                 return
             time.sleep(_DRAIN_POLL)
 
-    def _halt(self) -> None:
-        # No _drain here. This runs *as* the end job, inside the worker, so
-        # `_in_flight` is already set on our own behalf — a drain could never
-        # see idle and would burn its whole timeout before every poweroff. It
-        # would also be redundant: the end marker requeues itself until the
-        # queue is empty (see _run_job), which is the real wait.
-        self.busy = "Finishing writes"
-        self.busy_kind = "write"
-        self._emit()
-        self.busy = "Unmounting"
-        self._emit()
-        try:
-            os.sync()
-            pedal.unmount()
-        except Exception as e:
-            log.exception("unmount failed")
-            self.last_error = str(e)
-        self.busy = None
-        self.busy_kind = None
-        self._emit()
-
-        self._gc()
-        # The browser is the only status surface now, so give the last snapshot
-        # a moment to reach it before the network goes away with the power.
-        time.sleep(1.5)
-        subprocess.run(["sudo", "-n", "/sbin/poweroff"], check=False)
-
     def _gc(self) -> None:
         """Prune expired trash and any file nothing references.
 
@@ -1203,12 +1073,9 @@ class Service:
         bounded by slot_count and not by the library, which is the property that
         matters.
 
-        Runs at startup and at session end. The startup pass is the one that
-        matters after a pulled plug, because _halt never ran.
-
-        Recently-written files are left alone (see _older_than), so the pass at
-        session end can leave a just-orphaned file behind. That costs a boot,
-        not the space: the next startup pass collects it.
+        Runs at startup. Recently-written files are left alone (see
+        _older_than), so a file orphaned in the last few minutes of a session
+        waits for the boot after next.
         """
         cutoff = time.time() - config.GC_GRACE_SECS
         try:
