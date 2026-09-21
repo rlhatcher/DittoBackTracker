@@ -114,9 +114,14 @@ class Service:
         self._mount_gen = 0
         # Before the updater, which captures self._stop.is_set as a callable.
         self._stop = threading.Event()
+        # Held by the worker around every job, and by the updater for a deploy,
+        # so the two never overlap. A successful update keeps it: a restart is
+        # pending and no job may touch the pedal under it.
+        self._job_lock = threading.Lock()
         # git and systemd live in update.py; it owns all of its own state and
-        # asks the session only what it must know before it may run.
-        self.updater = Updater(is_busy=self._busy_for_update,
+        # asks the service only what it must know before it may run.
+        self.updater = Updater(job_lock=self._job_lock,
+                               is_busy=self._busy_for_update,
                                stopped=self._stop.is_set,
                                on_change=self._emit)
 
@@ -607,8 +612,9 @@ class Service:
         self._emit()
 
     def _busy_for_update(self) -> bool:
-        """Is there pedal work in flight or queued? Asked by the updater before
-        it admits a redeploy, and evaluated after it has closed the gate."""
+        """Is there pedal work in flight or queued? Asked by the updater with
+        the job lock held, so a running job has already refused it; this is for
+        a job that is dequeued and waiting on the lock, or still queued."""
         return bool(self.busy or self._in_flight.is_set()
                     or not self._work.empty())
 
@@ -818,53 +824,30 @@ class Service:
     # ------------------------------------------------------------ work queue
 
     def _worker(self) -> None:
-        job = None
         while not self._stop.is_set():
-            # Don't start a job while an update is admitted: a redeploy/restart
-            # must not overlap pedal work. Anything queued waits here and is
-            # drained on the pending restart (or resumes if the update bails).
-            if self.updater.admitted.is_set():
-                self._stop.wait(0.1)
-                continue
-            if job is None:
-                try:
-                    job = self._work.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                if job is _STOP:
-                    break       # shutdown; anything still queued is abandoned
-                # Hold the job rather than putting it back: the queue is FIFO
-                # and requeuing would move it behind work queued later, and a
-                # convert has to stay ahead of the write it queues. A held job
-                # is invisible to update()'s idleness check, which is the safe
-                # direction — it is not running, and a pending restart drops it
-                # exactly like anything else still queued.
-
-            # Claim in-flight, then re-check the gate, then give the claim back
-            # if the gate turned out to be shut.
-            #
-            # Both halves matter. The re-check is because an idle worker spends
-            # nearly all its time parked in that get(), so a job arriving just
-            # after the gate closed satisfies the get and would otherwise run
-            # straight past it — the common case, not a narrow race.
-            #
-            # Claiming *before* the re-check is what makes the two sides
-            # mutually exclusive. update() sets _updating and then reads
-            # _in_flight; without the claim this worker reads _updating and
-            # then sets _in_flight, so the two can pass each other and admit a
-            # redeploy alongside a write that is about to start. Claiming first
-            # means whichever runs second sees what the first did.
-            self._in_flight.set()
-            if self.updater.admitted.is_set():
-                self._in_flight.clear()
-                continue
             try:
-                self._run_job(job)
-            except Exception as e:
-                log.exception("job %r failed", job[0])
-                self.last_error = str(e)
+                job = self._work.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if job is _STOP:
+                break       # shutdown; anything still queued is abandoned
+            # In flight from the moment it is dequeued, so a drain and the
+            # updater's busy check both count a job waiting on the lock.
+            self._in_flight.set()
+            try:
+                # A pending restart holds the lock for good, so wait in short
+                # steps and let a stop through rather than sit behind it.
+                while not self._job_lock.acquire(timeout=0.5):
+                    if self._stop.is_set():
+                        return
+                try:
+                    self._run_job(job)
+                except Exception as e:
+                    log.exception("job %r failed", job[0])
+                    self.last_error = str(e)
+                finally:
+                    self._job_lock.release()
             finally:
-                job = None
                 self._in_flight.clear()
                 self.busy = None
                 self.progress = None

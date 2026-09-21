@@ -94,88 +94,55 @@ def test_update_refused_while_busy(service):
 
 
 def test_update_refused_while_job_in_flight(service):
-    # A job dequeued but not yet flagged busy still blocks admission, and the
-    # updating gate is cleared again on the refusal.
+    # A job dequeued but not yet flagged busy still blocks a deploy, and the
+    # job lock is given back on the refusal.
     service._in_flight.set()
     try:
         ok, msg = service.update()
     finally:
         service._in_flight.clear()
     assert ok is False and "busy" in msg
-    assert not service.updater.admitted.is_set()
+    assert not service._job_lock.locked(), "a refused update kept the job lock"
 
 
-def test_the_update_gate_holds_a_job_that_arrives_after_it_closes(service):
-    """update() sets _updating and only then checks for idleness, so the gate
-    has to stop work that arrives during the deploy.
+def test_update_is_refused_while_a_job_runs(service, monkeypatch):
+    """The worker holds the job lock for the whole job, so an update that
+    arrives mid-write finds it taken and answers busy, without either side
+    reasoning about the other's timing."""
+    started, release = threading.Event(), threading.Event()
 
-    The worker checks the gate before dequeuing, but an idle worker spends
-    nearly all its time parked in that blocking get() — so a job queued just
-    after the gate closed satisfies the get, and without a second check it runs
-    straight past the gate and alongside the redeploy.
-    """
+    def slow_erase(self, slot):
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(core.Service, "_do_erase", slow_erase)
+    service._work.put(("erase", 5))
+    assert started.wait(timeout=5), "the worker never ran the job"
+    try:
+        ok, msg = service.update()
+    finally:
+        release.set()
+    assert ok is False and "busy" in msg
+
+
+def test_a_job_that_arrives_during_a_deploy_waits_for_it(service):
+    """A deploy holds the job lock, so work queued meanwhile waits on it and
+    runs once a failed update lets go, rather than being dropped or run
+    alongside a git reset."""
     ran = []
     service._do_erase = lambda slot: ran.append(slot)
-    # Let the boot sweep finish and the worker settle into its blocking get(),
-    # which is the state that exposes the hole rather than hiding it.
     conftest.drain(service)
-    time.sleep(0.6)
 
-    service.updater.admitted.set()
+    assert service._job_lock.acquire(blocking=False)    # stand in for a deploy
     service._work.put(("erase", 42))
     time.sleep(1.0)
-    assert ran == [], "a job started while an update was admitted"
+    assert ran == [], "a job started while a deploy held the lock"
 
-    service.updater.admitted.clear()           # the update bailed; work resumes
+    service._job_lock.release()                 # the update bailed; work resumes
     deadline = time.monotonic() + 5
     while not ran and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert ran == [42], "the held job was dropped instead of resumed"
-
-
-def test_the_worker_claims_in_flight_before_its_final_gate_check(service,
-                                                                monkeypatch):
-    """update() and the worker must not both admit.
-
-    update() sets _updating and then reads _in_flight; the worker reads
-    _updating and then sets _in_flight. Ordered that way the two can pass each
-    other: the job is dequeued and held, so the queue reads empty, busy is
-    still None and _in_flight is not yet set — and a redeploy is admitted
-    alongside a write that is about to start.
-
-    The window is a couple of bytecodes wide, so racing it would be flaky in
-    both directions. Assert the ordering instead: the claim has to land before
-    the last gate check, which is what makes whichever side runs second see
-    what the first did.
-    """
-    conftest.drain(service)
-    events = []
-
-    real_gate_is_set = service.updater.admitted.is_set
-    real_claim = service._in_flight.set
-
-    monkeypatch.setattr(service.updater.admitted, "is_set",
-                        lambda: (events.append("gate"), real_gate_is_set())[1])
-    monkeypatch.setattr(service._in_flight, "set",
-                        lambda: (events.append("claim"), real_claim())[1])
-
-    ran = threading.Event()
-    captured = []
-
-    def record_then_signal(self, slot):
-        # Snapshot inside the job, not after the wait: once the worker is
-        # released it loops round and checks the gate again, which would
-        # rewrite the tail to ["gate", "gate"] before the assertion reads it.
-        captured.append(events[-2:])
-        ran.set()
-
-    monkeypatch.setattr(core.Service, "_do_erase", record_then_signal)
-    service._work.put(("erase", 5))
-    assert ran.wait(timeout=5), "the worker never ran the job"
-
-    # The claim must be the second-to-last step, with a gate check after it.
-    assert captured[0] == ["claim", "gate"], (
-        f"the gate was checked before the claim: {captured[0]}")
+    assert ran == [42], "the waiting job was dropped instead of run"
 
 
 def test_update_no_git_checkout(service, tmp_path, monkeypatch):
@@ -402,13 +369,12 @@ def test_a_successful_deploy_clears_the_remote_revision(service, repos,
         "reported up to date while still naming a commit to update to"
 
 
-def test_the_gate_is_cleared_before_the_lock_is_released(service, monkeypatch):
-    """A failed update must not reopen the gate under a second one.
-
-    Releasing the lock first lets another update acquire it and set the gate;
-    this one's clear would then reopen it with that deploy already running,
-    leaving the worker free to touch the pedal during a git reset and a
-    restart. The window is a couple of bytecodes, so assert the ordering
+def test_a_failed_update_gives_the_job_lock_back_before_its_own(service,
+                                                                monkeypatch):
+    """Releasing the update lock first lets a second update acquire it and
+    take the job lock; this one's release would then free it under that
+    deploy, leaving the worker free to touch the pedal during a git reset and
+    a restart. The window is a couple of bytecodes, so assert the ordering
     rather than racing it.
     """
     order = []
@@ -418,24 +384,23 @@ def test_the_gate_is_cleared_before_the_lock_is_released(service, monkeypatch):
         """A stand-in for the lock itself — _thread.lock's methods are
         read-only, so the attribute is replaced rather than patched."""
 
-        def __init__(self):
+        def __init__(self, name):
             self._real = threading.Lock()
+            self._name = name
 
         def acquire(self, blocking=True):
             return self._real.acquire(blocking)
 
         def release(self):
-            order.append("release")
+            order.append(self._name)
             self._real.release()
 
-    monkeypatch.setattr(upd, "_lock", RecordingLock())
-    real_clear = upd.admitted.clear
-    monkeypatch.setattr(upd.admitted, "clear",
-                        lambda: (order.append("clear"), real_clear())[1])
+    monkeypatch.setattr(upd, "_lock", RecordingLock("update"))
+    monkeypatch.setattr(upd, "_job_lock", RecordingLock("job"))
 
     service.busy = "Writing something"          # forces the refusal path
     ok, _ = service.update()
 
     assert ok is False
-    assert order == ["clear", "release"], (
-        f"the gate outlived the lock: {order}")
+    assert order == ["job", "update"], (
+        f"the job lock outlived the update lock: {order}")

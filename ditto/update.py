@@ -6,9 +6,9 @@ ffmpeg — and it owns its own state entirely. Its only contact with the service
 is two questions it has to ask before it may run, which arrive as callables:
 is it busy, and has it been told to stop.
 
-The one piece of shared machinery is `admitted`. The worker checks it before
-starting any job, so a redeploy never overlaps pedal work; see Service._worker
-for the ordering that makes the two mutually exclusive.
+The one piece of shared machinery is the worker's job lock. The worker holds it
+around every job and update() takes it for the deploy, so a redeploy never
+overlaps pedal work and neither side has to reason about the other's timing.
 """
 
 from __future__ import annotations
@@ -28,9 +28,12 @@ log = logging.getLogger(__name__)
 
 
 class Updater:
-    def __init__(self, is_busy: Callable[[], bool],
+    def __init__(self, job_lock: threading.Lock,
+                 is_busy: Callable[[], bool],
                  stopped: Callable[[], bool],
                  on_change: Callable[[], None]) -> None:
+        # The worker's, held around every job. See update().
+        self._job_lock = job_lock
         self._is_busy = is_busy
         self._stopped = stopped
         self._changed = on_change
@@ -38,10 +41,6 @@ class Updater:
         # Serializes self-update so two clicks can't redeploy on top of each
         # other. Held only for the brief git-pull + redeploy, never a job.
         self._lock = threading.Lock()
-        # Set while an update is admitted: gates the worker from starting any
-        # new job, so a redeploy/restart never overlaps pedal work. Stays set
-        # once a restart is pending; cleared if the update bails out.
-        self.admitted = threading.Event()
 
         # Deployed code identity + whether the remote has something newer.
         # `revision`/`_current_sha` are the SHA actually deployed (recorded at
@@ -57,35 +56,31 @@ class Updater:
 
         Returns (ok, message): on success `message` is the deployed short commit,
         otherwise a human-readable reason. Serialized so two clicks can't redeploy
-        on top of each other. Admission is atomic with job execution: `_updating`
-        is set first, which gates the worker from starting any job, and the update
-        is only admitted when nothing is in flight and the queue is empty — so a
-        restart never runs concurrently with (or interrupts) a write. On success
-        `_updating` stays set (a restart is pending); it's cleared on every path
-        that does not initiate one. The restart itself is done by a separate
-        oneshot unit (RESTART_SERVICE), so it isn't killing this process.
+        on top of each other. The deploy runs holding the worker's job lock, so
+        it cannot start while a job runs and no job can start while it runs; a
+        job dequeued meanwhile waits on the lock. On success the job lock is
+        kept, because a restart is pending and the worker must not touch the
+        pedal under it; every path that does not initiate one releases it. The
+        restart itself is done by a separate oneshot unit (RESTART_SERVICE), so
+        it isn't killing this process.
         """
         if not self._lock.acquire(blocking=False):
             return (False, "an update is already running")
-        # Gate the worker before inspecting idleness, so a job can't slip from
-        # the queue into flight between the check and the deploy.
-        self.admitted.set()
-        result = (False, "update failed")
         try:
-            if self._is_busy():
-                result = (False, "busy — try again when the current work finishes")
-            else:
-                result = self._do_update()
+            busy = (False, "busy — try again when the current work finishes")
+            if not self._job_lock.acquire(blocking=False):
+                return busy
+            result = (False, "update failed")
+            try:
+                # Queued work would start the moment the lock is released, and
+                # the restart would drop it. Refuse rather than deploy over it.
+                result = busy if self._is_busy() else self._do_update()
+            finally:
+                if not result[0]:
+                    self._job_lock.release()   # no restart pending; resume work
+            return result
         finally:
-            # Clear before releasing, never after. Releasing first lets a second
-            # update take the lock and set the gate, and this clear would then
-            # reopen it with that deploy already running — the worker free to
-            # touch the pedal during a git reset and a restart, which is the one
-            # thing the gate exists to prevent.
-            if not result[0]:
-                self.admitted.clear()      # no restart pending — resume work
             self._lock.release()
-        return result
 
     def _do_update(self) -> "tuple[bool, str]":
         src, app = config.SRC, config.APP
