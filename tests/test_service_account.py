@@ -18,7 +18,7 @@ and arguments in the rule would otherwise be unchecked in both directions.
 
 Read out of the source with ast rather than run, for the reason
 conftest._block_sudo exists: the command under test restarts the machine
-running the suite. Same approach as test_frontend.py, which parses app.js to
+running the suite. Same approach as test_frontend.py, which parses app.mjs to
 pin what it reaches for.
 """
 

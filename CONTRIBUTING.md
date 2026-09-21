@@ -95,9 +95,8 @@ settle here, and reformatting 21 files would rewrite the hand-wrapped comments
 that carry the design record. `.git-blame-ignore-revs` only helps GitHub blame;
 `git log -L`, `git log -S` and most editors ignore it.
 
-`node --check` parses `app.js` in the suite. There is no JS linter and no
-`package.json`: the front end's real invariants are layer discipline and the
-asset allowlist, and those are tests, not lint rules.
+`node --check` parses `app.mjs` in the suite. There is no JS linter and no
+`package.json`.
 
 ## Docs
 
@@ -146,15 +145,13 @@ example above: that is teaching the rule, not recording the past.
 
 ## Front end
 
-No build step. The device deploys by copying `ditto/`, so what is in `static/`
-is what runs. The page is viewed in a browser on a phone or laptop, which has
-its own internet access, so a script or stylesheet may come from a CDN.
+The page is Preact with htm templates and Pico.css, all loaded from a CDN by
+pinned version, so there is no build step: the device deploys by copying
+`ditto/`, and what is in `static/` is what runs. `app.mjs` holds the
+components, `app.css` a few overrides on Pico's defaults.
 
 Adding a file to `static/` is two edits: the file, and `ASSETS` in `web.py`. A
 test catches the second if you forget.
-
-Colours come from the token layer in `app.css`. A component naming a raw ramp
-step fails the suite.
 
 ## Hardware
 

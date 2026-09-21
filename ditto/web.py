@@ -49,10 +49,8 @@ MAX_NAME_LEN = 200
 
 # Servable assets, by exact name, so a stray file in static/ is never reachable.
 ASSETS = {
-    "app.js": "text/javascript",
+    "app.mjs": "text/javascript",
     "app.css": "text/css",
-    "archivo-latin.woff2": "font/woff2",
-    "archivo-OFL.txt": "text/plain",
 }
 
 # Each open stream holds a server thread. Retiring streams lets EventSource
@@ -150,7 +148,7 @@ def create_app(service: Service) -> Flask:
 
     def _no_cache(resp):
         """Revalidate every time, so an update never leaves a browser running
-        yesterday's app.js against today's API. An unchanged asset is a 304."""
+        yesterday's app.mjs against today's API. An unchanged asset is a 304."""
         resp.headers["Cache-Control"] = "no-cache"
         return resp
 

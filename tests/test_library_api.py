@@ -275,7 +275,7 @@ def test_library_mutations_are_covered_by_the_cross_site_guard(client, method,
 
 # --- front-end assets -------------------------------------------------------
 
-@pytest.mark.parametrize("name,kind", [("app.js", "javascript"),
+@pytest.mark.parametrize("name,kind", [("app.mjs", "javascript"),
                                        ("app.css", "css")])
 def test_assets_are_served(client, name, kind):
     rv = client.get(f"/static/{name}")
@@ -286,8 +286,8 @@ def test_assets_are_served(client, name, kind):
 
 def test_assets_must_revalidate(client):
     """An over-the-air update must never leave a browser running yesterday's
-    app.js against today's API."""
-    rv = client.get("/static/app.js")
+    app.mjs against today's API."""
+    rv = client.get("/static/app.mjs")
     assert rv.headers["Cache-Control"] == "no-cache"
     assert rv.headers.get("ETag")
 
@@ -295,8 +295,8 @@ def test_assets_must_revalidate(client):
 def test_an_unchanged_asset_costs_a_304(client):
     """"Revalidate", not "don't cache" — the body only crosses the wire when it
     has actually changed."""
-    etag = client.get("/static/app.js").headers["ETag"]
-    rv = client.get("/static/app.js", headers={"If-None-Match": etag})
+    etag = client.get("/static/app.mjs").headers["ETag"]
+    rv = client.get("/static/app.mjs", headers={"If-None-Match": etag})
     assert rv.status_code == 304
 
 
@@ -304,7 +304,7 @@ def test_the_page_itself_must_revalidate(client):
     assert client.get("/").headers["Cache-Control"] == "no-cache"
 
 
-@pytest.mark.parametrize("name", ["index.html", "db.py", "app.js.map"])
+@pytest.mark.parametrize("name", ["index.html", "db.py", "app.mjs.map"])
 def test_only_the_named_assets_are_reachable(client, name):
     """An allowlist, not a directory route: a stray file in static/ is never
     served from here.
@@ -328,16 +328,6 @@ def test_the_allowlisted_assets_really_are_served(client, name):
     rv = client.get(f"/static/{name}")
     assert rv.status_code == 200, f"{name} is allowlisted but not on disk"
     assert rv.headers["Content-Type"].startswith(web.ASSETS[name])
-
-
-def test_the_webfont_survives_being_checked_out(client):
-    """.gitattributes says `* text=auto`, which would LF-normalise a woff2 and
-    corrupt it. Nothing about that failure is visible server-side — the file is
-    still served, still the right length-ish, and no browser will parse it. The
-    magic number is the cheapest thing that actually notices.
-    """
-    body = client.get("/static/archivo-latin.woff2").data
-    assert body[:4] == b"wOF2", "the font is not woff2 — check .gitattributes"
 
 
 def test_audition_is_a_safe_method_and_needs_no_guard(client):

@@ -2,86 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#f3f2f2" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#1a1918" media="(prefers-color-scheme: dark)">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>DittoBackTracker</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.0.6/css/pico.min.css">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-
-<header>
-  <h1>DittoBackTracker</h1>
-  <span id="pedal"><span class="dot"></span>—</span>
-  <span id="ver">—</span>
-  <button class="link" id="update" type="button" hidden>Check for update</button>
-</header>
-
-<div class="cols">
-
-  <div class="pane pane-l">
-
-    <section id="capcard">
-      <div class="row"><h2>On the pedal</h2><span id="captxt">—</span></div>
-      <div class="capbar"><div class="capfill" id="capfill" style="width:0"></div></div>
-      <div class="row">
-        <span id="capnote"></span>
-        <button class="link" id="print" type="button" title="Print the backing-track list" hidden>Print list</button>
-      </div>
-    </section>
-
-    <section id="dropsec">
-      <label id="drop" for="file">
-        <span id="drophead">Drop audio here, or choose files</span>
-        <span id="dropnote">
-          Files take the next free slots. A leading number picks the slot:
-          “07 Blue Bossa.mp3”
-        </span>
-      </label>
-      <input type="file" id="file" multiple accept="audio/*" class="vh">
-    </section>
-
-    <section id="listcard">
-      <div id="list"></div>
-    </section>
-
-  </div>
-
-  <div class="pane pane-r">
-
-    <section id="libcard">
-      <div class="listhead">
-        <h2>Library</h2>
-        <span class="libhead-acts">
-          <button class="libbtn" id="addsel" type="button" title="Put the ticked tracks on the pedal, from the next free slot" hidden>Add to pedal</button>
-          <label class="libbtn" for="libfile" id="libadd" title="Add tracks without putting them on the pedal">Add files</label>
-        </span>
-      </div>
-      <input type="file" id="libfile" multiple accept="audio/*" class="vh">
-      <div class="libtools" id="libtools" hidden>
-        <input type="search" id="libq" placeholder="Search" aria-label="Search the library"
-               autocomplete="off" autocorrect="off" spellcheck="false">
-        <select id="libsort" aria-label="Sort the library">
-          <option value="name">Name</option>
-          <option value="added">Newest first</option>
-          <option value="duration">Length</option>
-        </select>
-      </div>
-      <div id="librows"></div>
-      <div class="row" id="libfoot"></div>
-    </section>
-
-  </div>
-
-</div>
-
-<div class="bar">
-  <div class="prog hide" id="progwrap" role="progressbar" aria-label="Conversion progress"
-       aria-valuemin="0" aria-valuemax="100"><div class="progfill" id="progfill"></div></div>
-  <div class="msg" id="msg" role="status" aria-live="polite">Connecting…</div>
-  <span id="undoslot"></span>
-</div>
-
-<script src="/static/app.js"></script>
+<div id="app"></div>
+<script type="module" src="/static/app.mjs"></script>
 </body>
 </html>

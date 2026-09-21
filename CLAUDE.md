@@ -21,7 +21,7 @@ Useful commands:
 ```bash
 .venv/bin/python -m pytest -q          # the suite, ~40s
 .venv/bin/ruff check ditto/ tests/     # what CI gates on
-node --check ditto/static/app.js       # also runs as a test
+node --check ditto/static/app.mjs      # also runs as a test
 shellcheck install.sh
 ```
 
