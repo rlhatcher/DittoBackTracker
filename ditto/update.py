@@ -1,4 +1,4 @@
-"""Over-the-air self-update: pull the tracked branch, redeploy, restart.
+"""Over-the-air self-update: pull the tracked branch, redeploy, exit.
 
 Kept apart from core.py because it shares nothing with the rest of the service
 beyond the worker's job lock, which it holds for the deploy so a restart never
@@ -8,7 +8,9 @@ overlaps pedal work.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -43,8 +45,8 @@ class Updater:
         """Pull the tracked branch, redeploy, and restart out of process.
 
         Returns (ok, message): the deployed short commit, or the reason. Runs
-        holding the job lock; on success the lock is kept, because a restart is
-        pending and the worker must not touch the pedal under it.
+        holding the job lock; on success the lock is kept, because the process
+        is about to exit and the worker must not start on the pedal under it.
         """
         if not self._lock.acquire(blocking=False):
             return (False, "an update is already running")
@@ -108,17 +110,16 @@ class Updater:
         self.revision = target[:7] if target else None
         self.available = False
         self.remote_revision = None
-        try:
-            # Absolute path, to match the sudoers rule exactly.
-            subprocess.run(
-                ["sudo", "-n", "/usr/bin/systemctl", "start", "--no-block",
-                 config.RESTART_SERVICE],
-                check=True, capture_output=True, text=True, timeout=15)
-        except (subprocess.SubprocessError, OSError) as e:
-            return (False, f"deployed {self.revision or 'update'} but the "
-                           f"restart was refused — is OTA set up? "
-                           f"{self._proc_err(e)}")
+        self._request_restart()
         return (True, self.revision or "updated")
+
+    @staticmethod
+    def _request_restart() -> None:
+        """Exit once the response is out, and let systemd start us again on
+        the new code (Restart=always in the unit). SIGTERM to ourselves, so it
+        is the path a systemctl stop takes: drain, unmount, exit. Nothing here
+        needs root, which is why the service account has none."""
+        threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGTERM)).start()
 
     def _reset_checkout(self, sha: Optional[str]) -> None:
         """Put the checkout back on the commit that is still running. HEAD is

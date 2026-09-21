@@ -7,7 +7,6 @@ or is writable on CI.
 """
 
 import os
-import subprocess
 import tempfile
 
 import pytest
@@ -22,34 +21,22 @@ os.environ["DITTO_MOUNT"] = os.path.join(_tmp, "mount")
 # Imported after the environment is set, or config resolves the real paths.
 from ditto import config, core, db, media, update, web  # noqa: E402
 
-# Every sudo the app runs, recorded instead of executed. Read it in a test if
-# you want to assert one was attempted.
-sudo_attempts: list[list[str]] = []
+# Every restart the app asks for, counted instead of sent. Read it in a test
+# to assert one was requested.
+restart_requests: list[bool] = []
 
 
-def _block_sudo() -> None:
-    """Stop the suite from restarting the machine it is running on.
+def _block_restart() -> None:
+    """Stop the suite from killing itself.
 
-    A successful update ends with `sudo -n systemctl start ditto-restart`, and
-    install.sh grants the ditto user a NOPASSWD rule for exactly that command.
-    So a test that reaches it restarts a provisioned device part-way through the
-    run. On a laptop the sudo call simply fails, which is why this would stay
-    invisible.
+    A successful update ends by sending this process SIGTERM, so systemd starts
+    it again on the new code. Here this process is pytest.
 
     Replaced at import rather than per-test, because the reach can happen during
-    fixture teardown, after a test's own monkeypatches have been undone. A test
-    that wants the real call recorded can still stub subprocess.run itself.
+    fixture teardown, after a test's own monkeypatches have been undone.
     """
-    real = update.subprocess.run
-
-    def guard(*args, **kwargs):
-        cmd = args[0] if args else kwargs.get("args", [])
-        if isinstance(cmd, (list, tuple)) and cmd and str(cmd[0]) == "sudo":
-            sudo_attempts.append([str(c) for c in cmd])
-            return subprocess.CompletedProcess(list(cmd), 0, "", "")
-        return real(*args, **kwargs)
-
-    update.subprocess.run = guard
+    update.Updater._request_restart = staticmethod(
+        lambda: restart_requests.append(True))
 
 
 def _block_ffmpeg() -> None:
@@ -91,7 +78,7 @@ def _block_ffmpeg() -> None:
     media.subprocess.Popen = guard_popen
 
 
-_block_sudo()
+_block_restart()
 _block_ffmpeg()
 
 

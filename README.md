@@ -68,9 +68,9 @@ cd /var/lib/ditto/src
 ```
 
 `install.sh` installs the packages, creates the `ditto-svc` service account and
-gives it `/var/lib/ditto`, writes the pedal's fstab entry and the restart
-sudoers rule, deploys the code and starts the unit. It is idempotent, and re-running
-it is how changes to any of those are applied.
+gives it `/var/lib/ditto`, writes the pedal's fstab entry, deploys the code
+and starts the unit. It is idempotent, and re-running it is how changes to any
+of those are applied.
 
 It must run before the read-only overlay is enabled, because it writes to
 `/etc`.
@@ -101,7 +101,7 @@ available**; pressing it deploys the new code and restarts. The mechanism is in
 [docs/api.md](docs/api.md#post-apiupdate).
 
 An update replaces the `ditto/` package and nothing else. A release that also
-changes the systemd unit, the sudoers rule, the fstab entry or the ownership
+changes the systemd unit, the fstab entry or the ownership
 of `/var/lib/ditto` needs `install.sh` run again with the overlay off
 ([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)).
 
@@ -160,15 +160,15 @@ device already tracks from its own remote, so it fetches your code rather than
 an attacker's, but a LAN user can still force a restart. Built for a home LAN.
 Do not put it on a network you do not control.
 
-The service runs as `ditto-svc`, a system account with no shell that is not in
-the `sudo` group. `etc/99-ditto-restart` is scoped to one command and is the
-whole of what the service may do as root: start the restart helper. A LAN user
+The service runs as `ditto-svc`, a system account with no shell, not in the
+`sudo` group and with no sudoers rule: nothing it does needs root, the
+self-update included, which exits and lets systemd start it again. A LAN user
 reaching `POST /api/update` can restart the device onto code from the tracked
 branch. They cannot get root.
 
 That holds only because the account is not the login account. The Raspberry Pi
 Imager user is in the `sudo` group, so a service running as it would put root
-behind the same reach and reduce the rules in `etc/` to a statement of intent.
+behind the same reach.
 
 ---
 

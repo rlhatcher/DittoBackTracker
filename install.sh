@@ -15,8 +15,7 @@ SRC=/var/lib/ditto/src        # must match config.SRC — the checkout OTA pulls
 # The account the service runs as, and deliberately not the login account. The
 # Raspberry Pi Imager user is in the sudo group, and POST /api/update executes
 # code from the tracked branch, so a service running as it hands root to anyone
-# on the LAN. This account gets no shell and no sudo group: the one rule in
-# etc/ is the whole of what it may do as root.
+# on the LAN. This account gets no shell and no sudo.
 SVC=ditto-svc
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -97,13 +96,6 @@ sudo -u "$SVC" mkdir -p "$APP"
 sudo -u "$SVC" rm -rf "$APP/ditto"
 sudo -u "$SVC" cp -r "$HERE/ditto" "$APP/"
 
-# Check the rule parses before installing it. A malformed file in
-# /etc/sudoers.d breaks sudo for every user on a device whose root filesystem
-# is about to go read-only, and the app's only privileged call goes through it.
-echo "==> allow unprivileged restart (for over-the-air self-update)"
-sudo visudo -c -f "$HERE/etc/99-ditto-restart"
-sudo install -m 0440 "$HERE/etc/99-ditto-restart" /etc/sudoers.d/99-ditto-restart
-
 echo "==> pedal mount entry"
 # Owner-only masks: the pedal's files shouldn't be world-readable/writable.
 FSTAB_LINE="LABEL=DITTOPLUS  /media/ditto  vfat  noauto,user,rw,flush,fmask=077,dmask=077,uid=$SVC,gid=$SVC  0  0"
@@ -118,8 +110,6 @@ sudo mkdir -p /media/ditto
 
 echo "==> service"
 sudo cp "$HERE/systemd/ditto-web.service" /etc/systemd/system/
-# OTA restart helper: started on demand after a self-update, not enabled at boot.
-sudo cp "$HERE/systemd/ditto-restart.service" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl reset-failed ditto-web 2>/dev/null || true
 # enable (create the boot symlink) then restart, so re-installing over a running

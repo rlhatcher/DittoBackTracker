@@ -59,8 +59,9 @@ Some things are stubbed on purpose and enforced rather than trusted:
 
 - ffmpeg and ffprobe never run in the suite. `conftest._block_ffmpeg` raises if
   one is reached.
-- `sudo` never runs. `conftest._block_sudo` records the argv instead, so a test
-  cannot restart the machine it is running on.
+- The restart a successful update asks for never happens.
+  `conftest._block_restart` counts it instead, so a test cannot kill the
+  pytest process.
 
 ## Comments
 

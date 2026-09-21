@@ -311,23 +311,23 @@ limitation; the file still converts and writes normally.
 ## POST /api/update
 
 Over-the-air self-update. Pulls the tracked branch, redeploys the app, and
-restarts the service. The restart runs out of process (a separate oneshot unit),
-so the browser's `EventSource` drops and reconnects; watch `revision` in
-the snapshot change to confirm the new code is running.
+exits; systemd starts it again on the new code (`Restart=always` in the unit).
+The browser's `EventSource` drops and reconnects; watch `revision` in the
+snapshot change to confirm the new code is running.
 
 ```json
 { "ok": true, "revision": "a1b2c3d" }
 ```
 
 Refused while the device is busy so a restart never interrupts a write. The
-device must have OTA set up (a git checkout at `/var/lib/ditto/src` and the
-restart sudoers rule). See the README.
+device must have OTA set up (a git checkout at `/var/lib/ditto/src`). See the
+README.
 
 | Status | Meaning |
 |---|---|
 | `200` | Update deployed; the service is restarting |
 | `409` | Busy (work is in flight or queued, or an update is already running). Retry when idle |
-| `502` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
+| `502` | The update failed: no network, no git checkout, or new code that failed to load (rolled back). Body is `{"error": "..."}` |
 
 ---
 
@@ -391,7 +391,7 @@ curl -N http://dittobacktracker.local/api/events
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
 | `413` | `POST /api/upload`, `POST /api/library` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |
-| `502` | `POST /api/update` | The update failed: no network, no git checkout, new code that failed to load (rolled back), or the restart was not permitted. Body is `{"error": "..."}` |
+| `502` | `POST /api/update` | The update failed: no network, no git checkout, or new code that failed to load (rolled back). Body is `{"error": "..."}` |
 | `503` | `GET /api/loops/<n>` | No pedal mounted. Body is `{"error": "..."}` |
 
 `POST /api/upload` and `POST /api/library` are the exceptions to the rule. Both

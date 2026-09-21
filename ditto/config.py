@@ -27,9 +27,6 @@ DB_PATH = DATA / "state.db"
 SRC = DATA / "src"
 APP = DATA / "app"
 UPDATE_BRANCH = os.environ.get("DITTO_UPDATE_BRANCH", "main")
-# A oneshot unit restarts ditto-web from outside the web process, through the
-# NOPASSWD rule in etc/99-ditto-restart.
-RESTART_SERVICE = "ditto-restart.service"
 
 # The label goes into a device path and a mount call, so it is held to what a
 # FAT label can be.

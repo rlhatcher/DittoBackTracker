@@ -331,9 +331,8 @@ def test_a_successful_deploy_clears_the_remote_revision(service, repos,
     """remote_revision is only meaningful while an update is available.
 
     Leaving it set after a deploy makes the device report "up to date" next to
-    a commit it supposedly needs. Observable whenever the process keeps running
-    past the deploy — which is exactly what happens when the restart is
-    refused, the case driven here.
+    a commit it supposedly needs. Observable here because conftest swallows the
+    restart request, so this process keeps running past the deploy.
     """
     src, work = repos["src"], repos["work"]
     monkeypatch.setattr(config, "SRC", src)
@@ -351,20 +350,15 @@ def test_a_successful_deploy_clears_the_remote_revision(service, repos,
     assert service.updater.available is True
     assert service.updater.remote_revision is not None
 
-    # Deploy for real, but refuse the restart so this process survives to be
-    # asked. The smoke check is stubbed: the fixture repo is not a real package.
+    # Deploy for real. The smoke check is stubbed: the fixture repo is not a
+    # real package.
     monkeypatch.setattr(update.Updater, "_import_check",
                         staticmethod(lambda app: None))
-    real = update.subprocess.run
-
-    def no_systemd(cmd, **kw):
-        if "systemctl" in " ".join(map(str, cmd)):
-            raise OSError("restart refused")
-        return real(cmd, **kw)
-
-    monkeypatch.setattr(update.subprocess, "run", no_systemd)
-    ok, msg = service.update()
-    assert ok is False and "restart was refused" in msg
+    before = len(conftest.restart_requests)
+    ok, _ = service.update()
+    assert ok is True
+    assert conftest.restart_requests[before:] == [True], \
+        "a successful deploy did not ask for a restart"
 
     snap = service.snapshot()
     assert snap["update_available"] is False

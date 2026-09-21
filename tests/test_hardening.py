@@ -266,18 +266,16 @@ def test_shutdown_is_idempotent(service, monkeypatch):
     service.shutdown(timeout=5.0)      # must not raise or hang
 
 
-def test_the_suite_cannot_restart_the_machine():
-    """A successful update ends in `sudo -n systemctl start ditto-restart`, and
-    install.sh grants exactly that. conftest replaces the call; this is what
-    says so out loud, so the seam cannot be removed silently."""
-    before = len(conftest.sudo_attempts)
-    argv = ["sudo", "-n", "/usr/bin/systemctl", "start", "--no-block",
-            config.RESTART_SERVICE]
+def test_the_suite_cannot_kill_itself():
+    """A successful update ends by sending this process SIGTERM. conftest
+    replaces that; this is what says so out loud, so the seam cannot be
+    removed silently."""
+    before = len(conftest.restart_requests)
 
-    result = update.subprocess.run(argv, check=False)
+    update.Updater._request_restart()
 
-    assert result.returncode == 0, "the guard should stand in for the real call"
-    assert conftest.sudo_attempts[before:] == [argv]
+    assert conftest.restart_requests[before:] == [True], \
+        "the guard should stand in for the real signal"
 
 
 def test_the_pedal_is_not_reported_mounted_until_its_loops_are_known(service,
