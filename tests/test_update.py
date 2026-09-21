@@ -298,6 +298,34 @@ def test_update_rolls_back_when_new_code_wont_load(service, repos, tmp_path,
     assert service.updater.revision == before, "a failed deploy moved the revision"
 
 
+def test_a_rolled_back_deploy_leaves_the_checkout_on_the_running_code(
+        service, repos, tmp_path, monkeypatch):
+    """The next process reads HEAD as the deployed commit. Left on the
+    revision that failed to load, it would report up to date while the old
+    package runs, until something newer landed upstream."""
+    src, work = repos["src"], repos["work"]
+    app = tmp_path / "app"
+    (app / "ditto").mkdir(parents=True)
+    (app / "ditto" / "__init__.py").write_text("# OLD deployed\n")
+    monkeypatch.setattr(config, "SRC", src)
+    monkeypatch.setattr(config, "APP", app)
+    monkeypatch.setattr(config, "UPDATE_BRANCH", "main")
+    running = _head(src)
+    service.updater._current_sha = running
+
+    # The fixture's ditto/ has no web module, so the deploy rolls back.
+    (work / "ditto" / "__init__.py").write_text("# newer\n")
+    _git("-C", str(work), "commit", "-am", "newer")
+    _git("-C", str(work), "push", "origin", "main")
+    ok, msg = service.update()
+    assert ok is False and "rolled back" in msg
+
+    assert _head(src) == running, "the checkout stayed on the failed commit"
+    fresh = update.Updater(service._job_lock, lambda: False, lambda: False,
+                           lambda: None)
+    assert fresh.check_now()["update_available"] is True
+
+
 def test_a_successful_deploy_clears_the_remote_revision(service, repos,
                                                         tmp_path, monkeypatch):
     """remote_revision is only meaningful while an update is available.

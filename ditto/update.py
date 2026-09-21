@@ -33,7 +33,7 @@ class Updater:
         # checkout at once.
         self._lock = threading.Lock()
         # The deployed commit is the checkout's HEAD: a deploy resets the
-        # checkout and copies from it in one step.
+        # checkout and copies from it, and a failed deploy resets it back.
         self._current_sha = self._rev_parse(config.SRC, "HEAD")
         self.revision = self._current_sha[:7] if self._current_sha else None
         self.available = False
@@ -72,7 +72,7 @@ class Updater:
                       f"origin/{config.UPDATE_BRANCH}")
         except (subprocess.SubprocessError, OSError) as e:
             return (False, f"git update failed: {self._proc_err(e)}")
-        target = self._rev_parse(src, "HEAD")
+        previous, target = self._current_sha, self._rev_parse(src, "HEAD")
 
         # Build the new tree beside the live one and swap by rename, keeping
         # the old one as ditto.bak for the rollback below.
@@ -90,6 +90,7 @@ class Updater:
             if not live.exists() and bak.exists():
                 bak.rename(live)
             shutil.rmtree(new, ignore_errors=True)
+            self._reset_checkout(previous)
             return (False, f"deploy failed: {e}")
 
         # Import the deployed package before committing to a restart, which
@@ -97,6 +98,7 @@ class Updater:
         check = self._import_check(app)
         if check is not None:
             err = self._rollback(live, bak)
+            self._reset_checkout(previous)
             if err:
                 return (False, f"new code failed to load and rollback failed "
                                f"({err}); manual recovery may be needed")
@@ -117,6 +119,18 @@ class Updater:
                            f"restart was refused — is OTA set up? "
                            f"{self._proc_err(e)}")
         return (True, self.revision or "updated")
+
+    def _reset_checkout(self, sha: Optional[str]) -> None:
+        """Put the checkout back on the commit that is still running. HEAD is
+        what the next process reads as the deployed revision, so left on the
+        failed one it would report up to date while the old package runs."""
+        if not sha:
+            return
+        try:
+            self._git(config.SRC, "reset", "--hard", "--quiet", sha)
+        except (subprocess.SubprocessError, OSError) as e:
+            log.warning("checkout left on the failed revision: %s",
+                        self._proc_err(e))
 
     @staticmethod
     def _rollback(live: Path, bak: Path) -> Optional[str]:
