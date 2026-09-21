@@ -68,8 +68,8 @@ cd /var/lib/ditto/src
 ```
 
 `install.sh` installs the packages, creates the `ditto-svc` service account and
-gives it `/var/lib/ditto`, writes the pedal's fstab entry and both sudoers
-rules, deploys the code and starts the unit. It is idempotent, and re-running
+gives it `/var/lib/ditto`, writes the pedal's fstab entry and the restart
+sudoers rule, deploys the code and starts the unit. It is idempotent, and re-running
 it is how changes to any of those are applied.
 
 It must run before the read-only overlay is enabled, because it writes to
@@ -101,7 +101,7 @@ available**; pressing it deploys the new code and restarts. The mechanism is in
 [docs/api.md](docs/api.md#post-apiupdate).
 
 An update replaces the `ditto/` package and nothing else. A release that also
-changes the systemd unit, the sudoers rules, the fstab entry or the ownership
+changes the systemd unit, the sudoers rule, the fstab entry or the ownership
 of `/var/lib/ditto` needs `install.sh` run again with the overlay off
 ([docs/provisioning.md](docs/provisioning.md#changing-anything-afterwards)).
 
