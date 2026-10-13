@@ -40,6 +40,9 @@ class Service:
         # Slots holding a LOOP.WAV, scanned once per mount: 99 stats over USB
         # per snapshot would be visibly slow.
         self._loops: "frozenset[int]" = frozenset()
+        # Slots holding a BT.WAV, from the same mount scan. A file with no row
+        # in the database still plays, so the page has to list it.
+        self._tracks: "frozenset[int]" = frozenset()
 
         self._stop = threading.Event()
         # Held by the worker around every job and by the updater for a deploy,
@@ -135,6 +138,7 @@ class Service:
             "slots": slots,
             "slot_count": config.SLOTS,
             "loops": sorted(self._loops),
+            "tracks": sorted(self._tracks),
             "capacity": self.capacity(slots),
             "version": __version__,
             "revision": self.updater.revision,
@@ -455,6 +459,7 @@ class Service:
             if self.pedal_state != "absent":
                 self.pedal_state = "absent"
                 self._loops = frozenset()   # only knowable mounted
+                self._tracks = frozenset()
                 self._emit()
             return
         try:
@@ -463,6 +468,7 @@ class Service:
             if self.pedal_state != "error":
                 self.pedal_state = "error"
                 self._loops = frozenset()
+                self._tracks = frozenset()
                 self.last_error = str(e)
                 self._emit()
             return
@@ -478,6 +484,7 @@ class Service:
 
     def _requeue_unsynced(self) -> None:
         on_pedal = pedal.occupied_slots()
+        self._tracks = frozenset(on_pedal)
         for row in db.all_slots():
             slot, h = row["slot"], row["source_hash"]
             if row["state"] == "error":
@@ -594,6 +601,7 @@ class Service:
             self._emit()
             return
         os.sync()       # before the database says it is on the pedal
+        self._tracks = self._tracks | {slot}
         db.mark_synced(slot, row["source_hash"])
         self._emit()
 
@@ -607,6 +615,7 @@ class Service:
         try:
             pedal.remove_track(slot)
             os.sync()
+            self._tracks = self._tracks - {slot}
         except OSError as e:
             self.last_error = f"could not clear slot {slot}: {e}"
         self._emit()

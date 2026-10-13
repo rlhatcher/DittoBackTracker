@@ -36,6 +36,7 @@ Full snapshot. The same object is pushed over `/api/events`.
   },
   "slot_count": 99,
   "loops": [ 5, 12 ],
+  "tracks": [ 5 ],
   "slots": [
     {
       "slot": 5,
@@ -59,6 +60,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `progress` | 0.0–1.0 during conversion, else `null` |
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
 | `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
+| `tracks` | Slot numbers that hold a `BT.WAV`. Detected on mount and kept current as tracks are written and cleared; only meaningful while `pedal` is `mounted`. A slot can appear here with no matching entry in `slots`, a backing track the database does not know about, which `DELETE /api/slots/<n>` removes like any other |
 | `version` | Package version string |
 | `revision` | Short git commit of the deployed code, or `null` off a git checkout. Watch it change to confirm an update took |
 | `update_available` | `true` when the tracked remote branch's commit differs from the deployed commit (the device converges to the remote, so a rebased or force-pushed branch counts too, not only a strictly newer one). Checked once at startup and again on demand via `POST /api/update/check`. There is no background polling. `false` before the first check and when up to date. A check that can't run (offline, no checkout) leaves the last known value unchanged |
