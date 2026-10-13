@@ -482,11 +482,11 @@ class Service:
         if self.pedal_state != "mounted":
             pedal.clean_temp_files()
             self._scan_loops()
-            # Published after the scan: upload_auto and _plan take "mounted"
-            # as their licence to trust _loops.
+            self._requeue_unsynced()        # also scans _tracks
+            # Published after both scans: upload_auto and _plan take "mounted"
+            # as their licence to trust _loops and _tracks.
             self.last_error = None
             self.pedal_state = "mounted"
-            self._requeue_unsynced()
             self._emit()
 
     def _requeue_unsynced(self) -> None:

@@ -304,6 +304,30 @@ def test_the_pedal_is_not_reported_mounted_until_its_loops_are_known(service,
     assert service.mounted and 7 in service._loops
 
 
+def test_the_pedal_is_not_reported_mounted_until_its_tracks_are_known(
+        service, monkeypatch):
+    """kept_slots() reads _tracks once the pedal reads as mounted, so an
+    upload in between would miss an unknown BT.WAV and write over it."""
+    seen = {}
+
+    def occupied_slots():
+        seen.setdefault("mounted", service.mounted)
+        return {7: 1}
+
+    monkeypatch.setattr(pedal, "present", lambda: True)
+    monkeypatch.setattr(pedal, "mount", lambda: None)
+    monkeypatch.setattr(pedal, "clean_temp_files", lambda: None)
+    monkeypatch.setattr(pedal, "occupied_slots", occupied_slots)
+    monkeypatch.setattr(pedal, "has_loop", lambda n: False)
+
+    service.pedal_state = "absent"
+    service._tick_pedal()
+
+    assert seen["mounted"] is False, \
+        "mounted was already true while the track scan was still running"
+    assert service.mounted and service.kept_slots() == {7}
+
+
 # --- what the page lists is what is on the pedal ------------------------------
 
 @pytest.fixture
