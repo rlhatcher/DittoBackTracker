@@ -363,3 +363,18 @@ def test_a_written_track_is_listed(plugged_in):
 
     assert pedal.track_path(3).read_bytes() == b"wav"
     assert plugged_in.snapshot()["tracks"] == [3]
+
+
+def test_a_fill_does_not_write_over_a_track_the_database_does_not_know(
+        plugged_in):
+    """An unknown BT.WAV has no source here to rewrite it from, so a fill
+    skips it the way it skips a loop."""
+    pedal.track_path(1).write_bytes(b"track")
+    _plug(plugged_in)
+    h = "b" * 20
+    db.library_add(h, "Track", 1.0)
+
+    plan = plugged_in._plan([h])
+
+    assert plan["assigned"][0]["slot"] == 2, \
+        "the fill took the slot holding an unknown backing track"

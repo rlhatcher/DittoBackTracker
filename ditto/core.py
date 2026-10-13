@@ -224,14 +224,15 @@ class Service:
                 return None
             tracks.append(row)
         loops = self._loops
-        taken = {s["slot"] for s in db.all_slots()} | loops
+        keep = self.kept_slots()
+        taken = {s["slot"] for s in db.all_slots()} | keep
         start = next((n for n in range(1, config.SLOTS + 1) if n not in taken),
                      config.SLOTS + 1)
         assigned: List[Dict] = []
         unplaced: List[Dict] = []
         n = start
         for t in tracks:
-            while n <= config.SLOTS and n in loops:
+            while n <= config.SLOTS and n in keep:
                 n += 1
             if n > config.SLOTS:
                 unplaced.append({"source_hash": t["source_hash"],
@@ -285,6 +286,12 @@ class Service:
 
     def has_loop(self, slot: int) -> bool:
         return slot in self._loops
+
+    def kept_slots(self) -> "frozenset[int]":
+        """Slots automatic placement must not write to: a loop, or a BT.WAV
+        no row knows. Neither has a copy here to put back."""
+        rows = {s["slot"] for s in db.all_slots()}
+        return self._loops | (self._tracks - rows)
 
     def loop_path(self, slot: int) -> Path:
         return pedal.loop_path(slot)

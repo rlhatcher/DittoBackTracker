@@ -248,7 +248,7 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
         <h2>On the pedal</h2>
         <p>${cap && cap.total_seconds
           ? `${cap.used_label} of ${cap.total_label} · ${mmss(cap.total_seconds - cap.used_seconds)} free`
-            + ` · ${slots.length} of ${s.slot_count} slots`
+            + ` · ${nums.length} of ${s.slot_count} slots`
           : "Connect the pedal to see capacity"}</p>
       </hgroup>
       ${cap && cap.total_seconds

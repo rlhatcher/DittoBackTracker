@@ -178,13 +178,13 @@ def create_app(service: Service) -> Flask:
                   for f, name in files if not _is_audio(name)]
         audio = [(f, name) for f, name in files if _is_audio(name)]
 
-        # A slot holding a loop counts as taken, so a backing track never lands
-        # under a recording by accident. Numbered files claim their slots
-        # before any unnumbered one is placed.
+        # A slot holding a loop, or a backing track the database does not
+        # know, counts as taken, so an upload never lands on something it
+        # cannot put back. Numbered files claim their slots before any
+        # unnumbered one is placed.
         reserved = {s["slot"] for s in db.all_slots()}
         if service.mounted:
-            reserved |= {n for n in range(1, config.SLOTS + 1)
-                         if service.has_loop(n)}
+            reserved |= service.kept_slots()
         slots = []
         for _, name in audio:
             n = slot_from_name(name)
