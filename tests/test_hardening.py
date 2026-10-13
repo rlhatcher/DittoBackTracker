@@ -13,7 +13,7 @@ import threading
 import conftest
 import pytest
 
-from ditto import config, core, db, pedal, update
+from ditto import config, core, db, media, pedal, update
 
 # --- durable ingest ---------------------------------------------------------
 
@@ -302,3 +302,103 @@ def test_the_pedal_is_not_reported_mounted_until_its_loops_are_known(service,
     assert seen["mounted"] is False, \
         "mounted was already true while the loop cache was still being built"
     assert service.mounted and 7 in service._loops
+
+
+def test_the_pedal_is_not_reported_mounted_until_its_tracks_are_known(
+        service, monkeypatch):
+    """kept_slots() reads _tracks once the pedal reads as mounted, so an
+    upload in between would miss an unknown BT.WAV and write over it."""
+    seen = {}
+
+    def occupied_slots():
+        seen.setdefault("mounted", service.mounted)
+        return {7: 1}
+
+    monkeypatch.setattr(pedal, "present", lambda: True)
+    monkeypatch.setattr(pedal, "mount", lambda: None)
+    monkeypatch.setattr(pedal, "clean_temp_files", lambda: None)
+    monkeypatch.setattr(pedal, "occupied_slots", occupied_slots)
+    monkeypatch.setattr(pedal, "has_loop", lambda n: False)
+
+    service.pedal_state = "absent"
+    service._tick_pedal()
+
+    assert seen["mounted"] is False, \
+        "mounted was already true while the track scan was still running"
+    assert service.mounted and service.kept_slots() == {7}
+
+
+# --- what the page lists is what is on the pedal ------------------------------
+
+@pytest.fixture
+def plugged_in(service, tmp_path, monkeypatch):
+    """The service with a pedal mounted on a plain directory."""
+    monkeypatch.setattr(config, "MOUNT", tmp_path / "pedal")
+    monkeypatch.setattr(pedal, "present", lambda: True)
+    monkeypatch.setattr(pedal, "mount", lambda: None)
+    monkeypatch.setattr(pedal, "mounted", lambda: True)
+    monkeypatch.setattr(pedal, "unmount", lambda: None)
+    for n in range(1, config.SLOTS + 1):
+        pedal.slot_dir(n).mkdir(parents=True)
+    return service
+
+
+def _plug(service):
+    service.pedal_state = "absent"
+    service._tick_pedal()
+    conftest.drain(service)
+
+
+def test_removing_a_loop_leaves_a_track_the_database_does_not_know(plugged_in):
+    """A BT.WAV with no row still plays. The page used to list only rows and
+    loops, so removing the loop beside it made the slot vanish and look as if
+    the track had gone too."""
+    pedal.track_path(7).write_bytes(b"track")
+    pedal.loop_path(7).write_bytes(b"loop")
+    _plug(plugged_in)
+    assert plugged_in.snapshot()["tracks"] == [7]
+
+    assert plugged_in.delete_loop(7) is True
+
+    assert plugged_in.snapshot()["tracks"] == [7], \
+        "the backing track dropped out of the snapshot with its loop"
+    assert pedal.track_path(7).read_bytes() == b"track"
+
+
+def test_clearing_a_track_the_database_does_not_know_removes_it(plugged_in):
+    pedal.track_path(7).write_bytes(b"track")
+    _plug(plugged_in)
+
+    plugged_in.clear(7)
+    conftest.drain(plugged_in)
+
+    assert not pedal.track_path(7).exists()
+    assert plugged_in.snapshot()["tracks"] == []
+
+
+def test_a_written_track_is_listed(plugged_in):
+    _plug(plugged_in)
+    h = "a" * 20
+    db.library_add(h, "Track", 1.0)
+    db.put_slot(3, h, state="staged")
+    media.staged_path(h).write_bytes(b"wav")
+
+    plugged_in._do_write(3)
+
+    assert pedal.track_path(3).read_bytes() == b"wav"
+    assert plugged_in.snapshot()["tracks"] == [3]
+
+
+def test_a_fill_does_not_write_over_a_track_the_database_does_not_know(
+        plugged_in):
+    """An unknown BT.WAV has no source here to rewrite it from, so a fill
+    skips it the way it skips a loop."""
+    pedal.track_path(1).write_bytes(b"track")
+    _plug(plugged_in)
+    h = "b" * 20
+    db.library_add(h, "Track", 1.0)
+
+    plan = plugged_in._plan([h])
+
+    assert plan["assigned"][0]["slot"] == 2, \
+        "the fill took the slot holding an unknown backing track"

@@ -207,8 +207,9 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
   const s = state;
   const slots = s ? s.slots : [];
   const loops = new Set(s ? s.loops : []);
+  const tracks = new Set(s ? s.tracks : []);      // a BT.WAV, whether or not a row knows it
   const byslot = Object.fromEntries(slots.map(r => [r.slot, r]));
-  const nums = [...new Set([...slots.map(r => r.slot), ...loops])].sort((a, b) => a - b);
+  const nums = [...new Set([...slots.map(r => r.slot), ...tracks, ...loops])].sort((a, b) => a - b);
   const cap = s && s.capacity;
 
   // The device decides the slot: a leading number in the name, else the next
@@ -218,10 +219,14 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
     reportUpload(await postFiles("/api/upload", files), true, say, fail);
     loadLibrary();
   };
-  const clear = async row => {
-    const r = await api(`/api/slots/${row.slot}`, {method: "DELETE"});
-    if (!r.ok){ fail(reason(r, "Could not clear the slot")); return; }
-    offerUndo({slot: row.slot, hash: row.source_hash, name: row.display_name});
+  // A row's track is still in the library, so it gets an undo. A BT.WAV no
+  // row knows has no source to come back from, so it gets a confirmation.
+  const clear = async (n, row) => {
+    if (!row && !confirm(`Delete the backing track in slot ${pad2(n)} from the pedal? `
+                         + `It isn't in the library, so you can't undo this.`)) return;
+    const r = await api(`/api/slots/${n}`, {method: "DELETE"});
+    if (!r.ok){ fail(reason(r, "Could not remove the track")); return; }
+    if (row) offerUndo({slot: n, hash: row.source_hash, name: row.display_name});
   };
   const move = async (from, to) => {
     const r = await api(`/api/slots/${from}/move`, jsonBody({to}));
@@ -230,7 +235,7 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
   const removeLoop = async n => {
     // A loop is a live take with no source, so this is the one delete with a
     // confirmation and no undo.
-    if (!confirm(`Delete the loop in slot ${pad2(n)} from the pedal? You can't undo this.`)) return;
+    if (!confirm(`Delete the recorded loop in slot ${pad2(n)}? The backing track stays. You can't undo this.`)) return;
     const r = await api(`/api/loops/${n}`, {method: "DELETE"});
     if (!r.ok) fail(reason(r, "Could not remove the loop"));
   };
@@ -243,7 +248,7 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
         <h2>On the pedal</h2>
         <p>${cap && cap.total_seconds
           ? `${cap.used_label} of ${cap.total_label} · ${mmss(cap.total_seconds - cap.used_seconds)} free`
-            + ` · ${slots.length} of ${s.slot_count} slots`
+            + ` · ${nums.length} of ${s.slot_count} slots`
           : "Connect the pedal to see capacity"}</p>
       </hgroup>
       ${cap && cap.total_seconds
@@ -255,35 +260,40 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
         <small>Files take the next free slots. A leading number picks the slot: “07 Blue Bossa.mp3”</small>
       </label>
       ${nums.length
-        ? html`<table><tbody>${nums.map(n => html`
-            <${SlotRow} key=${n} n=${n} row=${byslot[n]} loop=${loops.has(n)} max=${s.slot_count}
+        ? html`<div class="overflow-auto"><table><tbody>${nums.map(n => html`
+            <${SlotRow} key=${n} n=${n} row=${byslot[n]} track=${tracks.has(n)} loop=${loops.has(n)} max=${s.slot_count}
               move=${move} clear=${clear} removeLoop=${removeLoop} warn=${warn}/>`)}
-          </tbody></table>`
+          </tbody></table></div>`
         : html`<p><small>Nothing loaded yet.</small></p>`}
       ${slots.length
         ? html`<button class="secondary outline" onClick=${() => printList(slots)}>Print list</button>` : null}
     </section>`;
 }
 
-function SlotRow({n, row, loop, max, move, clear, removeLoop, warn}){
+/* One row per slot, naming both files the pedal can hold there, each with
+   its own remove button, so removing one never looks like removing both. */
+function SlotRow({n, row, track, loop, max, move, clear, removeLoop, warn}){
   const pad = pad2(n);
-  const st = row ? (LABEL[row.state] || row.state) : "loop";
+  const name = row ? row.display_name : track ? html`<em>Unknown backing track</em>` : null;
   return [html`
     <tr key="row">
       <td>${row
         ? html`<${SlotField} slot=${n} name=${row.display_name} max=${max} move=${move} warn=${warn}/>`
         : html`<code>${pad}</code>`}</td>
-      <td class="name">${row ? row.display_name : html`<em>Recorded loop, kept</em>`}</td>
+      <td class="name">${name
+        ? html`${name}${loop && html` <small>+ loop</small>`}`
+        : html`<em>Recorded loop</em>`}</td>
       <td><small>${row ? mmss(row.duration) : ""}</small></td>
-      <td><small class=${row && (row.state === "converting" || row.state === "error") ? "warn" : ""}>${st}</small></td>
-      <td>${row && html`<button class="secondary outline" aria-label=${"Clear slot " + pad}
-        onClick=${() => clear(row)}>×</button>`}</td>
+      <td><small class=${row && (row.state === "converting" || row.state === "error") ? "warn" : ""}>${row ? (LABEL[row.state] || row.state) : ""}</small></td>
+      <td class="actions">
+        ${(row || track) && html`<button class="secondary outline"
+          onClick=${() => clear(n, row)}>Remove track</button>`}
+        ${loop && html`<button class="secondary outline"
+          onClick=${() => removeLoop(n)}>Remove loop</button>`}
+        ${loop && html`<a href=${"/api/loops/" + n} download=${"loop-" + pad + ".wav"} role="button"
+          class="secondary outline" aria-label=${"Download the loop in slot " + pad}>⤓</a>`}
+      </td>
     </tr>`,
-  loop && html`<tr key="loop" class="sub"><td></td><td colspan="4">
-      <a href=${"/api/loops/" + n} download=${"loop-" + pad + ".wav"} role="button"
-        class="secondary outline">Download loop</a>${" "}
-      <button class="secondary outline" onClick=${() => removeLoop(n)}>Remove loop</button>
-    </td></tr>`,
   row && row.state === "error" && row.error
     && html`<tr key="err" class="sub"><td></td><td colspan="4"><small class="err">${row.error}</small></td></tr>`,
   ];

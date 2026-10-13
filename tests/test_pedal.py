@@ -156,6 +156,7 @@ def test_a_write_is_flushed_before_the_database_records_it(tmp_path,
     svc.busy = svc.progress = None
     svc._subs, svc._subs_lock = [], threading.Lock()
     svc._work = queue.Queue()
+    svc._tracks = frozenset()
     monkeypatch.setattr(core.Service, "_emit", lambda self: None)
 
     staged = tmp_path / "x.wav"

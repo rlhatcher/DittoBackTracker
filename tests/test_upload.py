@@ -33,14 +33,15 @@ class FakeService:
     def __init__(self):
         self.uploaded = []          # (slot, display_name)
         self.loops = set()
+        self.untracked = set()      # slots holding a BT.WAV no row knows
         # The route reads the service's view of the pedal rather than calling
         # pedal.mounted() itself, so this is what decides whether the loop
         # cache below is consulted at all.
         self.mounted = False
         self.reject = set()         # names to refuse as unreadable audio
 
-    def has_loop(self, n):
-        return n in self.loops
+    def kept_slots(self):
+        return frozenset(self.loops | self.untracked)
 
     def upload(self, slot, tmp_path, display_name):
         tmp_path.unlink(missing_ok=True)
@@ -157,6 +158,17 @@ def test_a_recorded_loop_reserves_its_slot_when_mounted(app_service, client):
     """We don't put a backing track under someone's performance by accident."""
     app_service.mounted = True
     app_service.loops.add(1)
+
+    post(client, [f("x.mp3")])
+
+    assert app_service.uploaded[0][0] == 2
+
+
+def test_an_unknown_backing_track_reserves_its_slot_when_mounted(app_service,
+                                                                 client):
+    """It has no source here, so an upload over it could not be undone."""
+    app_service.mounted = True
+    app_service.untracked.add(1)
 
     post(client, [f("x.mp3")])
 
