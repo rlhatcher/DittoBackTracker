@@ -35,3 +35,5 @@ footer { position: fixed; left: 0; right: 0; bottom: 0; background: var(--pico-b
 footer .notice { flex: 1; }
 footer progress { position: absolute; top: -3px; left: 0; right: 0; height: 3px; margin: 0; }
 tr.empty td { color: var(--pico-muted-color); }
+td button.handle, td button.here { font-family: var(--pico-font-family-monospace); }
+td button.handle { cursor: grab; }

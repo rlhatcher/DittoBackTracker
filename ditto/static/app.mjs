@@ -112,6 +112,15 @@ function App(){
   const {notice, say, warn, fail} = useNotice();
   const [undo, setUndo] = useState(null);         // {slot, hash, name}
   const undoTimer = useRef(null);
+  // A track picked up to be put in a slot: {kind: "slot" | "hash", value, name}.
+  const [pick, setPick] = useState(null);
+
+  useEffect(() => {
+    if (!pick) return;
+    const esc = e => { if (e.key === "Escape") setPick(null); };
+    document.addEventListener("keydown", esc);
+    return () => document.removeEventListener("keydown", esc);
+  }, [pick]);
 
   useEffect(() => {   // a file dropped outside the zone must not navigate away
     const stop = e => e.preventDefault();
@@ -137,6 +146,7 @@ function App(){
 
   const mounted = state && state.pedal === "mounted";
   const status = notice ? notice.text
+    : pick ? `Choose a slot for “${pick.name}”`
     : link === "down" ? "Reconnecting…"
     : !state ? "Connecting…"
     : state.busy ? state.busy
@@ -155,14 +165,16 @@ function App(){
     </header>
     <main class="container grid">
       <${Pedal} state=${state} say=${say} warn=${warn} fail=${fail}
-        offerUndo=${offerUndo} loadLibrary=${loadLibrary}/>
+        offerUndo=${offerUndo} clearUndo=${() => setUndo(null)} loadLibrary=${loadLibrary}
+        pick=${pick} setPick=${setPick}/>
       <${Library} state=${state} library=${library} loadLibrary=${loadLibrary}
-        say=${say} warn=${warn} fail=${fail} clearUndo=${() => setUndo(null)}/>
+        say=${say} warn=${warn} fail=${fail} clearUndo=${() => setUndo(null)} setPick=${setPick}/>
     </main>
     <footer>
       ${state && state.busy && state.progress != null
         && html`<progress value=${state.progress} max="1" aria-label="Conversion progress"/>`}
       <span class=${"notice " + kind} role="status" aria-live="polite">${status}</span>
+      ${pick && html`<button class="secondary outline" onClick=${() => setPick(null)}>Cancel</button>`}
       ${undo && html`<button class="secondary outline" onClick=${doUndo}>Undo “${undo.name}”</button>`}
     </footer>`;
 }
@@ -214,9 +226,10 @@ function UpdateButton({state, say, fail}){
 
 /* ---------------------------------------------------------- on the pedal */
 
-function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
+function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick, setPick}){
   const [over, setOver] = useState(false);
   const [all, setAll] = useState(false);
+  const section = useRef(null);
   const s = state;
   const slots = s ? s.slots : [];
   const loops = new Set(s ? s.loops : []);
@@ -258,8 +271,55 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
     if (!r.ok) fail(reason(r, "Could not remove the loop"));
   };
 
+  // What putting `item` in slot n would do: a short verb for the button and
+  // the whole of it for the label. null when it would change nothing. A move
+  // onto a track the database knows swaps the two.
+  const hint = (n, item) => {
+    const row = byslot[n];
+    if (item.kind === "slot" ? item.value === n : row && row.source_hash === item.value) return null;
+    if (item.kind === "slot" && row) return {verb: "Swap", text: `Swap with “${row.display_name}”`};
+    if (row) return {verb: "Replace", text: `Replace “${row.display_name}”`};
+    if (tracks.has(n)) return {verb: "Replace", text: "Replace the unknown backing track"};
+    return {verb: item.kind === "slot" ? "Move here" : "Put here", text: `Put “${item.name}” here`};
+  };
+  // A track the database doesn't know has no undo, so replacing it asks
+  // first, as removing it does. A replaced library track gets an undo.
+  const placeOn = async (n, item) => {
+    const row = byslot[n];
+    if (!hint(n, item)) return;
+    if (!row && tracks.has(n) && !confirm(`Replace the backing track in slot ${pad2(n)}? `
+                                          + `It isn't in the library, so you can't undo this.`)) return;
+    if (item.kind === "slot"){ await move(item.value, n); return; }
+    const r = await api(`/api/slots/${n}/assign`, jsonBody({hash: item.value}));
+    if (!r.ok){ fail(reason(r, "Could not put that on the pedal")); return; }
+    say(`“${item.name}” → slot ${pad2(n)}`);
+    if (row) offerUndo({slot: n, hash: row.source_hash, name: row.display_name});
+    else clearUndo();               // its slot may have just been refilled
+  };
+  // The first cell: the slot number, as a handle when there is a track to
+  // pick up, or while one is picked up, a button that puts it here.
+  const lead = n => {
+    const h = pick && hint(n, pick);
+    if (h) return html`<button class=${h.verb === "Replace" ? "here replace secondary outline" : "here"} aria-label=${`Slot ${pad2(n)}: ${h.text}`} title=${h.text}
+      onClick=${() => { setPick(null); placeOn(n, pick); }}>${pad2(n)} ${h.verb}</button>`;
+    const row = byslot[n];
+    if (row && !pick) return html`<button class="handle secondary outline"
+      aria-label=${`Move “${row.display_name}” to another slot`} title="Move to another slot"
+      onClick=${() => setPick({kind: "slot", value: n, name: row.display_name})}>⠿ ${pad2(n)}</button>`;
+    return html`<code>${pad2(n)}</code>`;
+  };
+
+  useEffect(() => {   // a picked-up slot that empties under us has nothing left to move
+    if (pick && pick.kind === "slot" && !byslot[pick.value]) setPick(null);
+  }, [pick, state]);
+  useEffect(() => {   // keyboard users go straight to the first slot that replaces nothing
+    const b = pick && (section.current.querySelector("button.here:not(.replace)")
+                       || section.current.querySelector("button.here"));
+    if (b) b.focus();
+  }, [pick]);
+
   return html`
-    <section class=${over ? "over" : ""} ...${fileDrop(setOver, send)}>
+    <section ref=${section} class=${over ? "over" : ""} ...${fileDrop(setOver, send)}>
       <div class="bar">
         <h2>On the pedal</h2>
         <label role="button" class="secondary outline">Choose files
@@ -277,9 +337,9 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
         A leading number picks the slot: “07 Blue Bossa.mp3”</small></p>
       ${nums.length
         ? html`<div class="overflow-auto"><table><tbody>${nums.map(n => used.has(n)
-            ? html`<${SlotRow} key=${n} n=${n} row=${byslot[n]} track=${tracks.has(n)} loop=${loops.has(n)} max=${s.slot_count}
-                move=${move} clear=${clear} removeLoop=${removeLoop} warn=${warn}/>`
-            : html`<tr key=${n} class="empty"><td><code>${pad2(n)}</code></td><td class="name" colspan="4">empty</td></tr>`)}
+            ? html`<${SlotRow} key=${n} n=${n} row=${byslot[n]} track=${tracks.has(n)} loop=${loops.has(n)}
+                lead=${lead(n)} clear=${clear} removeLoop=${removeLoop}/>`
+            : html`<tr key=${n} class="empty"><td>${lead(n)}</td><td class="name" colspan="4">empty</td></tr>`)}
           </tbody></table></div>`
         : null}
       ${max > 12 && (all || shown < max)
@@ -292,14 +352,12 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
 
 /* One row per slot, naming both files the pedal can hold there, each with
    its own remove button, so removing one never looks like removing both. */
-function SlotRow({n, row, track, loop, max, move, clear, removeLoop, warn}){
+function SlotRow({n, row, track, loop, lead, clear, removeLoop}){
   const pad = pad2(n);
   const name = row ? row.display_name : track ? html`<em>Unknown backing track</em>` : null;
   return [html`
     <tr key="row">
-      <td>${row
-        ? html`<${SlotField} slot=${n} name=${row.display_name} max=${max} move=${move} warn=${warn}/>`
-        : html`<code>${pad}</code>`}</td>
+      <td>${lead}</td>
       <td class="name">${name
         ? html`${name}${loop && html` <small>+ loop</small>`}`
         : html`<em>Recorded loop</em>`}</td>
@@ -317,30 +375,6 @@ function SlotRow({n, row, track, loop, max, move, clear, removeLoop, warn}){
   row && row.state === "error" && row.error
     && html`<tr key="err" class="sub"><td></td><td colspan="4"><small class="err">${row.error}</small></td></tr>`,
   ];
-}
-
-/* The slot number as a field: type another and Enter or blur moves the track
-   there, swapping if the slot is taken; Escape reverts. */
-function SlotField({slot, name, max, move, warn}){
-  const [draft, setDraft] = useState(null);       // text being typed, or null
-  const commit = async () => {
-    if (draft === null) return;
-    const raw = draft.trim();
-    setDraft(null);
-    const n = /^\d{1,2}$/.test(raw) ? parseInt(raw, 10) : NaN;
-    if (!(n >= 1 && n <= max)){ warn(`Slot numbers run 01–${pad2(max)}`); return; }
-    if (n !== slot) await move(slot, n);
-  };
-  return html`<input type="text" inputmode="numeric" maxlength="2"
-    value=${draft ?? pad2(slot)}
-    title=${`Type another slot number to move “${name}” there`}
-    aria-label=${"Slot number for " + name}
-    onInput=${e => setDraft(e.currentTarget.value)}
-    onBlur=${commit}
-    onKeyDown=${e => {
-      if (e.key === "Enter") e.currentTarget.blur();
-      else if (e.key === "Escape") setDraft(null);
-    }}/>`;
 }
 
 // A bare table of slot number and name, in slot order, with the page margin
@@ -363,7 +397,7 @@ const escapeHtml = s => s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", "
 
 /* --------------------------------------------------------------- library */
 
-function Library({state, library, loadLibrary, say, warn, fail, clearUndo}){
+function Library({state, library, loadLibrary, say, warn, fail, clearUndo, setPick}){
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("name");
   const [checked, setChecked] = useState(() => new Set());
@@ -468,14 +502,15 @@ function Library({state, library, loadLibrary, say, warn, fail, clearUndo}){
             <${LibRow} key=${r.source_hash} r=${r} slots=${bySlot[r.source_hash] || []}
               checked=${checked.has(r.source_hash)} toggle=${toggle}
               playing=${playing === r.source_hash} audition=${audition}
-              rename=${rename} forget=${forget} add=${() => addToPedal([r])}/>`)}
+              rename=${rename} forget=${forget} add=${() => addToPedal([r])}
+              place=${() => setPick({kind: "hash", value: r.source_hash, name: r.name})}/>`)}
           </tbody></table>`}
       <small>${library.length} track${library.length === 1 ? "" : "s"} · ${mmss(total)}
         ${needle ? ` · ${rows.length} match${rows.length === 1 ? "" : "es"}` : ""}</small>
     </section>`;
 }
 
-function LibRow({r, slots, checked, toggle, playing, audition, rename, forget, add}){
+function LibRow({r, slots, checked, toggle, playing, audition, rename, forget, add, place}){
   const [draft, setDraft] = useState(null);       // the name being typed, or null
   const escaped = useRef(false);
   const commit = () => {
@@ -503,7 +538,10 @@ function LibRow({r, slots, checked, toggle, playing, audition, rename, forget, a
     <td><small>${mmss(r.duration)}</small></td>
     <td>${slots.length
       ? html`<code title=${"On the pedal in slot " + slots.map(pad2).join(", ")}>${pad2(Math.min(...slots))}${slots.length > 1 ? ` +${slots.length - 1}` : ""}</code>`
-      : html`<button class="secondary outline" onClick=${add}>Add to pedal</button>`}</td>
+      : html`<button class="secondary outline" aria-label=${"Add " + r.name + " to the pedal"}
+          title="Put on the pedal in the next free slot" onClick=${add}>Add</button>`}</td>
+    <td><button class="secondary outline" aria-label=${"Choose a slot for " + r.name}
+      title="Choose a slot" onClick=${place}>Place…</button></td>
     <td><button class="secondary outline" aria-label=${(playing ? "Stop " : "Listen to ") + r.name}
       onClick=${() => audition(r)}>${playing ? "■" : "▶"}</button></td>
     <td><button class="secondary outline" aria-label=${"Delete " + r.name}
