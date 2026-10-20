@@ -10,10 +10,13 @@ slot directories. DittoBackTracker is a Raspberry Pi Zero 2 W that stays
 connected to the pedal, serves a web page on the local network, converts
 whatever is uploaded and writes it to the pedal.
 
-- Upload from any browser. Files take the next free slots; a leading number
-  in the filename ("07 Blue Bossa.mp3") picks the slot.
-- A list of what the pedal holds, with what is converting or written. Change
-  a slot number to move a track, or to swap two.
+- Upload from any browser. Drop files on a slot to put them there, or
+  anywhere else on the list to take the next free slots, where a leading
+  number in the filename ("07 Blue Bossa.mp3") picks the slot.
+- A list of every slot, with what is converting or written. Drag a track
+  onto another slot to move it, or onto a track to swap the two. Drag from
+  the library onto a slot to put a track there. Clicking a slot number or
+  "Place…" does the same without dragging.
 - A library on the device. Uploads persist, so changing what the pedal carries
   is a click rather than another upload.
 - Search, sort, rename and in-browser preview.

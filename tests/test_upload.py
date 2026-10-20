@@ -72,7 +72,7 @@ def test_no_files_is_a_400(client):
 def test_a_leading_number_picks_its_own_slot(app_service, client):
     """The headline "07 Blue Bossa.mp3" behaviour."""
     post(client, [f("07 Blue Bossa.mp3")])
-    assert app_service.uploaded == [(7, "07 Blue Bossa")]
+    assert app_service.uploaded == [(7, "Blue Bossa")]
 
 
 @pytest.mark.parametrize("name,slot", [
@@ -85,6 +85,26 @@ def test_a_leading_number_picks_its_own_slot(app_service, client):
 def test_numbers_the_rule_accepts(app_service, client, name, slot):
     post(client, [f(name)])
     assert app_service.uploaded[0][0] == slot
+
+
+@pytest.mark.parametrize("name,track", [
+    ("07 Blue Bossa.mp3", "Blue Bossa"),
+    ("007 Blue Bossa.mp3", "Blue Bossa"),
+    ("07. Blue Bossa.mp3", "Blue Bossa"),
+    ("07 - Blue Bossa.mp3", "Blue Bossa"),
+    ("07) Blue Bossa.mp3", "Blue Bossa"),
+    ("2-5-1 Practice.mp3", "2-5-1 Practice"),   # no space after the number
+    ("1999.mp3", "1999"),
+    ("07.mp3", "07"),                            # nothing would be left
+    ("Track 07.mp3", "Track 07"),                # picks slot 7, but isn't leading
+    ("00 Intro.mp3", "00 Intro"),                # not a slot, so part of the name
+    ("07 -Song.mp3", "07 -Song"),                # not "-Song"
+])
+def test_the_slot_number_is_not_part_of_the_name(app_service, client, name, track):
+    """A drop on a slot puts a track wherever it lands, so "07" in its name
+    would only be wrong there."""
+    post(client, [f(name)])
+    assert app_service.uploaded[0][1] == track
 
 
 @pytest.mark.parametrize("name", [
@@ -104,14 +124,14 @@ def test_a_taken_number_falls_back_rather_than_overwriting(app_service, client):
 
     post(client, [f("07 Blue Bossa.mp3")])
 
-    assert app_service.uploaded == [(1, "07 Blue Bossa")], \
+    assert app_service.uploaded == [(1, "Blue Bossa")], \
         "a numbered file overwrote an occupied slot"
 
 
 def test_a_later_numbered_file_claims_its_slot_before_an_earlier_unnumbered_one(
         app_service, client):
     post(client, [f("a.mp3"), f("01 b.mp3")])
-    assert app_service.uploaded == [(2, "a"), (1, "01 b")]
+    assert app_service.uploaded == [(2, "a"), (1, "b")]
 
 
 # --- a rejected file must not consume a slot -------------------------------
@@ -121,7 +141,7 @@ def test_a_numbered_non_audio_file_does_not_reserve_its_slot(app_service,
     """"07 notes.txt" must not block slot 7 for the rest of the batch."""
     post(client, [f("07 notes.txt"), f("07 Blue Bossa.mp3")])
 
-    assert app_service.uploaded == [(7, "07 Blue Bossa")]
+    assert app_service.uploaded == [(7, "Blue Bossa")]
 
 
 def test_a_non_audio_file_is_reported_per_file(app_service, client):

@@ -10,11 +10,13 @@ h2 { font-size: 1.1rem; margin-bottom: .25rem; }
 header button, .bar button, .bar [role=button], td button, td [role=button], footer button {
   width: auto; margin: 0; padding: .25rem .7rem; font-size: .85rem;
 }
-.drop { display: block; border: 2px dashed var(--pico-muted-border-color); padding: 1.25rem;
-        text-align: center; cursor: pointer; margin-bottom: 1rem; }
-.drop.over { border-color: var(--pico-primary); }
-.drop input { display: none; }
-.drop small { display: block; color: var(--pico-muted-color); }
+/* Side by side, each column scrolls on its own, so the slots stay in view
+   while the library is scrolled. */
+@media (min-width: 768px) {
+  main.grid > section { max-height: calc(100vh - 8rem); overflow-y: auto; padding-right: .25rem; }
+}
+section.over { outline: 2px dashed var(--pico-primary); outline-offset: -2px; }
+p.sub { margin-bottom: .5rem; color: var(--pico-muted-color); }
 td { white-space: nowrap; padding: .4rem .5rem; }
 td input[type=text] { width: 3.5rem; height: auto; margin: 0; padding: .2rem; text-align: center;
                       font-family: var(--pico-font-family-monospace); }
@@ -32,3 +34,9 @@ footer { position: fixed; left: 0; right: 0; bottom: 0; background: var(--pico-b
          display: flex; gap: 1rem; align-items: center; }
 footer .notice { flex: 1; }
 footer progress { position: absolute; top: -3px; left: 0; right: 0; height: 3px; margin: 0; }
+tr.empty td { color: var(--pico-muted-color); }
+td button.handle, td button.here { font-family: var(--pico-font-family-monospace); }
+td button.handle { cursor: grab; }
+tr.target td { background: var(--pico-primary-focus); }
+span.here.mark { display: inline-block; padding: .25rem .7rem; font-size: .85rem; font-family: var(--pico-font-family-monospace);
+                 background: var(--pico-primary-background); color: var(--pico-primary-inverse); border-radius: var(--pico-border-radius); }
