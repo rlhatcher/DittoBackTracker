@@ -63,6 +63,20 @@ const fileDrop = (setOver, take) => {
   };
 };
 
+/* What is being dragged from this page, in the same shape as a pick: a slot
+   or a library track. dragover can't read the drag's data, only its types,
+   and the drop hint has to name the track before the drop. */
+let dragging = null;
+const dragFrom = item => ({
+  draggable: true,
+  onDragStart: e => {
+    dragging = item;
+    e.dataTransfer.setData("text/plain", item.name);   // Firefox drags nothing without data
+    e.dataTransfer.effectAllowed = "move";
+  },
+  onDragEnd: () => { dragging = null; },
+});
+
 /* ------------------------------------------------------------------ hooks */
 
 /* The device's state, live over the event stream, and the library, fetched. */
@@ -229,6 +243,7 @@ function UpdateButton({state, say, fail}){
 function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick, setPick}){
   const [over, setOver] = useState(false);
   const [all, setAll] = useState(false);
+  const [target, setTarget] = useState(null);     // {n, verb, text}: the slot being dragged over
   const section = useRef(null);
   const s = state;
   const slots = s ? s.slots : [];
@@ -280,25 +295,71 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     if (item.kind === "slot" && row) return {verb: "Swap", text: `Swap with “${row.display_name}”`};
     if (row) return {verb: "Replace", text: `Replace “${row.display_name}”`};
     if (tracks.has(n)) return {verb: "Replace", text: "Replace the unknown backing track"};
-    return {verb: item.kind === "slot" ? "Move here" : "Put here", text: `Put “${item.name}” here`};
+    const what = item.kind !== "files" ? `“${item.name}”` : item.count === 1 ? "the file" : `${item.count} files`;
+    return {verb: item.kind === "slot" ? "Move here" : "Put here", text: `Put ${what} here`};
   };
   // A track the database doesn't know has no undo, so replacing it asks
   // first, as removing it does. A replaced library track gets an undo.
+  // Files go to the library, then the first to slot n and the rest to the
+  // empty slots after it; the slot dropped on beats a number in the name.
   const placeOn = async (n, item) => {
     const row = byslot[n];
     if (!hint(n, item)) return;
     if (!row && tracks.has(n) && !confirm(`Replace the backing track in slot ${pad2(n)}? `
                                           + `It isn't in the library, so you can't undo this.`)) return;
     if (item.kind === "slot"){ await move(item.value, n); return; }
-    const r = await api(`/api/slots/${n}/assign`, jsonBody({hash: item.value}));
-    if (!r.ok){ fail(reason(r, "Could not put that on the pedal")); return; }
-    say(`“${item.name}” → slot ${pad2(n)}`);
-    if (row) offerUndo({slot: n, hash: row.source_hash, name: row.display_name});
+    let list = [item], errors = [];
+    if (item.kind === "files"){
+      const res = await postFiles("/api/library", item.files);
+      loadLibrary();
+      list = res.added.map(r => ({value: r.source_hash, name: r.name}));
+      errors = res.errors;
+    }
+    const into = [n];
+    for (let i = n + 1; i <= max; i++) if (!used.has(i)) into.push(i);
+    const placed = [];
+    for (const [i, t] of list.slice(0, into.length).entries()){
+      const r = await api(`/api/slots/${into[i]}/assign`, jsonBody({hash: t.value}));
+      if (r.ok) placed.push(into[i]);
+      else errors.push({name: t.name, error: reason(r, "could not put it on the pedal")});
+    }
+    if (placed[0] === n && row) offerUndo({slot: n, hash: row.source_hash, name: row.display_name});
     else clearUndo();               // its slot may have just been refilled
+    const left = Math.max(0, list.length - into.length);
+    if (errors.length) reportUpload({added: [], errors}, false, say, fail);
+    else if (left > 0) warn(`${left} didn't fit and stayed in the library`);
+    else if (placed.length === 1) say(`“${list[0].name}” → slot ${pad2(placed[0])}`);
+    else if (placed.length) say(`${placed.length} tracks → slots ${pad2(placed[0])}–${pad2(placed[placed.length - 1])}`);
   };
+  // A row takes a drag from the page or files from the desktop, and says
+  // what dropping there would do. A drag it would ignore shows nothing.
+  const held = e => dragging
+    || (e.dataTransfer.types.includes("Files") ? {kind: "files", count: e.dataTransfer.items.length} : null);
+  const dropOn = n => ({
+    onDragOver: e => {
+      const item = held(e), h = item && hint(n, item);
+      if (!h){ setTarget(null); return; }
+      e.preventDefault();
+      e.stopPropagation();          // the row, not the section, takes it
+      setOver(false);
+      if (!target || target.n !== n) setTarget({n, ...h});
+    },
+    onDragLeave: e => {
+      if (!e.currentTarget.contains(e.relatedTarget)) setTarget(t => t && t.n === n ? null : t);
+    },
+    onDrop: e => {
+      const item = held(e);
+      e.preventDefault();
+      e.stopPropagation();
+      setTarget(null);
+      dragging = null;
+      if (item) placeOn(n, item.kind === "files" ? {...item, files: e.dataTransfer.files} : item);
+    },
+  });
   // The first cell: the slot number, as a handle when there is a track to
   // pick up, or while one is picked up, a button that puts it here.
   const lead = n => {
+    if (target && target.n === n) return html`<span class="here mark">${pad2(n)} ${target.verb}</span>`;
     const h = pick && hint(n, pick);
     if (h) return html`<button class=${h.verb === "Replace" ? "here replace secondary outline" : "here"} aria-label=${`Slot ${pad2(n)}: ${h.text}`} title=${h.text}
       onClick=${() => { setPick(null); placeOn(n, pick); }}>${pad2(n)} ${h.verb}</button>`;
@@ -338,8 +399,11 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
       ${nums.length
         ? html`<div class="overflow-auto"><table><tbody>${nums.map(n => used.has(n)
             ? html`<${SlotRow} key=${n} n=${n} row=${byslot[n]} track=${tracks.has(n)} loop=${loops.has(n)}
-                lead=${lead(n)} clear=${clear} removeLoop=${removeLoop}/>`
-            : html`<tr key=${n} class="empty"><td>${lead(n)}</td><td class="name" colspan="4">empty</td></tr>`)}
+                lead=${lead(n)} clear=${clear} removeLoop=${removeLoop} target=${target && target.n === n}
+                drag=${{...dropOn(n), ...(byslot[n] ? dragFrom({kind: "slot", value: n, name: byslot[n].display_name}) : {})}}/>`
+            : html`<tr key=${n} class=${"empty" + (target && target.n === n ? " target" : "")} ...${dropOn(n)}>
+                <td>${lead(n)}</td>
+                <td class="name" colspan="4">${target && target.n === n ? target.text : "empty"}</td></tr>`)}
           </tbody></table></div>`
         : null}
       ${max > 12 && (all || shown < max)
@@ -352,11 +416,11 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
 
 /* One row per slot, naming both files the pedal can hold there, each with
    its own remove button, so removing one never looks like removing both. */
-function SlotRow({n, row, track, loop, lead, clear, removeLoop}){
+function SlotRow({n, row, track, loop, lead, clear, removeLoop, target, drag}){
   const pad = pad2(n);
   const name = row ? row.display_name : track ? html`<em>Unknown backing track</em>` : null;
   return [html`
-    <tr key="row">
+    <tr key="row" class=${target ? "target" : ""} ...${drag}>
       <td>${lead}</td>
       <td class="name">${name
         ? html`${name}${loop && html` <small>+ loop</small>`}`
@@ -519,7 +583,7 @@ function LibRow({r, slots, checked, toggle, playing, audition, rename, forget, a
     setDraft(null);
     if (name && name !== r.name) rename(r, name);
   };
-  return html`<tr>
+  return html`<tr ...${draft === null ? dragFrom({kind: "hash", value: r.source_hash, name: r.name}) : {}}>
     <td><input type="checkbox" checked=${checked} aria-label=${"Select " + r.name}
       onChange=${e => toggle(r.source_hash, e.currentTarget.checked)}/></td>
     <td class="name">${draft === null
