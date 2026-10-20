@@ -51,6 +51,18 @@ function reportUpload(res, toPedal, say, fail){
   else say(`${n} tracks queued for the pedal`);
 }
 
+/* Handlers that take files dropped from the desktop on a section and ignore
+   any other drag. dragleave also fires crossing into a child, so only
+   leaving the section itself clears the highlight. */
+const fileDrop = (setOver, take) => {
+  const files = e => e.dataTransfer.types.includes("Files");
+  return {
+    onDragOver: e => { if (files(e)){ e.preventDefault(); setOver(true); } },
+    onDragLeave: e => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); },
+    onDrop: e => { if (files(e)){ e.preventDefault(); setOver(false); take(e.dataTransfer.files); } },
+  };
+};
+
 /* ------------------------------------------------------------------ hooks */
 
 /* The device's state, live over the event stream, and the library, fetched. */
@@ -247,24 +259,22 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
   };
 
   return html`
-    <section onDragOver=${e => { e.preventDefault(); setOver(true); }}
-             onDragLeave=${() => setOver(false)}
-             onDrop=${e => { e.preventDefault(); setOver(false); send(e.dataTransfer.files); }}>
-      <hgroup>
+    <section class=${over ? "over" : ""} ...${fileDrop(setOver, send)}>
+      <div class="bar">
         <h2>On the pedal</h2>
-        <p>${cap && cap.total_seconds
-          ? `${cap.used_label} of ${cap.total_label} · ${mmss(cap.total_seconds - cap.used_seconds)} free`
-            + ` · ${used.size} of ${s.slot_count} slots`
-          : "Connect the pedal to see capacity"}</p>
-      </hgroup>
+        <label role="button" class="secondary outline">Choose files
+          <input type="file" multiple accept="audio/*" hidden
+            onChange=${e => { send(e.currentTarget.files); e.currentTarget.value = ""; }}/>
+        </label>
+      </div>
+      <p class="sub">${cap && cap.total_seconds
+        ? `${cap.used_label} of ${cap.total_label} · ${mmss(cap.total_seconds - cap.used_seconds)} free`
+          + ` · ${used.size} of ${s.slot_count} slots`
+        : "Connect the pedal to see capacity"}</p>
       ${cap && cap.total_seconds
         ? html`<progress value=${cap.used_seconds} max=${cap.total_seconds}/>` : null}
-      <label class=${"drop" + (over ? " over" : "")}>
-        <input type="file" multiple accept="audio/*"
-          onChange=${e => { send(e.currentTarget.files); e.currentTarget.value = ""; }}/>
-        <strong>Drop audio here, or choose files</strong>
-        <small>Files take the next free slots. A leading number picks the slot: “07 Blue Bossa.mp3”</small>
-      </label>
+      <p class="sub"><small>Drop audio here to fill the next free slots.
+        A leading number picks the slot: “07 Blue Bossa.mp3”</small></p>
       ${nums.length
         ? html`<div class="overflow-auto"><table><tbody>${nums.map(n => used.has(n)
             ? html`<${SlotRow} key=${n} n=${n} row=${byslot[n]} track=${tracks.has(n)} loop=${loops.has(n)} max=${s.slot_count}
@@ -358,6 +368,7 @@ function Library({state, library, loadLibrary, say, warn, fail, clearUndo}){
   const [sort, setSort] = useState("name");
   const [checked, setChecked] = useState(() => new Set());
   const [playing, setPlaying] = useState(null);   // hash being auditioned
+  const [over, setOver] = useState(false);
   const player = useRef(null);
   if (!player.current){ player.current = new Audio(); player.current.preload = "none"; }
   useEffect(() => { player.current.onended = () => setPlaying(null); }, []);
@@ -431,7 +442,7 @@ function Library({state, library, loadLibrary, say, warn, fail, clearUndo}){
   };
 
   return html`
-    <section>
+    <section class=${over ? "over" : ""} ...${fileDrop(setOver, addFiles)}>
       <div class="bar">
         <h2>Library</h2>
         ${ticked.length ? html`<button onClick=${() => addToPedal(ticked)}>Add ${ticked.length} to pedal</button>` : null}
