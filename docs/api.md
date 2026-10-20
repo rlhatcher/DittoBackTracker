@@ -24,7 +24,7 @@ Full snapshot. The same object is pushed over `/api/events`.
   "busy": null,
   "progress": null,
   "error": null,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "revision": "a1b2c3d",
   "update_available": false,
   "remote_revision": null,
