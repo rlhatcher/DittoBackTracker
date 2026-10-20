@@ -301,14 +301,17 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     return {verb: item.kind === "slot" ? "Move here" : "Put here", text: `Put ${what} here`};
   };
   // A track the database doesn't know has no undo, so replacing it asks
-  // first, as removing it does. A replaced library track gets an undo.
-  // Files go to the library, then the first to slot n and the rest to the
-  // empty slots after it; the slot dropped on beats a number in the name.
-  const placeOn = async (n, item) => {
+  // first, as removing it does.
+  const mayReplace = n => byslot[n] || !tracks.has(n)
+    || confirm(`Replace the backing track in slot ${pad2(n)}? `
+               + `It isn't in the library, so you can't undo this.`);
+  // A replaced library track gets an undo. Files go to the library, then
+  // the first to slot n and the rest to the empty slots after it; the slot
+  // dropped on beats a number in the name. `asked` when mayReplace already ran.
+  const placeOn = async (n, item, asked = false) => {
     const row = byslot[n];
     if (!hint(n, item)) return;
-    if (!row && tracks.has(n) && !confirm(`Replace the backing track in slot ${pad2(n)}? `
-                                          + `It isn't in the library, so you can't undo this.`)) return;
+    if (!asked && !mayReplace(n)) return;
     if (item.kind === "slot"){
       if (await move(item.value, n)) clearUndo();   // an undo into either slot would undo the move
       return;
@@ -367,7 +370,12 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     if (target && target.n === n) return html`<span class="here mark">${pad2(n)} ${target.verb}</span>`;
     const h = pick && hint(n, pick);
     if (h) return html`<button class=${h.verb === "Replace" ? "here replace secondary outline" : "here"} aria-label=${`Slot ${pad2(n)}: ${h.text}`} title=${h.text}
-      onClick=${() => { back.current = n; setPick(null); placeOn(n, pick); }}>${pad2(n)} ${h.verb}</button>`;
+      onClick=${() => {
+        if (!mayReplace(n)) return;   // the pick stays, and focus with this button
+        back.current = n;
+        setPick(null);
+        placeOn(n, pick, true);
+      }}>${pad2(n)} ${h.verb}</button>`;
     const row = byslot[n];
     if (row && !pick) return html`<button class="handle secondary outline" data-slot=${n}
       aria-label=${`Move “${row.display_name}” to another slot`} title="Move to another slot"
