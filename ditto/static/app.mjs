@@ -245,6 +245,7 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
   const [all, setAll] = useState(false);
   const [target, setTarget] = useState(null);     // {n, verb, text}: the slot being dragged over
   const section = useRef(null);
+  const back = useRef(null);       // where focus goes when a pick ends: a slot, or an element
   const s = state;
   const slots = s ? s.slots : [];
   const loops = new Set(s ? s.loops : []);
@@ -277,6 +278,7 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
   const move = async (from, to) => {
     const r = await api(`/api/slots/${from}/move`, jsonBody({to}));
     if (!r.ok) fail(reason(r, "Move failed"));
+    return r.ok;
   };
   const removeLoop = async n => {
     // A loop is a live take with no source, so this is the one delete with a
@@ -307,7 +309,10 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     if (!hint(n, item)) return;
     if (!row && tracks.has(n) && !confirm(`Replace the backing track in slot ${pad2(n)}? `
                                           + `It isn't in the library, so you can't undo this.`)) return;
-    if (item.kind === "slot"){ await move(item.value, n); return; }
+    if (item.kind === "slot"){
+      if (await move(item.value, n)) clearUndo();   // an undo into either slot would undo the move
+      return;
+    }
     let list = [item], errors = [];
     if (item.kind === "files"){
       const res = await postFiles("/api/library", item.files);
@@ -362,9 +367,9 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     if (target && target.n === n) return html`<span class="here mark">${pad2(n)} ${target.verb}</span>`;
     const h = pick && hint(n, pick);
     if (h) return html`<button class=${h.verb === "Replace" ? "here replace secondary outline" : "here"} aria-label=${`Slot ${pad2(n)}: ${h.text}`} title=${h.text}
-      onClick=${() => { setPick(null); placeOn(n, pick); }}>${pad2(n)} ${h.verb}</button>`;
+      onClick=${() => { back.current = n; setPick(null); placeOn(n, pick); }}>${pad2(n)} ${h.verb}</button>`;
     const row = byslot[n];
-    if (row && !pick) return html`<button class="handle secondary outline"
+    if (row && !pick) return html`<button class="handle secondary outline" data-slot=${n}
       aria-label=${`Move “${row.display_name}” to another slot`} title="Move to another slot"
       onClick=${() => setPick({kind: "slot", value: n, name: row.display_name})}>⠿ ${pad2(n)}</button>`;
     return html`<code>${pad2(n)}</code>`;
@@ -374,10 +379,22 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     if (pick && pick.kind === "slot" && !byslot[pick.value]) setPick(null);
   }, [pick, state]);
   useEffect(() => {   // keyboard users go straight to the first slot that replaces nothing
-    const b = pick && (section.current.querySelector("button.here:not(.replace)")
-                       || section.current.querySelector("button.here"));
+    if (!pick) return;
+    back.current = pick.kind === "slot" ? pick.value : document.activeElement;
+    const b = section.current.querySelector("button.here:not(.replace)")
+              || section.current.querySelector("button.here");
     if (b) b.focus();
   }, [pick]);
+  useEffect(() => {
+    // The buttons that held focus go when the pick ends. Focus goes back to
+    // what picked it up, or to where it was put once that slot's handle
+    // renders. If focus has moved on meanwhile, it stays where it is.
+    if (pick || back.current == null) return;
+    const b = typeof back.current === "number"
+      ? section.current.querySelector(`button.handle[data-slot="${back.current}"]`) : back.current;
+    if (b && b.isConnected){ b.focus(); back.current = null; }
+    else if (document.activeElement !== document.body) back.current = null;
+  }, [pick, state]);
 
   return html`
     <section ref=${section} class=${over ? "over" : ""} ...${fileDrop(setOver, send)}>
