@@ -204,12 +204,18 @@ function UpdateButton({state, say, fail}){
 
 function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
   const [over, setOver] = useState(false);
+  const [all, setAll] = useState(false);
   const s = state;
   const slots = s ? s.slots : [];
   const loops = new Set(s ? s.loops : []);
   const tracks = new Set(s ? s.tracks : []);      // a BT.WAV, whether or not a row knows it
   const byslot = Object.fromEntries(slots.map(r => [r.slot, r]));
-  const nums = [...new Set([...slots.map(r => r.slot), ...tracks, ...loops])].sort((a, b) => a - b);
+  const used = new Set([...slots.map(r => r.slot), ...tracks, ...loops]);
+  // Empty slots are listed too, so there is somewhere to put a track: every
+  // slot up to three past the last one used, at least twelve.
+  const max = s ? s.slot_count : 0;
+  const shown = all ? max : Math.min(max, Math.max(12, Math.max(0, ...used) + 3));
+  const nums = Array.from({length: shown}, (_, i) => i + 1);
   const cap = s && s.capacity;
 
   // The device decides the slot: a leading number in the name, else the next
@@ -248,7 +254,7 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
         <h2>On the pedal</h2>
         <p>${cap && cap.total_seconds
           ? `${cap.used_label} of ${cap.total_label} · ${mmss(cap.total_seconds - cap.used_seconds)} free`
-            + ` · ${nums.length} of ${s.slot_count} slots`
+            + ` · ${used.size} of ${s.slot_count} slots`
           : "Connect the pedal to see capacity"}</p>
       </hgroup>
       ${cap && cap.total_seconds
@@ -260,11 +266,15 @@ function Pedal({state, say, warn, fail, offerUndo, loadLibrary}){
         <small>Files take the next free slots. A leading number picks the slot: “07 Blue Bossa.mp3”</small>
       </label>
       ${nums.length
-        ? html`<div class="overflow-auto"><table><tbody>${nums.map(n => html`
-            <${SlotRow} key=${n} n=${n} row=${byslot[n]} track=${tracks.has(n)} loop=${loops.has(n)} max=${s.slot_count}
-              move=${move} clear=${clear} removeLoop=${removeLoop} warn=${warn}/>`)}
+        ? html`<div class="overflow-auto"><table><tbody>${nums.map(n => used.has(n)
+            ? html`<${SlotRow} key=${n} n=${n} row=${byslot[n]} track=${tracks.has(n)} loop=${loops.has(n)} max=${s.slot_count}
+                move=${move} clear=${clear} removeLoop=${removeLoop} warn=${warn}/>`
+            : html`<tr key=${n} class="empty"><td><code>${pad2(n)}</code></td><td class="name" colspan="4">empty</td></tr>`)}
           </tbody></table></div>`
-        : html`<p><small>Nothing loaded yet.</small></p>`}
+        : null}
+      ${max > 12 && (all || shown < max)
+        ? html`<button class="secondary outline" onClick=${() => setAll(!all)}>
+            ${all ? "Show fewer slots" : `Show all ${max} slots`}</button>` : null}
       ${slots.length
         ? html`<button class="secondary outline" onClick=${() => printList(slots)}>Print list</button>` : null}
     </section>`;
