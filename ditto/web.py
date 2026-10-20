@@ -32,8 +32,10 @@ STATIC = Path(__file__).parent / "static"
 LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
 # The number in "07 Blue Bossa", "07. Blue Bossa" or "07 - Blue Bossa", which
 # is a slot and not part of the name. A space must follow, so "2-5-1 Practice"
-# and "1999" keep theirs.
-NAME_NUM = re.compile(r"^0*\d{1,2}(?:\s*[-\u2013\u2014.)]\s+|\s+)(?=\S)")
+# and "1999" keep theirs, and a separator with no space after it is kept
+# whole: "07 -Song" stays as it is rather than becoming "-Song".
+_SEP = r"[-\u2013\u2014.)]"
+NAME_NUM = re.compile(r"^0*\d{1,2}(?:\s*" + _SEP + r"\s+|\s+(?!" + _SEP + r"))(?=\S)")
 
 # media.file_hash is 20 lowercase hex chars. A whitelist, because source_for
 # globs sources/{h}.* and a `*` in the hash would match another file.
@@ -71,7 +73,11 @@ def slot_from_name(name: str) -> int | None:
 
 
 def name_from_file(name: str) -> str:
+    """The file's stem, less its slot number. A number that isn't a slot,
+    like "00", is part of the name."""
     stem = Path(name).stem
+    if slot_from_name(name) is None:
+        return stem
     return NAME_NUM.sub("", stem, count=1)
 
 

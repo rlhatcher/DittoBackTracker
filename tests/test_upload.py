@@ -97,6 +97,8 @@ def test_numbers_the_rule_accepts(app_service, client, name, slot):
     ("1999.mp3", "1999"),
     ("07.mp3", "07"),                            # nothing would be left
     ("Track 07.mp3", "Track 07"),                # picks slot 7, but isn't leading
+    ("00 Intro.mp3", "00 Intro"),                # not a slot, so part of the name
+    ("07 -Song.mp3", "07 -Song"),                # not "-Song"
 ])
 def test_the_slot_number_is_not_part_of_the_name(app_service, client, name, track):
     """A drop on a slot puts a track wherever it lands, so "07" in its name
