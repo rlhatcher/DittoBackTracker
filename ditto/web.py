@@ -30,6 +30,10 @@ log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 LEADING_NUM = re.compile(r"^\D*?0*(\d{1,2})(?:\D|$)")
+# The number in "07 Blue Bossa", "07. Blue Bossa" or "07 - Blue Bossa", which
+# is a slot and not part of the name. A space must follow, so "2-5-1 Practice"
+# and "1999" keep theirs.
+NAME_NUM = re.compile(r"^0*\d{1,2}(?:\s*[-\u2013\u2014.)]\s+|\s+)(?=\S)")
 
 # media.file_hash is 20 lowercase hex chars. A whitelist, because source_for
 # globs sources/{h}.* and a `*` in the hash would match another file.
@@ -64,6 +68,11 @@ def slot_from_name(name: str) -> int | None:
         return None
     n = int(m.group(1))
     return n if 1 <= n <= config.SLOTS else None
+
+
+def name_from_file(name: str) -> str:
+    stem = Path(name).stem
+    return NAME_NUM.sub("", stem, count=1)
 
 
 def _json_str(body, field: str):
@@ -111,7 +120,7 @@ def _ingest(f, name: str, store):
     tmp_path = Path(tmp)
     try:
         f.save(str(tmp_path))
-        return (store(tmp_path, Path(name).stem), None)
+        return (store(tmp_path, name_from_file(name)), None)
     except ValueError as e:
         tmp_path.unlink(missing_ok=True)
         return (None, str(e))
