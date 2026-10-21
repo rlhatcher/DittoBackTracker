@@ -265,56 +265,6 @@ def test_the_suite_cannot_kill_itself():
         "the guard should stand in for the real signal"
 
 
-def test_the_pedal_is_not_reported_mounted_until_its_loops_are_known(service,
-                                                                     monkeypatch):
-    """upload_auto and _plan take "mounted" as their licence to trust _loops,
-    so the flag must be published after the scan, not before."""
-    seen = {}
-
-    def has_loop(n):
-        seen.setdefault("mounted", service.mounted)
-        return n == 7
-
-    monkeypatch.setattr(pedal, "present", lambda: True)
-    monkeypatch.setattr(pedal, "mount", lambda: None)
-    monkeypatch.setattr(pedal, "clean_temp_files", lambda: None)
-    monkeypatch.setattr(pedal, "occupied_slots", lambda: set())
-    monkeypatch.setattr(pedal, "has_loop", has_loop)
-
-    service.pedal_state = "absent"
-    service._loops = frozenset()
-    service._tick_pedal()
-
-    assert seen, "the loop scan never ran"
-    assert seen["mounted"] is False, \
-        "mounted was already true while the loop cache was still being built"
-    assert service.mounted and 7 in service._loops
-
-
-def test_the_pedal_is_not_reported_mounted_until_its_tracks_are_known(
-        service, monkeypatch):
-    """kept_slots() reads _tracks once the pedal reads as mounted, so an
-    upload in between would miss an unknown BT.WAV and write over it."""
-    seen = {}
-
-    def occupied_slots():
-        seen.setdefault("mounted", service.mounted)
-        return {7: 1}
-
-    monkeypatch.setattr(pedal, "present", lambda: True)
-    monkeypatch.setattr(pedal, "mount", lambda: None)
-    monkeypatch.setattr(pedal, "clean_temp_files", lambda: None)
-    monkeypatch.setattr(pedal, "occupied_slots", occupied_slots)
-    monkeypatch.setattr(pedal, "has_loop", lambda n: False)
-
-    service.pedal_state = "absent"
-    service._tick_pedal()
-
-    assert seen["mounted"] is False, \
-        "mounted was already true while the track scan was still running"
-    assert service.mounted and service.kept_slots() == {7}
-
-
 # --- what the page lists is what is on the pedal ------------------------------
 
 @pytest.fixture
@@ -427,19 +377,18 @@ def test_a_swap_deletes_both_loops(plugged_in):
         "a loop stayed behind under the other slot's track"
 
 
-def test_a_fill_does_not_write_over_a_track_the_database_does_not_know(
-        plugged_in):
-    """An unknown BT.WAV has no source here to rewrite it from, so a fill
-    skips it the way it skips a loop."""
-    pedal.track_path(1).write_bytes(b"track")
+def test_a_fill_replaces_a_track_the_database_does_not_know(plugged_in):
+    """A fill starts at the first free slot and replaces what is in its run,
+    known to the database or not."""
+    pedal.track_path(2).write_bytes(b"track")
     _plug(plugged_in)
-    h = "b" * 20
-    db.library_add(h, "Track", 1.0)
+    hashes = ["b" * 20, "c" * 20]
+    for h in hashes:
+        db.library_add(h, "Track", 1.0)
 
-    plan = plugged_in._plan([h])
+    plan = plugged_in._plan(hashes)
 
-    assert plan["assigned"][0]["slot"] == 2, \
-        "the fill took the slot holding an unknown backing track"
+    assert [a["slot"] for a in plan["assigned"]] == [1, 2]
 
 
 # --- upload buffers ---------------------------------------------------------

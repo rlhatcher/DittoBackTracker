@@ -212,26 +212,22 @@ class Service:
 
     def _plan(self, hashes: List[str]) -> Optional[Dict]:
         """Which slots these library tracks would fill, in the order given:
-        consecutive from the first slot with room, skipping a backing track
-        the database does not know. `start` and `end` are the first and last
-        slot written, so they span the skips. None if any hash is unknown: the
-        caller's list is stale, so nothing is planned around the gap."""
+        consecutive from the first free slot, replacing whatever is there.
+        None if any hash is unknown: the caller's list is stale, so nothing is
+        planned around the gap."""
         tracks = []
         for h in hashes:
             row = db.library_get(h)
             if row is None:
                 return None
             tracks.append(row)
-        keep = self.kept_slots()
-        taken = {s["slot"] for s in db.all_slots()} | keep
+        taken = self.taken_slots()
         start = next((n for n in range(1, config.SLOTS + 1) if n not in taken),
                      config.SLOTS + 1)
         assigned: List[Dict] = []
         unplaced: List[Dict] = []
         n = start
         for t in tracks:
-            while n <= config.SLOTS and n in keep:
-                n += 1
             if n > config.SLOTS:
                 unplaced.append({"source_hash": t["source_hash"],
                                  "name": t["name"],
@@ -279,11 +275,10 @@ class Service:
     def has_loop(self, slot: int) -> bool:
         return slot in self._loops
 
-    def kept_slots(self) -> "frozenset[int]":
-        """Slots automatic placement must not write to: a BT.WAV no row
-        knows, which has no copy here to put back. A loop doesn't count."""
-        rows = {s["slot"] for s in db.all_slots()}
-        return self._tracks - rows
+    def taken_slots(self) -> "set[int]":
+        """Slots holding a backing track, whether or not a row knows it. A
+        loop alone doesn't take a slot. _tracks is empty unless mounted."""
+        return {s["slot"] for s in db.all_slots()} | self._tracks
 
     def loop_path(self, slot: int) -> Path:
         return pedal.loop_path(slot)
@@ -462,8 +457,8 @@ class Service:
             pedal.clean_temp_files()
             self._scan_loops()
             self._requeue_unsynced()        # also scans _tracks
-            # Published after both scans: upload_auto and _plan take "mounted"
-            # as their licence to trust _tracks.
+            # Published after both scans, so the first snapshot that says
+            # mounted lists what is on the pedal.
             self.last_error = None
             self.pedal_state = "mounted"
             self._emit()

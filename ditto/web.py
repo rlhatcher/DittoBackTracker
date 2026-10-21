@@ -193,12 +193,9 @@ def create_app(service: Service) -> Flask:
                   for f, name in files if not _is_audio(name)]
         audio = [(f, name) for f, name in files if _is_audio(name)]
 
-        # A backing track the database does not know counts as taken, so an
-        # upload never lands on something it cannot put back. A loop doesn't.
-        # Numbered files claim their slots before any unnumbered one is placed.
-        reserved = {s["slot"] for s in db.all_slots()}
-        if service.mounted:
-            reserved |= service.kept_slots()
+        # An upload takes a free slot and never replaces a track. Numbered
+        # files claim their slots before any unnumbered one is placed.
+        reserved = set(service.taken_slots())
         slots = []
         for _, name in audio:
             n = slot_from_name(name)
