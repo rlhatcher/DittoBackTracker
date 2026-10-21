@@ -402,3 +402,36 @@ def test_a_fill_does_not_write_over_a_track_the_database_does_not_know(
 
     assert plan["assigned"][0]["slot"] == 2, \
         "the fill took the slot holding an unknown backing track"
+
+
+# --- upload buffers ---------------------------------------------------------
+
+def test_upload_buffers_go_to_the_data_partition(data_tree, monkeypatch):
+    """waitress and Flask buffer an upload in Python's temp directory, about
+    twice its size in all. The default /tmp is RAM under the read-only root,
+    with no swap, so a batch of WAVs could run the Pi out of memory."""
+    import tempfile
+
+    import waitress
+
+    from ditto import __main__ as entry
+
+    class FakeService:
+        def shutdown(self):
+            pass
+
+    def fake_service():
+        config.ensure_dirs()
+        return FakeService()
+
+    serving_with = []
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.setattr(entry, "Service", fake_service)
+    monkeypatch.setattr(entry.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(waitress, "serve",
+                        lambda *a, **k: serving_with.append(tempfile.gettempdir()))
+
+    assert entry.main([]) == 0
+    assert serving_with == [str(config.SPOOL)], \
+        "uploads would be buffered in /tmp, which is RAM on the device"
+    assert config.SPOOL.is_dir()

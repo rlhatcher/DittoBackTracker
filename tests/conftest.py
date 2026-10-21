@@ -104,7 +104,7 @@ def data_tree(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(config, "DATA", tmp_path)
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "state.db")
-    for name in ("SOURCES", "STAGED"):
+    for name in ("SOURCES", "STAGED", "SPOOL"):
         d = tmp_path / name.lower()
         monkeypatch.setattr(config, name, d)
         d.mkdir(parents=True, exist_ok=True)
