@@ -8,7 +8,6 @@ import json
 import os
 import pathlib
 import queue
-import threading
 
 import conftest
 import pytest
@@ -96,18 +95,6 @@ def test_the_source_is_on_disk_before_its_library_row_exists(service,
     service.add_to_library(src, "Track")
 
     assert on_disk == [True], "the row was committed before its bytes landed"
-
-
-def test_a_loop_delete_does_not_wait_for_a_running_job(service):
-    """The worker holds the job lock for a whole write, minutes for a long
-    track. A request thread that queues behind it looks like a hung page."""
-    service._loops = frozenset({5})
-    result = []
-    with service._job_lock:
-        t = threading.Thread(target=lambda: result.append(service.delete_loop(5)))
-        t.start()
-        t.join(timeout=2.0)
-    assert result == [None], "delete_loop waited for the job lock"
 
 
 def test_the_sweep_takes_what_nothing_references(data_tree):
@@ -359,7 +346,9 @@ def test_removing_a_loop_leaves_a_track_the_database_does_not_know(plugged_in):
     assert plugged_in.snapshot()["tracks"] == [7]
 
     assert plugged_in.delete_loop(7) is True
+    conftest.drain(plugged_in)
 
+    assert not pedal.loop_path(7).exists()
     assert plugged_in.snapshot()["tracks"] == [7], \
         "the backing track dropped out of the snapshot with its loop"
     assert pedal.track_path(7).read_bytes() == b"track"
@@ -387,6 +376,55 @@ def test_a_written_track_is_listed(plugged_in):
 
     assert pedal.track_path(3).read_bytes() == b"wav"
     assert plugged_in.snapshot()["tracks"] == [3]
+
+
+# --- a change to a slot ends its loop ---------------------------------------
+
+def _staged(slot, h, name="Track"):
+    db.library_add(h, name, 1.0)
+    db.put_slot(slot, h, state="staged")
+    media.staged_path(h).write_bytes(name.encode())
+
+
+def test_writing_a_track_deletes_its_slots_loop(plugged_in):
+    """A loop belongs to the track it was recorded over. Left in place it
+    plays over the new one."""
+    pedal.loop_path(3).write_bytes(b"loop")
+    _plug(plugged_in)
+    _staged(3, "a" * 20)
+
+    plugged_in._do_write(3)
+
+    assert not pedal.loop_path(3).exists(), "the old loop survived a new track"
+    assert plugged_in.snapshot()["loops"] == []
+
+
+def test_clearing_a_track_deletes_its_loop(plugged_in):
+    pedal.track_path(4).write_bytes(b"track")
+    pedal.loop_path(4).write_bytes(b"loop")
+    _plug(plugged_in)
+
+    plugged_in.clear(4)
+    conftest.drain(plugged_in)
+
+    assert not pedal.loop_path(4).exists(), "the loop outlived its track"
+    assert plugged_in.snapshot()["loops"] == []
+
+
+def test_a_swap_deletes_both_loops(plugged_in):
+    _staged(1, "a" * 20, "One")
+    _staged(2, "b" * 20, "Two")
+    for n in (1, 2):
+        pedal.loop_path(n).write_bytes(b"loop")
+    _plug(plugged_in)
+
+    plugged_in.move(1, 2)
+    conftest.drain(plugged_in)
+
+    assert pedal.track_path(1).read_bytes() == b"Two"
+    assert pedal.track_path(2).read_bytes() == b"One"
+    assert not pedal.loop_path(1).exists() and not pedal.loop_path(2).exists(), \
+        "a loop stayed behind under the other slot's track"
 
 
 def test_a_fill_does_not_write_over_a_track_the_database_does_not_know(

@@ -324,7 +324,7 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
       errors = res.errors;
     }
     const into = [n];
-    for (let i = n + 1; i <= max; i++) if (!used.has(i)) into.push(i);
+    for (let i = n + 1; i <= max; i++) if (!byslot[i] && !tracks.has(i)) into.push(i);   // a loop alone is free
     const placed = [];
     for (const [i, t] of list.slice(0, into.length).entries()){
       const r = await api(`/api/slots/${into[i]}/assign`, jsonBody({hash: t.value}));
@@ -531,7 +531,6 @@ function Library({state, library, loadLibrary, say, warn, fail, clearUndo, setPi
       ? `“${p.assigned[0].name}” → slot ${pad2(p.start)}`
       : `${p.assigned.length} tracks → slots ${pad2(p.start)}–${pad2(p.end)}`;
     if (p.unplaced.length) line += ` · ${p.unplaced.length} didn't fit`;
-    if (!p.loops_known) line += " · plug the pedal in to skip its loops";
     (p.unplaced.length ? warn : say)(line);
   };
   const rename = async (r, name) => {

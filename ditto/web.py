@@ -193,10 +193,9 @@ def create_app(service: Service) -> Flask:
                   for f, name in files if not _is_audio(name)]
         audio = [(f, name) for f, name in files if _is_audio(name)]
 
-        # A slot holding a loop, or a backing track the database does not
-        # know, counts as taken, so an upload never lands on something it
-        # cannot put back. Numbered files claim their slots before any
-        # unnumbered one is placed.
+        # A backing track the database does not know counts as taken, so an
+        # upload never lands on something it cannot put back. A loop doesn't.
+        # Numbered files claim their slots before any unnumbered one is placed.
         reserved = {s["slot"] for s in db.all_slots()}
         if service.mounted:
             reserved |= service.kept_slots()
@@ -259,9 +258,6 @@ def create_app(service: Service) -> Flask:
             ok = service.delete_loop(slot)
         except ValueError as e:
             return jsonify(error=str(e)), 400
-        if ok is None:
-            return jsonify(error="busy, try again when the current work "
-                                 "finishes"), 409
         if not ok:
             return jsonify(error="no loop in that slot"), 404
         return jsonify(ok=True)
