@@ -23,7 +23,7 @@ td input[type=text] { width: 3.5rem; height: auto; margin: 0; padding: .2rem; te
 td input[type=checkbox] { margin: 0; }
 td.name { width: 100%; white-space: normal; }
 td.name input { width: 100%; text-align: left; font-family: inherit; }
-td.actions { white-space: normal; text-align: right; }
+td.actions { white-space: nowrap; text-align: right; }
 td.actions > * { margin: .15rem 0 .15rem .25rem; white-space: nowrap; }
 .rename { cursor: text; }
 .rename:hover { text-decoration: underline dotted; }
