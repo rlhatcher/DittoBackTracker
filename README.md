@@ -102,6 +102,12 @@ The device checks its tracked branch for a new commit at startup and when
 available**; pressing it deploys the new code and restarts. The mechanism is in
 [docs/api.md](docs/api.md#post-apiupdate).
 
+The restart is the service exiting and systemd starting it again, so the unit
+must say `Restart=always`. An older unit says `Restart=on-failure`, and then
+the page stays down after every update until `sudo systemctl start ditto-web`
+or a reboot. Check with `systemctl cat ditto-web | grep Restart`, and run
+`install.sh` again if it is wrong.
+
 An update replaces the `ditto/` package and nothing else. A release that also
 changes the systemd unit, the fstab entry or the ownership
 of `/var/lib/ditto` needs `install.sh` run again with the overlay off
