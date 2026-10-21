@@ -453,10 +453,12 @@ function SlotRow({n, row, track, loop, lead, clear, removeLoop, target, drag}){
       <td><small>${row ? mmss(row.duration) : ""}</small></td>
       <td><small class=${row && (row.state === "converting" || row.state === "error") ? "warn" : ""}>${row ? (LABEL[row.state] || row.state) : ""}</small></td>
       <td class="actions">
-        ${(row || track) && html`<button class="secondary outline"
-          onClick=${() => clear(n, row)}>Remove track</button>`}
-        ${loop && html`<button class="secondary outline"
-          onClick=${() => removeLoop(n)}>Remove loop</button>`}
+        ${(row || track) && html`<button class="secondary outline" title="Remove track"
+          aria-label=${"Remove the backing track in slot " + pad}
+          onClick=${() => clear(n, row)}>×</button>`}
+        ${loop && html`<button class="secondary outline" title="Remove loop"
+          aria-label=${"Remove the recorded loop in slot " + pad}
+          onClick=${() => removeLoop(n)}>↻×</button>`}
         ${loop && html`<a href=${"/api/loops/" + n} download=${"loop-" + pad + ".wav"} role="button"
           class="secondary outline" aria-label=${"Download the loop in slot " + pad}>⤓</a>`}
       </td>
