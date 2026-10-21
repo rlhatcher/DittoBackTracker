@@ -516,7 +516,7 @@ class Service:
             self._do_write(job[1])
         elif kind == "erase":
             self._do_erase(job[1])
-        elif kind == "droploop" and pedal.mounted():
+        elif kind == "droploop":
             self._drop_loop(job[1])
             os.sync()
 

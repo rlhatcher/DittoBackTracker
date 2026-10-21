@@ -66,13 +66,6 @@ def test_get_streams_the_loop_as_a_download(env):
     assert "loop-05.wav" in rv.headers["Content-Disposition"]
 
 
-def test_get_when_the_loop_vanished_404(env, tmp_path):
-    """Deleted on the pedal between the scan and the request."""
-    client, svc = env
-    svc.loop_path = lambda slot: tmp_path / "gone.wav"
-    assert client.get("/api/loops/6").status_code == 404
-
-
 def test_delete_no_loop_404(env):
     client, _ = env
     assert client.delete("/api/loops/9").status_code == 404

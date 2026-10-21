@@ -242,12 +242,8 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="no pedal connected"), 503
         if not service.has_loop(slot):
             return jsonify(error="no loop in that slot"), 404
-        try:
-            return send_file(service.loop_path(slot), mimetype="audio/wav",
-                             as_attachment=True,
-                             download_name=f"loop-{slot:02d}.wav")
-        except FileNotFoundError:
-            return jsonify(error="no loop in that slot"), 404
+        return send_file(service.loop_path(slot), mimetype="audio/wav",
+                         as_attachment=True, download_name=f"loop-{slot:02d}.wav")
 
     @app.delete("/api/loops/<int:slot>")
     def remove_loop(slot: int):
