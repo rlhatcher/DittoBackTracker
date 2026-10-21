@@ -22,7 +22,8 @@ SOURCES = DATA / "sources"      # the uploads, by content hash
 STAGED = DATA / "staged"        # converted WAVs, a cache
 DB_PATH = DATA / "state.db"
 # Temp files: waitress and Flask buffer each upload here, about twice its size
-# in all. The default /tmp is RAM under the read-only root, with no swap.
+# in all. The default /tmp is on the small root partition, and RAM once the
+# read-only overlay is on.
 SPOOL = DATA / "spool"
 
 # Over-the-air self-update: the git checkout the device tracks, and the deployed
