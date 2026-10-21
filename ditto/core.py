@@ -212,28 +212,22 @@ class Service:
 
     def _plan(self, hashes: List[str]) -> Optional[Dict]:
         """Which slots these library tracks would fill, in the order given:
-        consecutive from the first slot with room, skipping any that holds a
-        loop, the rule an unnumbered upload follows. `start` and `end` are the
-        first and last slot written, so they span the skips. None if any hash
-        is unknown: the caller's list is stale, so nothing is planned around
-        the gap."""
+        consecutive from the first free slot, replacing whatever is there.
+        None if any hash is unknown: the caller's list is stale, so nothing is
+        planned around the gap."""
         tracks = []
         for h in hashes:
             row = db.library_get(h)
             if row is None:
                 return None
             tracks.append(row)
-        loops = self._loops
-        keep = self.kept_slots()
-        taken = {s["slot"] for s in db.all_slots()} | keep
+        taken = self.taken_slots()
         start = next((n for n in range(1, config.SLOTS + 1) if n not in taken),
                      config.SLOTS + 1)
         assigned: List[Dict] = []
         unplaced: List[Dict] = []
         n = start
         for t in tracks:
-            while n <= config.SLOTS and n in keep:
-                n += 1
             if n > config.SLOTS:
                 unplaced.append({"source_hash": t["source_hash"],
                                  "name": t["name"],
@@ -242,17 +236,11 @@ class Service:
             assigned.append({"slot": n, "source_hash": t["source_hash"],
                              "name": t["name"]})
             n += 1
-        end = assigned[-1]["slot"] if assigned else None
         return {
             "start": assigned[0]["slot"] if assigned else None,
-            "end": end,
+            "end": assigned[-1]["slot"] if assigned else None,
             "assigned": assigned,
-            "skipped_loops": sorted(x for x in loops
-                                    if end is not None and start <= x <= end),
             "unplaced": unplaced,
-            # The loop set is only known while mounted, so an unmounted plan
-            # says its range is provisional.
-            "loops_known": self.pedal_state == "mounted",
         }
 
     def assign_tracks(self, hashes: List[str]) -> Optional[Dict]:
@@ -287,34 +275,20 @@ class Service:
     def has_loop(self, slot: int) -> bool:
         return slot in self._loops
 
-    def kept_slots(self) -> "frozenset[int]":
-        """Slots automatic placement must not write to: a loop, or a BT.WAV
-        no row knows. Neither has a copy here to put back."""
-        rows = {s["slot"] for s in db.all_slots()}
-        return self._loops | (self._tracks - rows)
+    def taken_slots(self) -> "set[int]":
+        """Slots holding a backing track, whether or not a row knows it. A
+        loop alone doesn't take a slot. _tracks is empty unless mounted."""
+        return {s["slot"] for s in db.all_slots()} | self._tracks
 
     def loop_path(self, slot: int) -> Path:
         return pedal.loop_path(slot)
 
-    def delete_loop(self, slot: int) -> Optional[bool]:
-        """Remove a LOOP.WAV. One unlink, done here under the job lock so it
-        never lands in the middle of a write. False (404) if there is none,
-        None (409) while a job holds the lock: the worker keeps it for a whole
-        write, and a request thread must not sit behind that."""
+    def delete_loop(self, slot: int) -> bool:
+        """Queue a LOOP.WAV's removal. False (404) if there is none."""
         self.check_slot(slot)
         if slot not in self._loops:
             return False
-        if not self._job_lock.acquire(blocking=False):
-            return None
-        try:
-            if not pedal.mounted():
-                return False
-            pedal.remove_loop(slot)
-            os.sync()
-            self._loops = self._loops - {slot}
-        finally:
-            self._job_lock.release()
-        self._emit()
+        self._work.put(("droploop", slot))
         return True
 
     def move(self, src: int, dst: int) -> None:
@@ -483,8 +457,8 @@ class Service:
             pedal.clean_temp_files()
             self._scan_loops()
             self._requeue_unsynced()        # also scans _tracks
-            # Published after both scans: upload_auto and _plan take "mounted"
-            # as their licence to trust _loops and _tracks.
+            # Published after both scans, so the first snapshot that says
+            # mounted lists what is on the pedal.
             self.last_error = None
             self.pedal_state = "mounted"
             self._emit()
@@ -542,6 +516,9 @@ class Service:
             self._do_write(job[1])
         elif kind == "erase":
             self._do_erase(job[1])
+        elif kind == "droploop":
+            self._drop_loop(job[1])
+            os.sync()
 
     def _do_convert(self, slot: int, h: str, src: Path) -> None:
         row = db.get_slot(slot)
@@ -587,6 +564,7 @@ class Service:
             self._emit()
             return
 
+        self._drop_loop(slot)           # before the space check, so it counts
         need = wav.stat().st_size
         free, _ = pedal.capacity()
         existing = pedal.track_path(slot)
@@ -621,11 +599,18 @@ class Service:
         self._emit()
         try:
             pedal.remove_track(slot)
+            self._drop_loop(slot)
             os.sync()
             self._tracks = self._tracks - {slot}
         except OSError as e:
             self.last_error = f"could not clear slot {slot}: {e}"
         self._emit()
+
+    def _drop_loop(self, slot: int) -> None:
+        """A loop belongs to the track it was recorded over, so any change to
+        its slot ends it. Download one first to keep it."""
+        pedal.remove_loop(slot)
+        self._loops = self._loops - {slot}
 
     def _drain(self, timeout: float = 300.0) -> None:
         """Wait for the worker to go idle. Only the SIGTERM path uses it."""

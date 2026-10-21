@@ -266,11 +266,8 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     reportUpload(await postFiles("/api/upload", files), true, say, fail);
     loadLibrary();
   };
-  // A row's track is still in the library, so it gets an undo. A BT.WAV no
-  // row knows has no source to come back from, so it gets a confirmation.
+  // A row's track is still in the library, so it gets an undo.
   const clear = async (n, row) => {
-    if (!row && !confirm(`Delete the backing track in slot ${pad2(n)} from the pedal? `
-                         + `It isn't in the library, so you can't undo this.`)) return;
     const r = await api(`/api/slots/${n}`, {method: "DELETE"});
     if (!r.ok){ fail(reason(r, "Could not remove the track")); return; }
     if (row) offerUndo({slot: n, hash: row.source_hash, name: row.display_name});
@@ -300,18 +297,12 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     const what = item.kind !== "files" ? `“${item.name}”` : item.count === 1 ? "the file" : `${item.count} files`;
     return {verb: item.kind === "slot" ? "Move here" : "Put here", text: `Put ${what} here`};
   };
-  // A track the database doesn't know has no undo, so replacing it asks
-  // first, as removing it does.
-  const mayReplace = n => byslot[n] || !tracks.has(n)
-    || confirm(`Replace the backing track in slot ${pad2(n)}? `
-               + `It isn't in the library, so you can't undo this.`);
   // A replaced library track gets an undo. Files go to the library, then
   // the first to slot n and the rest to the empty slots after it; the slot
-  // dropped on beats a number in the name. `asked` when mayReplace already ran.
-  const placeOn = async (n, item, asked = false) => {
+  // dropped on beats a number in the name.
+  const placeOn = async (n, item) => {
     const row = byslot[n];
     if (!hint(n, item)) return;
-    if (!asked && !mayReplace(n)) return;
     if (item.kind === "slot"){
       if (await move(item.value, n)) clearUndo();   // an undo into either slot would undo the move
       return;
@@ -324,7 +315,7 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
       errors = res.errors;
     }
     const into = [n];
-    for (let i = n + 1; i <= max; i++) if (!used.has(i)) into.push(i);
+    for (let i = n + 1; i <= max; i++) if (!byslot[i] && !tracks.has(i)) into.push(i);   // a loop alone is free
     const placed = [];
     for (const [i, t] of list.slice(0, into.length).entries()){
       const r = await api(`/api/slots/${into[i]}/assign`, jsonBody({hash: t.value}));
@@ -370,12 +361,7 @@ function Pedal({state, say, warn, fail, offerUndo, clearUndo, loadLibrary, pick,
     if (target && target.n === n) return html`<span class="here mark">${pad2(n)} ${target.verb}</span>`;
     const h = pick && hint(n, pick);
     if (h) return html`<button class=${h.verb === "Replace" ? "here replace secondary outline" : "here"} aria-label=${`Slot ${pad2(n)}: ${h.text}`} title=${h.text}
-      onClick=${() => {
-        if (!mayReplace(n)) return;   // the pick stays, and focus with this button
-        back.current = n;
-        setPick(null);
-        placeOn(n, pick, true);
-      }}>${pad2(n)} ${h.verb}</button>`;
+      onClick=${() => { back.current = n; setPick(null); placeOn(n, pick); }}>${pad2(n)} ${h.verb}</button>`;
     const row = byslot[n];
     if (row && !pick) return html`<button class="handle secondary outline" data-slot=${n}
       aria-label=${`Move “${row.display_name}” to another slot`} title="Move to another slot"
@@ -531,7 +517,6 @@ function Library({state, library, loadLibrary, say, warn, fail, clearUndo, setPi
       ? `“${p.assigned[0].name}” → slot ${pad2(p.start)}`
       : `${p.assigned.length} tracks → slots ${pad2(p.start)}–${pad2(p.end)}`;
     if (p.unplaced.length) line += ` · ${p.unplaced.length} didn't fit`;
-    if (!p.loops_known) line += " · plug the pedal in to skip its loops";
     (p.unplaced.length ? warn : say)(line);
   };
   const rename = async (r, name) => {

@@ -22,8 +22,8 @@ whatever is uploaded and writes it to the pedal.
 - Search, sort, rename and in-browser preview.
 - Capacity in minutes rather than slots, because the pedal holds about 63
   minutes in total.
-- Loops recorded on the pedal can be downloaded or removed. `LOOP.WAV` is
-  never written.
+- Loops recorded on the pedal can be downloaded or removed. Any change to a
+  slot deletes its loop, so download one first to keep it.
 
 Unbuilt work is listed in [docs/roadmap.md](docs/roadmap.md).
 
@@ -198,6 +198,6 @@ MIT. See [LICENSE](LICENSE).
 Not affiliated with or endorsed by TC Electronic or Music Tribe. "Ditto" and
 "TC Electronic" are their trademarks, used here to describe compatibility.
 
-This writes to the pedal's internal storage. It uses atomic writes, flushes
-before unmounting and never touches `LOOP.WAV`, but comes with no warranty.
-Back up any loops you care about before first use.
+This writes to the pedal's internal storage. It uses atomic writes and
+flushes before unmounting, but comes with no warranty. Changing a slot deletes
+the loop recorded in it, so back up any loops you care about before first use.

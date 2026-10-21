@@ -59,7 +59,7 @@ Full snapshot. The same object is pushed over `/api/events`.
 | `busy` | Description of current work, or `null` when idle. Unplug only when it is `null` |
 | `progress` | 0.0–1.0 during conversion, else `null` |
 | `slot_count` | How many slots the pedal has. Clients should use this rather than assume 99 |
-| `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track) |
+| `loops` | Slot numbers that hold a pedal-recorded `LOOP.WAV`. Detected once on mount and only meaningful while `pedal` is `mounted`; a slot can appear here with no matching entry in `slots` (a loop with no backing track). Any change to a slot deletes its loop |
 | `tracks` | Slot numbers that hold a `BT.WAV`. Detected on mount and kept current as tracks are written and cleared; only meaningful while `pedal` is `mounted`. A slot can appear here with no matching entry in `slots`, a backing track the database does not know about, which `DELETE /api/slots/<n>` removes like any other |
 | `version` | Package version string |
 | `revision` | Short git commit of the deployed code, or `null` off a git checkout. Watch it change to confirm an update took |
@@ -82,7 +82,8 @@ Multipart. One or more `file` parts. This is what the UI uses.
 
 A leading number in the filename picks the slot (`07 Blue Bossa.mp3` → slot
 7). Files without one, or whose number is taken, fill the lowest free slots.
-Slots holding a recorded `LOOP.WAV` are skipped. To put a track in a
+A slot is free when it holds no backing track; a loop alone doesn't count, and
+is deleted when the track is written. To put a track in a
 particular slot afterwards, move it with `POST /api/slots/<n>/move`.
 
 ```bash
@@ -104,9 +105,9 @@ Partial success is normal: `added` and `errors` can both be non-empty.
 
 ## DELETE /api/slots/&lt;n&gt;
 
-Clear slot `n`. `BT.WAV` is removed from the pedal on the next pass. A recorded
-`LOOP.WAV` in the same slot is left alone, and the track stays in the library,
-so putting it back is an assign.
+Clear slot `n`. `BT.WAV` and any recorded `LOOP.WAV` are removed from the
+pedal on the next pass. The track stays in the library, so putting it back is
+an assign; the loop is gone.
 
 ```json
 { "ok": true }
@@ -142,8 +143,8 @@ with no source and no undo. `BT.WAV` and the slot directory are never touched.
 { "ok": true }
 ```
 
-`404` if the slot has no loop. `409` while a job holds the pedal; retry when
-it finishes.
+`404` if the slot has no loop. Otherwise the delete is queued behind any work
+already running.
 
 ---
 
@@ -153,8 +154,8 @@ it finishes.
 { "to": 12 }
 ```
 
-Moves to an empty destination, or **swaps** with an occupied one. Swapping is
-non-destructive, so reordering never loses a track. Moving to the same slot
+Moves to an empty destination, or **swaps** with an occupied one, so reordering
+never loses a track. Both slots lose any recorded loop. Moving to the same slot
 is a no-op.
 
 ---
@@ -247,8 +248,8 @@ slots are cleared regardless, and reporting an empty result would hide it.
 ## POST /api/slots/&lt;n&gt;/assign
 
 Put a track that is already in the library into slot `n`, without uploading it
-again. Body `{"hash": "..."}`. Whatever was in the slot is replaced; the track
-it held stays in the library.
+again. Body `{"hash": "..."}`. Whatever was in the slot is replaced, including
+its loop; the track it held stays in the library.
 
 `201` with the slot object. `404` if the track isn't in the library, `400` if
 the slot is out of range.
@@ -266,17 +267,13 @@ Put several library tracks on the pedal in one call. Body
 ```json
 { "start": 9, "end": 11,
   "assigned": [ { "slot": 9, "source_hash": "b9ec...", "name": "Autumn Leaves" } ],
-  "skipped_loops": [ 10 ],
   "unplaced": [ { "source_hash": "ff02...", "name": "Ceora",
-                  "error": "no room past slot 99" } ],
-  "loops_known": true }
+                  "error": "no room past slot 99" } ] }
 ```
 
-Tracks go in the order given into consecutive slots, skipping any slot that
-holds a loop, the same automatic-placement rule an unnumbered upload follows.
-`start` and `end` are the first and last slot **actually written**, so they
-span those skips. Both are `null` when nothing was placed. Whatever was in a
-slot is replaced, as with a single assign.
+Tracks go in the order given into consecutive slots. `start` and `end` are the
+first and last slot written, both `null` when nothing was placed. Whatever was
+in a slot is replaced, as with a single assign.
 
 `201`. `400` if `hashes` is not a non-empty list of strings. `404` if any hash
 is not in the library, and then nothing is
@@ -284,14 +281,11 @@ placed: a set list with a track missing from it is one problem, and the
 client's list is stale.
 
 **Read the body.** A `201` does not mean everything landed: `unplaced` names
-the tracks that ran out of pedal. `loops_known: false` means the range is
-provisional: with no pedal connected the device cannot know which slots hold
-loops and cannot skip them.
+the tracks that ran out of pedal.
 
 This is one endpoint rather than N calls to `POST /api/slots/<n>/assign`: the
-loop set is only correct under the lock that queues the work, the whole fill
-is one locked step so a forced delete cannot interleave with it, and it
-broadcasts one snapshot instead of one per track.
+whole fill is one locked step so a forced delete cannot interleave with it, and
+it broadcasts one snapshot instead of one per track.
 
 ---
 
@@ -389,7 +383,6 @@ curl -N http://dittobacktracker.local/api/events
 | `403` | any state-changing method (not `GET`/`HEAD`/`OPTIONS`) | Cross-site request. There is no auth, so requests carrying a foreign `Origin` or a cross-site `Sec-Fetch-Site` are refused |
 | `404` | `GET`/`DELETE /api/loops/<n>`, `PATCH`/`DELETE /api/library/<hash>`, `GET /api/library/<hash>/audio`, `POST /api/slots/<n>/assign`, `POST /api/slots/assign` | The slot has no loop; or no such track in the library, which is also what a malformed hash returns, since it cannot name one |
 | `409` | `POST /api/update` | Busy: work is in flight or queued, or an update is already running. Retry when idle |
-| `409` | `DELETE /api/loops/<n>` | A job holds the pedal. Retry when it finishes |
 | `409` | `DELETE /api/library/<hash>` | A slot still holds the track. Body carries `slots`; repeat with `?force` to clear them first |
 | `416` | `GET /api/library/<hash>/audio` | The requested byte range lies outside the file |
 | `413` | `POST /api/upload`, `POST /api/library` | Request body exceeds the upload size limit (512 MB by default, set with `DITTO_MAX_UPLOAD_MB`) |

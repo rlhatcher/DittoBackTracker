@@ -193,13 +193,9 @@ def create_app(service: Service) -> Flask:
                   for f, name in files if not _is_audio(name)]
         audio = [(f, name) for f, name in files if _is_audio(name)]
 
-        # A slot holding a loop, or a backing track the database does not
-        # know, counts as taken, so an upload never lands on something it
-        # cannot put back. Numbered files claim their slots before any
-        # unnumbered one is placed.
-        reserved = {s["slot"] for s in db.all_slots()}
-        if service.mounted:
-            reserved |= service.kept_slots()
+        # An upload takes a free slot and never replaces a track. Numbered
+        # files claim their slots before any unnumbered one is placed.
+        reserved = set(service.taken_slots())
         slots = []
         for _, name in audio:
             n = slot_from_name(name)
@@ -246,12 +242,8 @@ def create_app(service: Service) -> Flask:
             return jsonify(error="no pedal connected"), 503
         if not service.has_loop(slot):
             return jsonify(error="no loop in that slot"), 404
-        try:
-            return send_file(service.loop_path(slot), mimetype="audio/wav",
-                             as_attachment=True,
-                             download_name=f"loop-{slot:02d}.wav")
-        except FileNotFoundError:
-            return jsonify(error="no loop in that slot"), 404
+        return send_file(service.loop_path(slot), mimetype="audio/wav",
+                         as_attachment=True, download_name=f"loop-{slot:02d}.wav")
 
     @app.delete("/api/loops/<int:slot>")
     def remove_loop(slot: int):
@@ -259,9 +251,6 @@ def create_app(service: Service) -> Flask:
             ok = service.delete_loop(slot)
         except ValueError as e:
             return jsonify(error=str(e)), 400
-        if ok is None:
-            return jsonify(error="busy, try again when the current work "
-                                 "finishes"), 409
         if not ok:
             return jsonify(error="no loop in that slot"), 404
         return jsonify(ok=True)

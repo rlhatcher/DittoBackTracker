@@ -8,7 +8,6 @@ import json
 import os
 import pathlib
 import queue
-import threading
 
 import conftest
 import pytest
@@ -96,18 +95,6 @@ def test_the_source_is_on_disk_before_its_library_row_exists(service,
     service.add_to_library(src, "Track")
 
     assert on_disk == [True], "the row was committed before its bytes landed"
-
-
-def test_a_loop_delete_does_not_wait_for_a_running_job(service):
-    """The worker holds the job lock for a whole write, minutes for a long
-    track. A request thread that queues behind it looks like a hung page."""
-    service._loops = frozenset({5})
-    result = []
-    with service._job_lock:
-        t = threading.Thread(target=lambda: result.append(service.delete_loop(5)))
-        t.start()
-        t.join(timeout=2.0)
-    assert result == [None], "delete_loop waited for the job lock"
 
 
 def test_the_sweep_takes_what_nothing_references(data_tree):
@@ -278,56 +265,6 @@ def test_the_suite_cannot_kill_itself():
         "the guard should stand in for the real signal"
 
 
-def test_the_pedal_is_not_reported_mounted_until_its_loops_are_known(service,
-                                                                     monkeypatch):
-    """upload_auto and _plan take "mounted" as their licence to trust _loops,
-    so the flag must be published after the scan, not before."""
-    seen = {}
-
-    def has_loop(n):
-        seen.setdefault("mounted", service.mounted)
-        return n == 7
-
-    monkeypatch.setattr(pedal, "present", lambda: True)
-    monkeypatch.setattr(pedal, "mount", lambda: None)
-    monkeypatch.setattr(pedal, "clean_temp_files", lambda: None)
-    monkeypatch.setattr(pedal, "occupied_slots", lambda: set())
-    monkeypatch.setattr(pedal, "has_loop", has_loop)
-
-    service.pedal_state = "absent"
-    service._loops = frozenset()
-    service._tick_pedal()
-
-    assert seen, "the loop scan never ran"
-    assert seen["mounted"] is False, \
-        "mounted was already true while the loop cache was still being built"
-    assert service.mounted and 7 in service._loops
-
-
-def test_the_pedal_is_not_reported_mounted_until_its_tracks_are_known(
-        service, monkeypatch):
-    """kept_slots() reads _tracks once the pedal reads as mounted, so an
-    upload in between would miss an unknown BT.WAV and write over it."""
-    seen = {}
-
-    def occupied_slots():
-        seen.setdefault("mounted", service.mounted)
-        return {7: 1}
-
-    monkeypatch.setattr(pedal, "present", lambda: True)
-    monkeypatch.setattr(pedal, "mount", lambda: None)
-    monkeypatch.setattr(pedal, "clean_temp_files", lambda: None)
-    monkeypatch.setattr(pedal, "occupied_slots", occupied_slots)
-    monkeypatch.setattr(pedal, "has_loop", lambda n: False)
-
-    service.pedal_state = "absent"
-    service._tick_pedal()
-
-    assert seen["mounted"] is False, \
-        "mounted was already true while the track scan was still running"
-    assert service.mounted and service.kept_slots() == {7}
-
-
 # --- what the page lists is what is on the pedal ------------------------------
 
 @pytest.fixture
@@ -359,7 +296,9 @@ def test_removing_a_loop_leaves_a_track_the_database_does_not_know(plugged_in):
     assert plugged_in.snapshot()["tracks"] == [7]
 
     assert plugged_in.delete_loop(7) is True
+    conftest.drain(plugged_in)
 
+    assert not pedal.loop_path(7).exists()
     assert plugged_in.snapshot()["tracks"] == [7], \
         "the backing track dropped out of the snapshot with its loop"
     assert pedal.track_path(7).read_bytes() == b"track"
@@ -389,19 +328,67 @@ def test_a_written_track_is_listed(plugged_in):
     assert plugged_in.snapshot()["tracks"] == [3]
 
 
-def test_a_fill_does_not_write_over_a_track_the_database_does_not_know(
-        plugged_in):
-    """An unknown BT.WAV has no source here to rewrite it from, so a fill
-    skips it the way it skips a loop."""
-    pedal.track_path(1).write_bytes(b"track")
+# --- a change to a slot ends its loop ---------------------------------------
+
+def _staged(slot, h, name="Track"):
+    db.library_add(h, name, 1.0)
+    db.put_slot(slot, h, state="staged")
+    media.staged_path(h).write_bytes(name.encode())
+
+
+def test_writing_a_track_deletes_its_slots_loop(plugged_in):
+    """A loop belongs to the track it was recorded over. Left in place it
+    plays over the new one."""
+    pedal.loop_path(3).write_bytes(b"loop")
     _plug(plugged_in)
-    h = "b" * 20
-    db.library_add(h, "Track", 1.0)
+    _staged(3, "a" * 20)
 
-    plan = plugged_in._plan([h])
+    plugged_in._do_write(3)
 
-    assert plan["assigned"][0]["slot"] == 2, \
-        "the fill took the slot holding an unknown backing track"
+    assert not pedal.loop_path(3).exists(), "the old loop survived a new track"
+    assert plugged_in.snapshot()["loops"] == []
+
+
+def test_clearing_a_track_deletes_its_loop(plugged_in):
+    pedal.track_path(4).write_bytes(b"track")
+    pedal.loop_path(4).write_bytes(b"loop")
+    _plug(plugged_in)
+
+    plugged_in.clear(4)
+    conftest.drain(plugged_in)
+
+    assert not pedal.loop_path(4).exists(), "the loop outlived its track"
+    assert plugged_in.snapshot()["loops"] == []
+
+
+def test_a_swap_deletes_both_loops(plugged_in):
+    _staged(1, "a" * 20, "One")
+    _staged(2, "b" * 20, "Two")
+    for n in (1, 2):
+        pedal.loop_path(n).write_bytes(b"loop")
+    _plug(plugged_in)
+
+    plugged_in.move(1, 2)
+    conftest.drain(plugged_in)
+
+    assert pedal.track_path(1).read_bytes() == b"Two"
+    assert pedal.track_path(2).read_bytes() == b"One"
+    assert not pedal.loop_path(1).exists() and not pedal.loop_path(2).exists(), \
+        "a loop stayed behind under the other slot's track"
+
+
+def test_a_fill_replaces_a_track_the_database_does_not_know(plugged_in):
+    """A fill starts at the first free slot and replaces what is in its run,
+    known to the database or not."""
+    pedal.track_path(2).write_bytes(b"track")
+    _plug(plugged_in)
+    hashes = ["b" * 20, "c" * 20]
+    for h in hashes:
+        db.library_add(h, "Track", 1.0)
+
+    plan = plugged_in._plan(hashes)
+
+    assert [a["slot"] for a in plan["assigned"]] == [1, 2]
 
 
 # --- upload buffers ---------------------------------------------------------

@@ -93,10 +93,10 @@ Each holds up to two files, and they coexist:
 | `BT.WAV` | you | Backing track |
 | `LOOP.WAV` | the pedal | A loop recorded on the pedal |
 
-Writing `LOOP.WAV` would destroy a recording. A slot with both plays the backing
-track with the recorded loop over it, which is the point of the feature. The
-tool reads `LOOP.WAV` for a download and unlinks it on an explicit request, and
-never touches it otherwise.
+A slot with both plays the backing track with the recorded loop over it. The
+loop belongs to the track it was recorded over, so the tool never writes
+`LOOP.WAV`, and deletes it whenever the slot's backing track changes or is
+removed. It also reads one for a download, and deletes one on request.
 
 ---
 

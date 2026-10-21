@@ -578,33 +578,15 @@ def test_a_batch_takes_the_first_slot_with_room(client):
     assert (body["start"], body["end"]) == (2, 3)
 
 
-def test_a_batch_skips_the_devices_own_loop_slots(client, service):
-    """The loop set is scanned at mount and lives only on the device. A client
-    working from a snapshot that can be fifteen seconds old would lose a replug
-    race, so the skip happens here, under the lock that queues the work."""
+def test_a_batch_fills_a_slot_that_holds_only_a_loop(client, service):
+    """A loop alone doesn't make a slot taken. Writing the track ends it."""
     service.pedal_state = "mounted"
     service._loops = frozenset({2})
     hashes = seeds("Autumn Leaves", "Blue Bossa")
 
     body = client.post("/api/slots/assign", json={"hashes": hashes}).get_json()
 
-    assert [a["slot"] for a in body["assigned"]] == [1, 3]
-    assert body["skipped_loops"] == [2]
-    assert (body["start"], body["end"]) == (1, 3), "the range spans the skip"
-    assert body["loops_known"] is True
-    assert db.get_slot(2) is None, "wrote over a loop slot"
-
-
-def test_a_batch_cannot_skip_loops_while_the_pedal_is_absent(client, service):
-    """Loop presence is only knowable mounted, so an unmounted fill says its
-    range is provisional rather than letting a client believe it skipped."""
-    assert service.pedal_state == "absent"
-    hashes = seeds("Autumn Leaves")
-
-    body = client.post("/api/slots/assign", json={"hashes": hashes}).get_json()
-
-    assert body["loops_known"] is False
-    assert body["skipped_loops"] == []
+    assert [a["slot"] for a in body["assigned"]] == [1, 2]
 
 
 def test_a_batch_reports_the_tracks_that_did_not_fit(client):
