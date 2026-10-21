@@ -3,6 +3,7 @@
 import argparse
 import signal
 import sys
+import tempfile
 import threading
 
 from . import config
@@ -18,6 +19,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     service = Service()
+    tempfile.tempdir = str(config.SPOOL)    # made by Service(), via ensure_dirs
 
     # systemd stops us with SIGTERM. Without this the pedal stays mounted, so
     # the next start finds a dirty filesystem.

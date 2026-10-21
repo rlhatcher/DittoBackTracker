@@ -21,6 +21,9 @@ DATA = _abs_path("DITTO_DATA", "/var/lib/ditto")
 SOURCES = DATA / "sources"      # the uploads, by content hash
 STAGED = DATA / "staged"        # converted WAVs, a cache
 DB_PATH = DATA / "state.db"
+# Temp files: waitress and Flask buffer each upload here, about twice its size
+# in all. The default /tmp is RAM under the read-only root, with no swap.
+SPOOL = DATA / "spool"
 
 # Over-the-air self-update: the git checkout the device tracks, and the deployed
 # copy it runs from. Both on the data partition, provisioned once.
@@ -63,5 +66,5 @@ MAX_UPLOAD_BYTES = _max_upload_mb * 1024 * 1024
 
 
 def ensure_dirs() -> None:
-    for d in (SOURCES, STAGED):
+    for d in (SOURCES, STAGED, SPOOL):
         d.mkdir(parents=True, exist_ok=True)
